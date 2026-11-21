@@ -1,0 +1,3 @@
+# Four-parameter Wagner-Traud polarization model
+
+We model single-metal polarization curves and bimetallic galvanic coupling using the four-parameter base-10 activation-controlled Wagner-Traud equation parameterized by $(E_{\text{corr}}, i_{\text{corr}}, \beta_a, \beta_c)$, rather than the reversible single-reaction Butler-Volmer equation $(E_{\text{eq}}, i_0, \alpha)$ or mass-transport-limited models $(i_L)$. Literature datasets for semiconductor wet cleaning consistently report $(E_{\text{corr}}, i_{\text{corr}}, \beta_a, \beta_c)$ from Tafel extrapolation, making this four-tuple the natural seam between the database/ML predictors and the physics solvers (Faraday's law and area-weighted mixed-potential root-finding).

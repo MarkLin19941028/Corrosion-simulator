@@ -1,0 +1,14 @@
+# 01: Multi-Metal Database Harmonization, Normalization & Nearest-Neighbor Lookup
+
+**What to build:** An end-to-end electrochemical database ingestion, normalization, and query workflow covering the eight core semiconductor metals (Cu, Co, W, Ru, Ti, Ta, Al, Mo). The system ingests per-metal raw tables (or falls back cleanly to a built-in seed dataset when raw files are not yet present), inspects and harmonizes their columns, deduplicates material properties by **Metal** and solution properties by unique solution identifier, converts all reference electrode potentials to $\text{V vs. SHE}$ for every **Corrosion Potential ($E_{\text{corr}}$)**, converts all **Corrosion Current Density ($i_{\text{corr}}$)** values to $\mu\text{A/cm}^2$, and normalizes all anodic and cathodic **Tafel Slopes ($\beta_a, \beta_c$)** to positive $\text{mV/dec}$. It filters out records missing $E_{\text{corr}}$ or $i_{\text{corr}}$, imputes missing $\beta_a$ or $\beta_c$ using same-metal/same-oxidizer medians (or physical fallbacks of $60$ and $120\text{ mV/dec}$) while flagging imputed records and decrementing their quality score, builds the per-solution Galvanic Series ranking, outputs a comprehensive data dictionary, provides exact and nearest-neighbor **Exposure Condition** parameter lookup, and demonstrates the full pipeline in an exploratory data cleaning notebook.
+
+**Blocked by:** None (can start immediately)
+
+**Status:** ready-for-agent
+
+- [ ] Raw per-metal tables for Cu, Co, W, Ru, Ti, Ta, Al, and Mo (or seed dataset records) are merged and deduplicated into unified electrochemical, material property, and solution property tables without losing valid records.
+- [ ] All reference electrode potentials (including SHE, Ag/AgCl, SCE, and MSE) are accurately converted to $\text{V vs. SHE}$, all current densities to $\mu\text{A/cm}^2$, and all **Tafel Slopes ($\beta_a, \beta_c$)** to strictly positive $\text{mV/dec}$.
+- [ ] Records missing $E_{\text{corr}}$ or $i_{\text{corr}}$ are excluded, while records missing $\beta_a$ or $\beta_c$ are imputed via same-metal/same-oxidizer medians (or $60 / 120\text{ mV/dec}$ defaults), marked with `is_imputed = True`, and assigned a reduced `quality_score`.
+- [ ] A Galvanic Series dataset ranks metals monotonically by $E_{\text{corr}}$ within each **Solution**, accompanied by a complete human-readable data dictionary documenting every attribute, unit, and quality flag.
+- [ ] Nearest-neighbor **Exposure Condition** query filters by exact **Metal** and oxidizer category, ranks candidates by Min-Max normalized Euclidean distance across pH, oxidizer concentration, and temperature, and returns the matched parameters together with any condition differences.
+- [ ] Automated behavioral tests and the data exploration and cleaning demonstration notebook verify all normalization, imputation, ranking, and lookup behaviors.
