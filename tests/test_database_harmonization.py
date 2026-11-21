@@ -8,6 +8,7 @@ import pandas as pd
 
 from corrosion_simulator.database import (
     CORE_METALS,
+    ExposureCondition,
     ExposureLookupResult,
     HarmonizedDatabase,
     convert_potential_to_she,
@@ -435,10 +436,35 @@ class TestDirectoryIngestionSeedFallbackAndExport(unittest.TestCase):
         db = HarmonizedDatabase.from_directory("data/raw")
         self.assertEqual(set(db.material_properties["metal"]), set(CORE_METALS))
         self.assertEqual(set(db.electrochemical_database["metal"]), set(CORE_METALS))
-        # Raw dataset + seed benchmark should have >150 valid core-metal records
+        # Raw dataset + missing-metal seed records should have >150 valid core-metal records
         self.assertGreater(len(db.electrochemical_database), 150)
         self.assertEqual(db.material_properties["metal"].duplicated().sum(), 0)
         self.assertEqual(db.solution_properties["solution_id"].duplicated().sum(), 0)
+        # Solution is independent of operating temperature per GLOSSARY.md
+        self.assertNotIn("temperature_C", db.solution_properties.columns)
+        # Every column in all 4 tables must have a non-generic data dictionary description
+        self.assertFalse(
+            db.data_dictionary["description"].str.startswith("Harmonized attribute").any()
+        )
+        # Canonical dissolution valence and equivalent weight must be synchronized for Ru (z=4)
+        ru_mat = db.material_properties.set_index("metal").loc["Ru"]
+        self.assertEqual(int(ru_mat["valence"]), 4)
+        self.assertAlmostEqual(float(ru_mat["equivalent_weight_g_eq"]), 101.07 / 4.0, places=3)
+        ru_echem_valences = set(
+            db.electrochemical_database[db.electrochemical_database["metal"] == "Ru"]["valence"]
+        )
+        self.assertEqual(ru_echem_valences, {4})
+        # Verify ExposureCondition object lookup
+        cond_res = db.lookup_exposure_condition(
+            ExposureCondition(
+                metal="Cu",
+                pH=4.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                temperature_C=25.0,
+            )
+        )
+        self.assertTrue(cond_res.is_exact_match)
 
         # Verify monotonic Ecorr_V_SHE ordering within every Solution in galvanic_series
         for _, grp in db.galvanic_series.groupby("solution_id"):

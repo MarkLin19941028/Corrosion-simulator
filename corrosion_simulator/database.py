@@ -82,6 +82,21 @@ _CURRENT_DENSITY_TO_UA_CM2: Final[dict[str, float]] = {
     "ma/m²": 0.1,
 }
 
+# Raw scraping columns that use avoided terminology from GLOSSARY.md
+_RAW_COLUMN_RENAMES: Final[dict[str, str]] = {
+    "electrolyte_additive": "supporting_salt_type",
+    "electrolyte_additive_concentration": "supporting_salt_concentration",
+    "electrolyte_additive_concentration_unit": "supporting_salt_concentration_unit",
+}
+
+_DROPPED_INTERNAL_COLUMNS: Final[set[str]] = {
+    "is_target_metal",
+    "_source_metal",
+    "material_assignment_method",
+    "paper_primary_material",
+    "material_mention_counts",
+}
+
 
 def convert_potential_to_she(
     potential: float,
@@ -156,10 +171,7 @@ def normalize_tafel_slope_to_mV_dec(
     unit_norm = unit_str.strip().lower()
     if unit_norm in ("v/dec", "v/decade", "v dec-1", "v"):
         val *= 1000.0
-    elif unit_norm in ("mv/dec", "mv/decade", "mv dec-1", "mv"):
-        if val <= 1.0:
-            val *= 1000.0
-    else:
+    elif unit_norm not in ("mv/dec", "mv/decade", "mv dec-1", "mv"):
         raise ValueError(f"Unsupported Tafel slope unit: {unit!r}")
     return val
 
@@ -167,6 +179,10 @@ def normalize_tafel_slope_to_mV_dec(
 def _clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = df.copy()
     cleaned.columns = [str(c).lstrip("\ufeff").strip() for c in cleaned.columns]
+    cleaned = cleaned.rename(columns=_RAW_COLUMN_RENAMES)
+    drop_cols = [c for c in _DROPPED_INTERNAL_COLUMNS if c in cleaned.columns]
+    if drop_cols:
+        cleaned = cleaned.drop(columns=drop_cols)
     return cleaned
 
 
@@ -191,6 +207,57 @@ def _coalesce_column(df: pd.DataFrame, candidates: list[str], default: Any = np.
     return result
 
 
+def _normalize_slope_series(
+    df: pd.DataFrame,
+    value_candidates: list[str],
+    specific_unit_col: str,
+) -> list[float]:
+    raw_slopes = pd.to_numeric(_coalesce_column(df, value_candidates), errors="coerce")
+    unit_col = (
+        df[specific_unit_col]
+        if specific_unit_col in df.columns
+        else (
+            df["beta_unit"]
+            if "beta_unit" in df.columns
+            else pd.Series(["mV/dec"] * len(df), index=df.index)
+        )
+    )
+    return [
+        normalize_tafel_slope_to_mV_dec(
+            raw_slopes.loc[idx],
+            str(unit_col.loc[idx]) if not pd.isna(unit_col.loc[idx]) else "mV/dec",
+        )
+        for idx in df.index
+    ]
+
+
+@dataclass(frozen=True)
+class ExposureCondition:
+    """The combination of a specific Metal, a Solution formulation, and an operating Temperature."""
+
+    metal: str
+    pH: float = 7.0
+    oxidizer_type: str = "None"
+    oxidizer_concentration: float = 0.0
+    temperature_C: float = 25.0
+    solution_id: str | None = None
+    solution_name: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "metal": self.metal,
+            "oxidizer_type": self.oxidizer_type,
+            "pH": self.pH,
+            "oxidizer_concentration": self.oxidizer_concentration,
+            "temperature_C": self.temperature_C,
+        }
+        if self.solution_id is not None:
+            payload["solution_id"] = self.solution_id
+        if self.solution_name is not None:
+            payload["solution_name"] = self.solution_name
+        return payload
+
+
 @dataclass(frozen=True)
 class ExposureLookupResult:
     """Result of an exact or nearest-neighbor Exposure Condition database lookup."""
@@ -207,11 +274,19 @@ class ExposureLookupResult:
     quality_score: float
     is_exact_match: bool
     normalized_distance: float
-    query_conditions: dict[str, Any]
-    matched_conditions: dict[str, Any]
+    query_condition: ExposureCondition
+    matched_condition: ExposureCondition
     condition_differences: dict[str, float]
     mismatch_summary: str
     candidates: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+
+    @property
+    def query_conditions(self) -> dict[str, Any]:
+        return self.query_condition.to_dict()
+
+    @property
+    def matched_conditions(self) -> dict[str, Any]:
+        return self.matched_condition.to_dict()
 
 
 @dataclass(frozen=True)
@@ -264,7 +339,6 @@ class HarmonizedDatabase:
             cols = set(df.columns)
             name_lower = csv_path.name.lower()
 
-            # Classify table by its filename and present columns
             has_echem_cols = bool(
                 cols
                 & {
@@ -279,7 +353,6 @@ class HarmonizedDatabase:
                 }
             )
             if has_echem_cols or "electrochemical" in name_lower or "ml_training" in name_lower:
-                # If loaded from a per-metal subdirectory (e.g. data/raw/Cu/table.csv) without a metal column
                 if not (cols & {"metal", "symbol", "material_id"}):
                     parent_name = csv_path.parent.name
                     if parent_name in CORE_METALS:
@@ -321,21 +394,39 @@ class HarmonizedDatabase:
         mat_raw = _clean_column_names(material_df) if material_df is not None else pd.DataFrame()
         sol_raw = _clean_column_names(solution_df) if solution_df is not None else pd.DataFrame()
 
-        if supplement_missing_core_metals or echem_raw.empty:
+        if echem_raw.empty:
             seed_echem, seed_mat, seed_sol = build_seed_tables()
-            if echem_raw.empty:
-                echem_raw = seed_echem
-            else:
-                echem_raw = pd.concat([echem_raw, seed_echem], ignore_index=True)
+            echem_raw = seed_echem
             mat_raw = pd.concat([mat_raw, seed_mat], ignore_index=True)
             sol_raw = pd.concat([sol_raw, seed_sol], ignore_index=True)
+        elif supplement_missing_core_metals:
+            # Determine which of the 8 core metals lack valid (Ecorr, icorr) records in echem_raw
+            prelim_mat = cls._harmonize_materials(mat_raw, echem_raw, filter_to_core_metals=filter_to_core_metals)
+            prelim_sol, prelim_echem_sol = cls._harmonize_solutions(sol_raw, echem_raw)
+            prelim_valid = cls._harmonize_electrochemical_records(
+                prelim_echem_sol,
+                prelim_mat,
+                prelim_sol,
+                filter_to_core_metals=filter_to_core_metals,
+            )
+            present_metals = set(prelim_valid["metal"].unique()) if not prelim_valid.empty else set()
+            missing_metals = [m for m in CORE_METALS if m not in present_metals]
+            if missing_metals:
+                seed_echem, seed_mat, seed_sol = build_seed_tables()
+                seed_echem_sub = seed_echem[seed_echem["metal"].isin(missing_metals)].copy()
+                seed_sol_ids = set(seed_echem_sub["solution_id"].unique())
+                seed_sol_sub = seed_sol[seed_sol["solution_id"].isin(seed_sol_ids)].copy()
+                seed_mat_sub = seed_mat[seed_mat["metal"].isin(missing_metals)].copy()
+                echem_raw = pd.concat([echem_raw, seed_echem_sub], ignore_index=True)
+                mat_raw = pd.concat([mat_raw, seed_mat_sub], ignore_index=True)
+                sol_raw = pd.concat([sol_raw, seed_sol_sub], ignore_index=True)
 
         # 1. Harmonize Material Properties (deduplicated by Metal)
         harmonized_materials = cls._harmonize_materials(
             mat_raw, echem_raw, filter_to_core_metals=filter_to_core_metals
         )
 
-        # 2. Harmonize Solution Properties (deduplicated by solution_id)
+        # 2. Harmonize Solution Properties (deduplicated by solution_id, independent of temperature)
         harmonized_solutions, echem_with_sol = cls._harmonize_solutions(sol_raw, echem_raw)
 
         # 3. Harmonize Electrochemical Records (potentials -> V vs. SHE, currents -> uA/cm2, slopes -> +mV/dec)
@@ -417,7 +508,9 @@ class HarmonizedDatabase:
         frames.append(seed_mat_df)
         combined = pd.concat(frames, ignore_index=True)
         combined["metal"] = combined["metal"].astype(str).str.strip()
-        combined = combined[combined["metal"].notna() & (combined["metal"] != "") & (combined["metal"] != "nan")]
+        combined = combined[
+            combined["metal"].notna() & (combined["metal"] != "") & (combined["metal"] != "nan")
+        ]
 
         if filter_to_core_metals:
             combined = combined[combined["metal"].isin(CORE_METALS)]
@@ -426,8 +519,15 @@ class HarmonizedDatabase:
         deduped = combined.groupby("metal", as_index=False, sort=False).first()
         deduped["symbol"] = deduped["metal"]
         deduped["material_id"] = deduped["metal"]
-        # Enforce canonical Dissolution Valence (z) from GLOSSARY.md for the 8 core metals
-        deduped["valence"] = deduped["metal"].map(DEFAULT_DISSOLUTION_VALENCE).fillna(deduped.get("valence", 2)).astype(int)
+        # Enforce canonical Dissolution Valence (z) from GLOSSARY.md and recompute equivalent_weight_g_eq
+        deduped["valence"] = (
+            deduped["metal"]
+            .map(DEFAULT_DISSOLUTION_VALENCE)
+            .fillna(deduped.get("valence", 2))
+            .astype(int)
+        )
+        molar_mass = pd.to_numeric(deduped["molar_mass_g_mol"], errors="coerce")
+        deduped["equivalent_weight_g_eq"] = (molar_mass / deduped["valence"]).round(4)
         return deduped.reset_index(drop=True)
 
     @staticmethod
@@ -439,10 +539,14 @@ class HarmonizedDatabase:
         if "solution_id" not in echem.columns:
             echem["solution_id"] = np.nan
 
-        # Ensure every echem row has a deterministic solution_id
         def _derive_sol_id(row: pd.Series) -> str:
             sid = row.get("solution_id")
-            if sid is not None and not pd.isna(sid) and str(sid).strip() and str(sid).strip().lower() != "nan":
+            if (
+                sid is not None
+                and not pd.isna(sid)
+                and str(sid).strip()
+                and str(sid).strip().lower() != "nan"
+            ):
                 return str(sid).strip()
             key = "|".join(
                 str(row.get(k, ""))
@@ -462,13 +566,13 @@ class HarmonizedDatabase:
 
         echem["solution_id"] = echem.apply(_derive_sol_id, axis=1)
 
+        # Per GLOSSARY.md, a Solution is defined by its chemical components and pH, independent of operating temperature
         sol_cols = [
             "solution_id",
             "solution_name",
             "solution_category",
             "base_solvent",
             "pH",
-            "temperature_C",
             "oxidizer_type",
             "oxidizer_concentration",
             "oxidizer_concentration_unit",
@@ -485,16 +589,26 @@ class HarmonizedDatabase:
             "inhibitor_type",
             "inhibitor_concentration",
             "inhibitor_concentration_unit",
-            "electrolyte_additive",
-            "electrolyte_additive_concentration",
-            "electrolyte_additive_concentration_unit",
+            "organic_solvent_type",
+            "organic_solvent_concentration",
+            "supporting_salt_type",
+            "supporting_salt_concentration",
+            "supporting_salt_concentration_unit",
+            "dissolved_oxygen_ppm",
+            "conductivity_mS_cm",
+            "ionic_strength_mol_L",
             "ORP_mV",
             "deaerated",
+            "materials",
+            "source",
+            "notes",
         ]
 
         frames: list[pd.DataFrame] = []
         if not sol_raw.empty:
             s_df = sol_raw.copy()
+            if "temperature_C" in s_df.columns:
+                s_df = s_df.drop(columns=["temperature_C"])
             s_df = s_df[s_df["solution_id"].notna()]
             s_df["solution_id"] = s_df["solution_id"].astype(str).str.strip()
             frames.append(s_df)
@@ -509,7 +623,18 @@ class HarmonizedDatabase:
             frames.append(e_sol)
 
         if not frames:
-            return pd.DataFrame(columns=["solution_id", "solution_name", "pH", "oxidizer_type", "oxidizer_concentration"]), echem
+            return (
+                pd.DataFrame(
+                    columns=[
+                        "solution_id",
+                        "solution_name",
+                        "pH",
+                        "oxidizer_type",
+                        "oxidizer_concentration",
+                    ]
+                ),
+                echem,
+            )
 
         combined = pd.concat(frames, ignore_index=True)
         combined["solution_id"] = combined["solution_id"].astype(str).str.strip()
@@ -551,16 +676,25 @@ class HarmonizedDatabase:
             df["record_id"] = [f"REC_{i + 1:05d}" for i in range(len(df))]
         else:
             missing_id = df["record_id"].isna() | (df["record_id"].astype(str).str.strip() == "")
-            df.loc[missing_id, "record_id"] = [f"REC_AUTO_{i + 1:05d}" for i in range(int(missing_id.sum()))]
+            df.loc[missing_id, "record_id"] = [
+                f"REC_AUTO_{i + 1:05d}" for i in range(int(missing_id.sum()))
+            ]
 
         # Join solution attributes if missing on echem rows
         sol_lookup = solutions.set_index("solution_id") if not solutions.empty else pd.DataFrame()
-        for col in ("pH", "oxidizer_type", "oxidizer_concentration", "temperature_C", "solution_name"):
+        for col in ("pH", "oxidizer_type", "oxidizer_concentration", "solution_name"):
             if col not in df.columns:
                 df[col] = np.nan
             if not sol_lookup.empty and col in sol_lookup.columns:
                 mapped = df["solution_id"].map(sol_lookup[col])
                 df[col] = df[col].where(df[col].notna(), mapped)
+
+        # Synchronize canonical material properties (including valence and equivalent_weight_g_eq) onto echem records
+        if not materials.empty:
+            mat_lookup = materials.set_index("metal")
+            for col in ("valence", "equivalent_weight_g_eq", "density_g_cm3", "molar_mass_g_mol"):
+                if col in mat_lookup.columns:
+                    df[col] = df["metal"].map(mat_lookup[col])
 
         if "pH_effective" in df.columns:
             df["pH"] = pd.to_numeric(df["pH"], errors="coerce").fillna(
@@ -608,7 +742,12 @@ class HarmonizedDatabase:
             unit_val = ecorr_unit_col.loc[idx]
             ph_val = df.loc[idx, "pH"]
 
-            if not pd.isna(orig_val) and ref_val is not None and not pd.isna(ref_val) and str(ref_val).strip():
+            if (
+                not pd.isna(orig_val)
+                and ref_val is not None
+                and not pd.isna(ref_val)
+                and str(ref_val).strip()
+            ):
                 try:
                     converted_ecorr.append(
                         convert_potential_to_she(
@@ -642,6 +781,11 @@ class HarmonizedDatabase:
             if "log_icorr" in df.columns
             else pd.Series([np.nan] * len(df), index=df.index)
         )
+        log_icorr_unit_col = (
+            df["log_icorr_unit"]
+            if "log_icorr_unit" in df.columns
+            else pd.Series(["A/cm2"] * len(df), index=df.index)
+        )
 
         normalized_icorr: list[float] = []
         for idx in df.index:
@@ -653,50 +797,37 @@ class HarmonizedDatabase:
                     str(ic_unit) if not pd.isna(ic_unit) else "uA/cm2",
                 )
             elif not pd.isna(raw_log_icorr.loc[idx]):
-                # Raw log_icorr in A/cm2 if negative <= -2, otherwise log10(uA/cm2)
                 lv = float(raw_log_icorr.loc[idx])
-                norm_val = (10.0 ** (lv + 6.0)) if lv < -2.5 else (10.0**lv)
+                log_unit = (
+                    str(log_icorr_unit_col.loc[idx])
+                    if not pd.isna(log_icorr_unit_col.loc[idx])
+                    else "A/cm2"
+                )
+                norm_val = normalize_current_density_to_uA_cm2(10.0**lv, log_unit)
             else:
                 norm_val = float("nan")
-            normalized_icorr.append(norm_val if (not math.isnan(norm_val) and norm_val > 0.0) else float("nan"))
+            normalized_icorr.append(
+                norm_val if (not math.isnan(norm_val) and norm_val > 0.0) else float("nan")
+            )
 
         df["icorr_uA_cm2"] = normalized_icorr
 
         # Filter out records missing Ecorr or icorr
-        df = df[df["Ecorr_V_SHE"].notna() & df["icorr_uA_cm2"].notna() & (df["icorr_uA_cm2"] > 0.0)].copy()
+        df = df[
+            df["Ecorr_V_SHE"].notna() & df["icorr_uA_cm2"].notna() & (df["icorr_uA_cm2"] > 0.0)
+        ].copy()
         if df.empty:
             return df
 
         df["log10_icorr_uA_cm2"] = np.log10(df["icorr_uA_cm2"])
 
         # Normalize Tafel slopes to positive mV/dec
-        raw_ba = pd.to_numeric(_coalesce_column(df, ["beta_a_mV_dec", "beta_a"]), errors="coerce")
-        raw_bc = pd.to_numeric(_coalesce_column(df, ["beta_c_mV_dec", "beta_c"]), errors="coerce")
-        ba_unit_col = (
-            df["beta_a_unit"]
-            if "beta_a_unit" in df.columns
-            else (df["beta_unit"] if "beta_unit" in df.columns else pd.Series(["mV/dec"] * len(df), index=df.index))
+        df["beta_a_mV_dec"] = _normalize_slope_series(
+            df, ["beta_a_mV_dec", "beta_a"], "beta_a_unit"
         )
-        bc_unit_col = (
-            df["beta_c_unit"]
-            if "beta_c_unit" in df.columns
-            else (df["beta_unit"] if "beta_unit" in df.columns else pd.Series(["mV/dec"] * len(df), index=df.index))
+        df["beta_c_mV_dec"] = _normalize_slope_series(
+            df, ["beta_c_mV_dec", "beta_c"], "beta_c_unit"
         )
-
-        df["beta_a_mV_dec"] = [
-            normalize_tafel_slope_to_mV_dec(
-                raw_ba.loc[idx],
-                str(ba_unit_col.loc[idx]) if not pd.isna(ba_unit_col.loc[idx]) else "mV/dec",
-            )
-            for idx in df.index
-        ]
-        df["beta_c_mV_dec"] = [
-            normalize_tafel_slope_to_mV_dec(
-                raw_bc.loc[idx],
-                str(bc_unit_col.loc[idx]) if not pd.isna(bc_unit_col.loc[idx]) else "mV/dec",
-            )
-            for idx in df.index
-        ]
 
         # Deduplicate exact duplicate records before computing group medians
         df = df.drop_duplicates(
@@ -711,11 +842,19 @@ class HarmonizedDatabase:
         df["beta_c_imputed"] = bc_missing
         df["is_imputed"] = ba_missing | bc_missing
 
-        group_ba_medians = df.groupby(["metal", "oxidizer_type"])["beta_a_mV_dec"].transform("median")
-        group_bc_medians = df.groupby(["metal", "oxidizer_type"])["beta_c_mV_dec"].transform("median")
+        group_ba_medians = df.groupby(["metal", "oxidizer_type"])["beta_a_mV_dec"].transform(
+            "median"
+        )
+        group_bc_medians = df.groupby(["metal", "oxidizer_type"])["beta_c_mV_dec"].transform(
+            "median"
+        )
 
-        df["beta_a_mV_dec"] = df["beta_a_mV_dec"].fillna(group_ba_medians).fillna(DEFAULT_BETA_A_MV_DEC)
-        df["beta_c_mV_dec"] = df["beta_c_mV_dec"].fillna(group_bc_medians).fillna(DEFAULT_BETA_C_MV_DEC)
+        df["beta_a_mV_dec"] = (
+            df["beta_a_mV_dec"].fillna(group_ba_medians).fillna(DEFAULT_BETA_A_MV_DEC)
+        )
+        df["beta_c_mV_dec"] = (
+            df["beta_c_mV_dec"].fillna(group_bc_medians).fillna(DEFAULT_BETA_C_MV_DEC)
+        )
 
         # Quality score calculation & imputation decrement
         base_quality = pd.to_numeric(
@@ -771,10 +910,7 @@ class HarmonizedDatabase:
             .reset_index(drop=True)
         )
 
-        # Rank 1 = most active (lowest Ecorr_V_SHE) within each solution_id
-        grouped["galvanic_rank"] = (
-            grouped.groupby("solution_id").cumcount() + 1
-        )
+        grouped["galvanic_rank"] = grouped.groupby("solution_id").cumcount() + 1
         grouped["metals_in_solution"] = grouped.groupby("solution_id")["metal"].transform("count")
 
         def _classify_nobility(row: pd.Series) -> str:
@@ -805,43 +941,88 @@ class HarmonizedDatabase:
             "symbol": ("categorical", "dimensionless", "Chemical symbol of the Metal."),
             "material_name": ("text", "dimensionless", "Full English name of the Metal."),
             "category": ("categorical", "dimensionless", "Semiconductor film functional category (metal, barrier, liner)."),
+            "sample_name": ("text", "dimensionless", "Original experimental sample or specimen designation reported in the source publication."),
+            "metal_form": ("categorical", "dimensionless", "Physical morphology or deposition form of the Metal (thin film, PVD, ALD, bulk, foil, rod)."),
+            "surface_preparation": ("text", "dimensionless", "Pre-exposure surface conditioning or polishing treatment (e.g., CMP, mechanical polish, annealed)."),
             "solution_id": ("identifier", "dimensionless", "Unique Solution formulation identifier."),
             "solution_name": ("text", "dimensionless", "Human-readable chemical formulation summary for the Solution."),
+            "solution_description": ("text", "dimensionless", "Raw text description of the Solution composition from the literature source."),
             "solution_category": ("categorical", "dimensionless", "pH regime category of the Solution (acidic, neutral, alkaline, etc.)."),
+            "materials": ("text", "dimensionless", "Semicolon-delimited list of Metals evaluated with this Solution."),
             "base_solvent": ("categorical", "dimensionless", "Primary liquid solvent (typically DI water)."),
             "pH": ("numeric", "pH units", "Hydrogen ion activity (-log10[H+]) of the Solution."),
+            "pH_effective": ("numeric", "pH units", "Effective pH used for thermodynamic calculations (measured or inferred from acid/base molarity)."),
+            "pH_source": ("categorical", "dimensionless", "Provenance of pH_effective (measured_echem, inferred_strong_acid, inferred_neutral, etc.)."),
             "temperature_C": ("numeric", "°C", "Operating temperature of the Exposure Condition in degrees Celsius."),
             "reference_electrode": ("categorical", "dimensionless", "Original experimental reference electrode before conversion to SHE."),
             "Ecorr_V_original": ("numeric", "V vs. ref", "Originally reported open-circuit Corrosion Potential prior to SHE conversion."),
+            "Ecorr_unit": ("categorical", "unit string", "Original potential unit (V or mV) prior to conversion to V vs. SHE."),
             "Ecorr_V_SHE": ("numeric", "V vs. SHE", "Standardized Corrosion Potential (E_corr) converted to Volts vs. Standard Hydrogen Electrode."),
             "icorr_uA_cm2": ("numeric", "µA/cm²", "Standardized Corrosion Current Density (i_corr) at E_corr in microamperes per square centimeter."),
-            "log10_icorr_uA_cm2": ("numeric", "log10(µA/cm²)", "Base-10 logarithm of standardized Corrosion Current Density i_corr."),
+            "icorr_unit": ("categorical", "unit string", "Original current density unit prior to normalization to µA/cm²."),
+            "log_icorr": ("numeric", "log10(A/cm²)", "Raw base-10 logarithm of corrosion current density in A/cm² from literature compilation."),
+            "log_icorr_unit": ("categorical", "unit string", "Current density unit underlying raw log_icorr (default A/cm²)."),
+            "log10_icorr_uA_cm2": ("numeric", "log10(µA/cm²)", "Base-10 logarithm of standardized Corrosion Current Density i_corr in µA/cm²."),
             "beta_a_mV_dec": ("numeric", "mV/dec", "Strictly positive anodic Tafel Slope (beta_a) in millivolts per decade of current density."),
             "beta_c_mV_dec": ("numeric", "mV/dec", "Strictly positive cathodic Tafel Slope (beta_c) in millivolts per decade of current density."),
+            "beta_a_unit": ("categorical", "unit string", "Original unit for anodic Tafel slope prior to mV/dec normalization."),
+            "beta_c_unit": ("categorical", "unit string", "Original unit for cathodic Tafel slope prior to mV/dec normalization."),
+            "beta_unit": ("categorical", "unit string", "Original unit for Tafel slopes prior to mV/dec normalization."),
+            "tafel_slopes_general": ("text", "mV/dec", "Unassigned or general Tafel slope values extracted from literature text."),
             "beta_a_imputed": ("boolean_flag", "boolean", "True if anodic Tafel slope beta_a was missing and imputed via group median or 60 mV/dec fallback."),
             "beta_c_imputed": ("boolean_flag", "boolean", "True if cathodic Tafel slope beta_c was missing and imputed via group median or 120 mV/dec fallback."),
             "is_imputed": ("boolean_flag", "boolean", "Quality flag indicating whether either Tafel slope (beta_a or beta_c) was imputed."),
+            "Rp_ohm_cm2": ("numeric", "Ω·cm²", "Linear polarization resistance (R_p) in ohm-square centimeters."),
+            "Rp_unit": ("categorical", "unit string", "Reported physical unit for linear polarization resistance R_p."),
+            "CR_reported_value": ("numeric", "reported unit", "Corrosion Rate value as originally reported in the source publication."),
+            "CR_reported_unit": ("categorical", "unit string", "Physical unit for CR_reported_value (e.g., nm/min, mm/year, Å/min)."),
+            "CR_calculated_nm_min": ("numeric", "nm/min", "Faraday-derived Corrosion Rate in nanometers per minute."),
+            "measurement_method": ("text", "dimensionless", "Experimental electrochemical or analytical measurement techniques (potentiodynamic, EIS, LPR, ICP-MS)."),
+            "scan_rate": ("text", "mV/s", "Potentiodynamic polarization potential sweep rate."),
+            "immersion_time": ("text", "time unit", "Experimental immersion or pre-conditioning duration reported in the study."),
+            "aeration_condition": ("categorical", "dimensionless", "Dissolved gas saturation state during testing (aerated, deaerated, N2/Ar purged)."),
+            "reaction_type": ("categorical", "dimensionless", "Primary electrochemical process classification (corrosion, passivity, etching)."),
+            "reactions": ("text", "dimensionless", "Half-cell reactions active under the Exposure Condition (HER, ORR, OER, metal dissolution)."),
+            "source_type": ("categorical", "dimensionless", "Literature or benchmark source classification (journal, seed_benchmark)."),
+            "source_reference": ("text", "DOI / ID", "Publication DOI, table row identifier, or benchmark reference string."),
+            "source": ("text", "DOI / ID", "Aggregated publication DOI and table row provenance identifiers."),
+            "data_extraction_method": ("categorical", "dimensionless", "Ingestion extraction pipeline method (table_column_mapped, regex, manual_curation)."),
             "quality_score": ("quality_metric", "score [0, 1]", "Data reliability score in [0, 1], automatically decremented when is_imputed is True."),
             "data_quality_score": ("quality_metric", "score [0, 1]", "Raw ingestion data quality score prior to imputation penalty."),
+            "quality_notes": ("text", "dimensionless", "Automated ingestion audit notes regarding unit inference or missing metadata."),
+            "notes": ("text", "dimensionless", "Curator annotations or supplementary notes."),
             "oxidizer_type": ("categorical", "dimensionless", "Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."),
             "oxidizer_concentration": ("numeric", "wt% or M", "Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None)."),
             "oxidizer_concentration_unit": ("categorical", "unit string", "Concentration unit for oxidizer_concentration (e.g., wt%, M, mM)."),
-            "acid_type": ("categorical", "dimensionless", "Acid component in the Solution formulation."),
+            "acid_type": ("categorical", "dimensionless", "Acid component in the Solution formulation (e.g., H2SO4, HCl, HF, HClO4, citric acid)."),
             "acid_concentration": ("numeric", "M or wt%", "Concentration of the acid component."),
             "acid_concentration_unit": ("categorical", "unit string", "Concentration unit for acid_concentration."),
+            "base_type": ("categorical", "dimensionless", "Alkaline base component in the Solution formulation (e.g., KOH, NaOH, TMAH)."),
+            "base_concentration": ("numeric", "M or wt%", "Concentration of the alkaline base component."),
+            "base_concentration_unit": ("categorical", "unit string", "Concentration unit for base_concentration."),
+            "HF_concentration_wt_pct": ("numeric", "wt%", "Hydrofluoric acid (HF) weight percent concentration in the Solution."),
             "chelating_agent_type": ("categorical", "dimensionless", "Complexing or chelating agent (e.g., citric acid, glycine, oxalic acid, EDTA)."),
             "chelating_agent_concentration": ("numeric", "mM or wt%", "Concentration of the complexing/chelating agent."),
             "chelating_agent_concentration_unit": ("categorical", "unit string", "Concentration unit for chelating_agent_concentration."),
             "inhibitor_type": ("categorical", "dimensionless", "Corrosion inhibitor chemical species (e.g., BTA)."),
             "inhibitor_concentration": ("numeric", "mM or wt%", "Concentration of the corrosion inhibitor."),
             "inhibitor_concentration_unit": ("categorical", "unit string", "Concentration unit for inhibitor_concentration."),
-            "ORP_mV": ("numeric", "mV", "Solution Oxidation-Reduction Potential."),
+            "organic_solvent_type": ("categorical", "dimensionless", "Co-solvent organic species in the Solution (e.g., ethylene glycol, IPA)."),
+            "organic_solvent_concentration": ("numeric", "wt% or mM", "Concentration of the organic co-solvent."),
+            "supporting_salt_type": ("categorical", "dimensionless", "Supporting ionic salt species in the Solution (e.g., NaCl, Na2SO4, KNO3, KCl)."),
+            "supporting_salt_concentration": ("numeric", "M or wt%", "Concentration of the supporting ionic salt."),
+            "supporting_salt_concentration_unit": ("categorical", "unit string", "Concentration unit for supporting_salt_concentration."),
+            "dissolved_oxygen_ppm": ("numeric", "ppm", "Dissolved oxygen concentration in parts per million."),
+            "conductivity_mS_cm": ("numeric", "mS/cm", "Ionic electrical conductivity of the Solution in millisiemens per centimeter."),
+            "ionic_strength_mol_L": ("numeric", "mol/L", "Total molar ionic strength of the Solution."),
+            "ORP_mV": ("numeric", "mV", "Solution Oxidation-Reduction Potential in millivolts."),
+            "deaerated": ("boolean_flag", "boolean", "True if the Solution was explicitly purged of dissolved oxygen prior to measurement."),
             "density_g_cm3": ("numeric", "g/cm³", "Bulk mass density of the Metal film."),
             "molar_mass_g_mol": ("numeric", "g/mol", "Atomic or molar mass of the Metal."),
             "valence": ("numeric", "e⁻/atom", "Dissolution Valence (z): electrons transferred per dissolved Metal atom in Faraday's law."),
-            "equivalent_weight_g_eq": ("numeric", "g/eq", "Electrochemical equivalent weight (molar_mass / valence)."),
+            "equivalent_weight_g_eq": ("numeric", "g/eq", "Electrochemical equivalent weight (molar_mass_g_mol / valence)."),
             "standard_potential_V_SHE": ("numeric", "V vs. SHE", "Standard reduction potential E° of the Metal in V vs. SHE."),
-            "melting_point_C": ("numeric", "°C", "Melting temperature of the Metal at 1 atm."),
+            "melting_point_C": ("numeric", "°C", "Melting temperature of the Metal at 1 atm in degrees Celsius."),
             "electronegativity_pauling": ("numeric", "Pauling scale", "Pauling electronegativity of the Metal."),
             "work_function_eV": ("numeric", "eV", "Electronic work function of the Metal surface in electron-volts."),
             "oxide_type": ("text", "chemical formula", "Primary surface oxide formulas formed on the Metal."),
@@ -853,6 +1034,28 @@ class HarmonizedDatabase:
             "thermal_conductivity_W_mK": ("numeric", "W/(m·K)", "Bulk thermal conductivity of the Metal."),
             "electrical_resistivity_ohm_cm": ("numeric", "Ω·cm", "Bulk electrical resistivity of the Metal."),
             "common_corrosion_products": ("text", "chemical species", "Typical dissolved ionic or solid corrosion products."),
+            "base_element": ("categorical", "dimensionless", "Primary metallic element symbol for elemental descriptor lookup."),
+            "elem_atomic_number": ("numeric", "atomic number Z", "Atomic number (proton count) of the Metal element."),
+            "elem_atomic_mass": ("numeric", "g/mol", "Standard atomic weight of the Metal element."),
+            "elem_pauling_en": ("numeric", "Pauling scale", "Elemental Pauling electronegativity."),
+            "elem_work_function_eV": ("numeric", "eV", "Polycrystalline elemental electronic work function in electron-volts."),
+            "elem_standard_potential_V_SHE": ("numeric", "V vs. SHE", "Elemental standard reduction potential in V vs. SHE."),
+            "elem_melting_point_K": ("numeric", "K", "Elemental melting temperature in Kelvin."),
+            "elem_molar_volume_cm3": ("numeric", "cm³/mol", "Elemental molar volume in cubic centimeters per mole."),
+            "mp_material_id": ("identifier", "Materials Project ID", "Materials Project crystal structure identifier."),
+            "mp_work_function_eV": ("numeric", "eV", "DFT-computed surface work function from Materials Project in electron-volts."),
+            "mp_surface_energy_J_m2": ("numeric", "J/m²", "DFT-computed cleavage/surface energy in Joules per square meter."),
+            "mp_formation_energy_eV_atom": ("numeric", "eV/atom", "DFT-computed formation enthalpy per atom in electron-volts."),
+            "mp_band_gap_eV": ("numeric", "eV", "Electronic band gap energy in electron-volts (0.0 eV for metallic conductors)."),
+            "thermo_E_onset_V_SHE": ("numeric", "V vs. SHE", "Thermodynamic Pourbaix anodic dissolution or oxidation onset potential in V vs. SHE."),
+            "thermo_corrosion_regime": ("categorical", "Pourbaix regime", "Thermodynamic Pourbaix stability regime (immunity, corrosion, passivation)."),
+            "thermo_stable_phase": ("text", "chemical phase", "Thermodynamically favored aqueous ion or solid oxide phase at the Exposure Condition."),
+            "thermo_source": ("categorical", "dimensionless", "Provenance of the Pourbaix thermodynamic assessment (e.g., mp_pourbaix)."),
+            "mp_pourbaix_E_onset_V_SHE": ("numeric", "V vs. SHE", "Materials Project Pourbaix oxidation onset potential at pH_effective in V vs. SHE."),
+            "mp_stable_phase_at_Ecorr": ("text", "chemical phase", "Materials Project Pourbaix stable phase evaluated at (pH_effective, Ecorr_V_SHE)."),
+            "mp_corrosion_regime": ("categorical", "Pourbaix regime", "Materials Project Pourbaix stability classification at Ecorr_V_SHE (immunity, corrosion, passivation)."),
+            "mp_delta_G_pbx_eV_atom": ("numeric", "eV/atom", "Pourbaix decomposition free energy (driving force above convex hull) at Ecorr_V_SHE in eV/atom."),
+            "delta_E_overpotential_V": ("numeric", "V", "Anodic overpotential above thermodynamic oxidation onset (Ecorr_V_SHE - thermo_E_onset_V_SHE) in Volts."),
             "galvanic_rank": ("numeric", "integer rank (1..N)", "Monotonic Galvanic Series rank within a Solution (1 = most Active Metal, N = most Noble Metal)."),
             "metals_in_solution": ("numeric", "count", "Total distinct Metals evaluated in that Solution within the Galvanic Series."),
             "relative_nobility": ("categorical", "role label", "Qualitative galvanic role within the Solution (Most Active, Intermediate, Most Noble)."),
@@ -914,7 +1117,7 @@ class HarmonizedDatabase:
 
     def lookup_exposure_condition(
         self,
-        metal: str,
+        metal: str | ExposureCondition,
         *,
         pH: float = 7.0,
         oxidizer_type: str | None = None,
@@ -929,25 +1132,42 @@ class HarmonizedDatabase:
         ``(pH, oxidizer_concentration, temperature_C)``.
         """
         if self.electrochemical_database.empty:
-            raise ValueError("Cannot lookup Exposure Condition on an empty electrochemical database.")
+            raise ValueError(
+                "Cannot lookup Exposure Condition on an empty electrochemical database."
+            )
 
-        metal_norm = str(metal).strip()
-        ox_norm = _normalize_oxidizer_label(oxidizer_type)
-        ox_conc = 0.0 if ox_norm == "None" else float(oxidizer_concentration)
-        ph_query = float(pH)
-        temp_query = float(temperature_C)
+        if isinstance(metal, ExposureCondition):
+            metal_norm = str(metal.metal).strip()
+            ox_norm = _normalize_oxidizer_label(metal.oxidizer_type)
+            ox_conc = 0.0 if ox_norm == "None" else float(metal.oxidizer_concentration)
+            ph_query = float(metal.pH)
+            temp_query = float(metal.temperature_C)
+        else:
+            metal_norm = str(metal).strip()
+            ox_norm = _normalize_oxidizer_label(oxidizer_type)
+            ox_conc = 0.0 if ox_norm == "None" else float(oxidizer_concentration)
+            ph_query = float(pH)
+            temp_query = float(temperature_C)
+
+        query_cond = ExposureCondition(
+            metal=metal_norm,
+            pH=ph_query,
+            oxidizer_type=ox_norm,
+            oxidizer_concentration=ox_conc,
+            temperature_C=temp_query,
+        )
 
         df = self.electrochemical_database
         metal_subset = df[df["metal"].str.lower() == metal_norm.lower()]
         if metal_subset.empty:
-            raise ValueError(f"No records found for Metal {metal!r}.")
+            raise ValueError(f"No records found for Metal {metal_norm!r}.")
 
         candidates = metal_subset[
             metal_subset["oxidizer_type"].str.lower() == ox_norm.lower()
         ].copy()
         if candidates.empty:
             raise ValueError(
-                f"No records found for Metal {metal!r} with oxidizer_type {ox_norm!r}."
+                f"No records found for Metal {metal_norm!r} with oxidizer_type {ox_norm!r}."
             )
 
         num_features = [
@@ -965,7 +1185,6 @@ class HarmonizedDatabase:
             if span > 1e-12:
                 norm_delta = (col_vals - q_val) / span
             else:
-                # Single unique value in candidate pool: 0 if exact match, else scale by global span or 1.0
                 global_vals = df[col].to_numpy(dtype=float)
                 g_span = float(np.max(global_vals) - np.min(global_vals))
                 scale = g_span if g_span > 1e-12 else 1.0
@@ -1008,7 +1227,9 @@ class HarmonizedDatabase:
         else:
             parts: list[str] = []
             if abs(diff_ph) > 1e-9:
-                parts.append(f"ΔpH = {diff_ph:+.2f} (matched {matched_ph:.2f} vs query {ph_query:.2f})")
+                parts.append(
+                    f"ΔpH = {diff_ph:+.2f} (matched {matched_ph:.2f} vs query {ph_query:.2f})"
+                )
             if abs(diff_conc) > 1e-9:
                 parts.append(
                     f"Δoxidizer_concentration = {diff_conc:+.3g} "
@@ -1020,6 +1241,16 @@ class HarmonizedDatabase:
                     f"(matched {matched_temp:.1f} vs query {temp_query:.1f} °C)"
                 )
             summary = "Nearest-neighbor match (" + "; ".join(parts) + f"; distance={dist:.4f})."
+
+        matched_cond = ExposureCondition(
+            metal=str(best["metal"]),
+            pH=matched_ph,
+            oxidizer_type=str(best["oxidizer_type"]),
+            oxidizer_concentration=matched_conc,
+            temperature_C=matched_temp,
+            solution_id=str(best["solution_id"]),
+            solution_name=str(best.get("solution_name", "")),
+        )
 
         return ExposureLookupResult(
             record_id=str(best["record_id"]),
@@ -1034,22 +1265,8 @@ class HarmonizedDatabase:
             quality_score=float(best["quality_score"]),
             is_exact_match=is_exact,
             normalized_distance=0.0 if is_exact else dist,
-            query_conditions={
-                "metal": metal_norm,
-                "oxidizer_type": ox_norm,
-                "pH": ph_query,
-                "oxidizer_concentration": ox_conc,
-                "temperature_C": temp_query,
-            },
-            matched_conditions={
-                "metal": str(best["metal"]),
-                "oxidizer_type": str(best["oxidizer_type"]),
-                "pH": matched_ph,
-                "oxidizer_concentration": matched_conc,
-                "temperature_C": matched_temp,
-                "solution_id": str(best["solution_id"]),
-                "solution_name": str(best.get("solution_name", "")),
-            },
+            query_condition=query_cond,
+            matched_condition=matched_cond,
             condition_differences=condition_diffs,
             mismatch_summary=summary,
             candidates=candidates.head(max(1, int(top_k))).copy(),
