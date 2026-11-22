@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,8 +14,10 @@ from plotly.subplots import make_subplots
 
 from corrosion_simulator.database import (
     CORE_METALS,
+    ExposureCondition,
     ExposureLookupResult,
     HarmonizedDatabase,
+    normalize_category_label,
 )
 from corrosion_simulator.galvanic import (
     GalvanicCouplingResult,
@@ -824,6 +826,91 @@ class CorrosionPlatformController:
             ORP_mV=request.ORP_mV,
         )
 
+    def _resolve_database_lookup(
+        self,
+        request: SimulationRequest,
+        metal: str,
+        *,
+        solution_id: str | None = None,
+    ) -> ResolvedMetalParameters:
+        warnings: list[str] = []
+        recommendations: list[str] = []
+        lookup = self.database.lookup_exposure_condition(
+            ExposureCondition(
+                metal=metal,
+                pH=request.pH,
+                oxidizer_type=request.oxidizer_type,
+                oxidizer_concentration=request.oxidizer_concentration,
+                temperature_C=request.temperature_C,
+                solution_id=solution_id,
+            )
+        )
+        params = PolarizationParameters.from_lookup_result(lookup)
+        confidence_tier = "High"
+        if not lookup.is_exact_match:
+            warnings.append(
+                f"{metal} Database lookup used nearest neighbor ({lookup.record_id}, distance={lookup.normalized_distance:.2f}): {lookup.mismatch_summary}"
+            )
+            confidence_tier = "Medium" if lookup.normalized_distance < 0.75 else "Low"
+            recommendations.append(
+                f"Measure polarization curve for {metal} at pH {request.pH:.1f}, {request.temperature_C:.1f}°C, "
+                f"{request.oxidizer_type} ({request.oxidizer_concentration:g}) to replace nearest-neighbor database lookup."
+            )
+        if lookup.is_imputed:
+            warnings.append(
+                f"{metal} Database record ({lookup.record_id}) contains imputed Tafel slope(s) (quality_score={lookup.quality_score:.2f})."
+            )
+            if confidence_tier == "High":
+                confidence_tier = "Medium"
+        return ResolvedMetalParameters(
+            metal=metal,
+            source="database",
+            parameters=params,
+            confidence_tier=confidence_tier,
+            warnings=warnings,
+            experimental_recommendations=recommendations,
+            lookup_result=lookup,
+        )
+
+    def _find_shared_database_solution(
+        self,
+        request: SimulationRequest,
+        metal_a: str,
+        metal_b: str,
+    ) -> str | None:
+        """Find the closest shared solution_id for two metals matching the requested oxidizer."""
+        df = self.database.electrochemical_database
+        df_a = df[df["metal"] == metal_a]
+        df_b = df[df["metal"] == metal_b]
+        shared_ids = sorted(
+            set(df_a["solution_id"].dropna().astype(str))
+            & set(df_b["solution_id"].dropna().astype(str))
+        )
+        if not shared_ids:
+            return None
+
+        req_ox = normalize_category_label(request.oxidizer_type)
+        best_sid: str | None = None
+        best_score = float("inf")
+        for sid in shared_ids:
+            sub = df[df["solution_id"].astype(str) == sid]
+            ox_vals = {
+                normalize_category_label(v) for v in sub["oxidizer_type"].dropna().tolist()
+            } if "oxidizer_type" in sub.columns else set()
+            if req_ox not in ox_vals:
+                continue
+            ph_vals = pd.to_numeric(sub["pH"], errors="coerce").dropna()
+            temp_vals = pd.to_numeric(sub["temperature_C"], errors="coerce").dropna()
+            conc_vals = pd.to_numeric(sub["oxidizer_concentration"], errors="coerce").dropna()
+            ph_diff = abs(float(ph_vals.median()) - request.pH) / 14.0 if len(ph_vals) else 0.5
+            temp_diff = abs(float(temp_vals.median()) - request.temperature_C) / 100.0 if len(temp_vals) else 0.5
+            conc_diff = abs(float(conc_vals.median()) - request.oxidizer_concentration) / max(request.oxidizer_concentration, 1.0) if len(conc_vals) else 0.5
+            score = ph_diff + temp_diff + 0.5 * conc_diff
+            if score < best_score:
+                best_score = score
+                best_sid = sid
+        return best_sid
+
     def _resolve_metal_parameters(
         self,
         request: SimulationRequest,
@@ -867,39 +954,7 @@ class CorrosionPlatformController:
             )
 
         if request.parameter_source == "database":
-            lookup = self.database.lookup_exposure_condition(
-                metal=metal,
-                pH=request.pH,
-                oxidizer_type=request.oxidizer_type,
-                oxidizer_concentration=request.oxidizer_concentration,
-                temperature_C=request.temperature_C,
-            )
-            params = PolarizationParameters.from_lookup_result(lookup)
-            confidence_tier = "High"
-            if not lookup.is_exact_match:
-                warnings.append(
-                    f"{metal} Database lookup used nearest neighbor ({lookup.record_id}, distance={lookup.normalized_distance:.2f}): {lookup.mismatch_summary}"
-                )
-                confidence_tier = "Medium" if lookup.normalized_distance < 0.75 else "Low"
-                recommendations.append(
-                    f"Measure polarization curve for {metal} at pH {request.pH:.1f}, {request.temperature_C:.1f}°C, "
-                    f"{request.oxidizer_type} ({request.oxidizer_concentration:g}) to replace nearest-neighbor database lookup."
-                )
-            if lookup.is_imputed:
-                warnings.append(
-                    f"{metal} Database record ({lookup.record_id}) contains imputed Tafel slope(s) (quality_score={lookup.quality_score:.2f})."
-                )
-                if confidence_tier == "High":
-                    confidence_tier = "Medium"
-            return ResolvedMetalParameters(
-                metal=metal,
-                source="database",
-                parameters=params,
-                confidence_tier=confidence_tier,
-                warnings=warnings,
-                experimental_recommendations=recommendations,
-                lookup_result=lookup,
-            )
+            return self._resolve_database_lookup(request, metal)
 
         # ML prediction mode
         query = self._build_ml_query(request, metal)
@@ -1044,11 +1099,73 @@ class CorrosionPlatformController:
             manual_override=request.manual_secondary,
         )
 
+        # In Database mode, try to pair both metals on a shared Solution if their independent
+        # nearest-neighbor lookups landed on different solution_ids or temperatures.
+        extra_warnings: list[str] = []
+        extra_recs: list[str] = []
+        force_low_confidence = False
+        solve_params_a = primary_resolved.parameters
+        solve_params_b = secondary_resolved.parameters
+
+        if request.parameter_source == "database":
+            sol_mismatch = (
+                solve_params_a.solution_id is not None
+                and solve_params_b.solution_id is not None
+                and solve_params_a.solution_id != solve_params_b.solution_id
+            )
+            temp_mismatch = (
+                solve_params_a.temperature_C is not None
+                and solve_params_b.temperature_C is not None
+                and not math.isclose(solve_params_a.temperature_C, solve_params_b.temperature_C, abs_tol=1e-6)
+            )
+            if sol_mismatch or temp_mismatch:
+                shared_sid = self._find_shared_database_solution(
+                    request, request.primary_metal, request.secondary_metal
+                )
+                if shared_sid is not None:
+                    primary_resolved = self._resolve_database_lookup(
+                        request, request.primary_metal, solution_id=shared_sid
+                    )
+                    secondary_resolved = self._resolve_database_lookup(
+                        request, request.secondary_metal, solution_id=shared_sid
+                    )
+                    solve_params_a = primary_resolved.parameters
+                    solve_params_b = secondary_resolved.parameters
+                    sol_mismatch = False
+                    temp_mismatch = (
+                        solve_params_a.temperature_C is not None
+                        and solve_params_b.temperature_C is not None
+                        and not math.isclose(
+                            solve_params_a.temperature_C, solve_params_b.temperature_C, abs_tol=1e-6
+                        )
+                    )
+
+            if sol_mismatch or temp_mismatch:
+                force_low_confidence = True
+                extra_warnings.append(
+                    f"Database lookup matched different experimental conditions for {request.primary_metal} "
+                    f"({solve_params_a.solution_id}, {solve_params_a.temperature_C}°C) and {request.secondary_metal} "
+                    f"({solve_params_b.solution_id}, {solve_params_b.temperature_C}°C); galvanic coupling was "
+                    f"approximated at the requested Exposure Condition ({request.temperature_C:.1f}°C). "
+                    f"Consider switching to ML Prediction mode for matched-condition estimation."
+                )
+                extra_recs.append(
+                    f"Measure polarization curves for both {request.primary_metal} and {request.secondary_metal} "
+                    f"in the same Solution (pH {request.pH:.1f}, {request.oxidizer_type} "
+                    f"{request.oxidizer_concentration:g}, {request.temperature_C:.1f}°C) to validate galvanic coupling."
+                )
+                solve_params_a = replace(
+                    solve_params_a, solution_id=None, temperature_C=request.temperature_C
+                )
+                solve_params_b = replace(
+                    solve_params_b, solution_id=None, temperature_C=request.temperature_C
+                )
+
         driving_force = screen_galvanic_driving_force(
             metal_a=request.primary_metal,
-            Ecorr_a_V_SHE=primary_resolved.parameters.Ecorr_V_SHE,
+            Ecorr_a_V_SHE=solve_params_a.Ecorr_V_SHE,
             metal_b=request.secondary_metal,
-            Ecorr_b_V_SHE=secondary_resolved.parameters.Ecorr_V_SHE,
+            Ecorr_b_V_SHE=solve_params_b.Ecorr_V_SHE,
             temperature_C=request.temperature_C,
         )
 
@@ -1072,8 +1189,8 @@ class CorrosionPlatformController:
             )
 
         coupling = solve_galvanic_couple(
-            primary_resolved.parameters,
-            secondary_resolved.parameters,
+            solve_params_a,
+            solve_params_b,
             cathode_to_anode_area_ratio=request.cathode_to_anode_area_ratio,
             active_valence=active_valence,
             immersion_time_s=request.immersion_time_s,
@@ -1150,12 +1267,15 @@ class CorrosionPlatformController:
             _CONFIDENCE_RANK.get(primary_resolved.confidence_tier, 0),
             _CONFIDENCE_RANK.get(secondary_resolved.confidence_tier, 0),
         )
+        if force_low_confidence:
+            combined_rank = 0
         combined_confidence = _CONFIDENCE_BY_RANK[combined_rank]
         combined_warnings = _dedupe_preserve_order(
-            primary_resolved.warnings + secondary_resolved.warnings
+            extra_warnings + primary_resolved.warnings + secondary_resolved.warnings
         )
         combined_recs = _dedupe_preserve_order(
-            primary_resolved.experimental_recommendations
+            extra_recs
+            + primary_resolved.experimental_recommendations
             + secondary_resolved.experimental_recommendations
         )
 

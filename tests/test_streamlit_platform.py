@@ -268,6 +268,31 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
         self.assertIsInstance(payload.comparative_kinetics_figure, go.Figure)
 
+    def test_galvanic_database_source_handles_mismatched_solution_ids_without_error(self) -> None:
+        # Use the real raw dataset where independent lookups for Cu/Co or Cu/Ru can return different solution_ids
+        raw_controller = CorrosionPlatformController.from_default_data()
+        for pair in [("Cu", "Co"), ("Cu", "Ru")]:
+            req = SimulationRequest(
+                primary_metal=pair[0],
+                secondary_metal=pair[1],
+                cathode_to_anode_area_ratio=1.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                pH=3.0,
+                temperature_C=25.0,
+                immersion_time_s=300.0,
+                d_crit_nm=1.0,
+                kinetics_model="auto",
+                parameter_source="database",
+            )
+            payload = raw_controller.run_galvanic_analysis(req)
+            self.assertEqual({payload.active_metal, payload.noble_metal}, set(pair))
+            self.assertGreaterEqual(payload.acceleration_factor, 1.0)
+            self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
+            if pair == ("Cu", "Ru"):
+                self.assertEqual(payload.confidence_tier, "Low")
+                self.assertTrue(any("different experimental conditions" in w for w in payload.warnings))
+
 
 class TestStreamlitAppSmoke(unittest.TestCase):
     def test_streamlit_app_renders_without_exception(self) -> None:
