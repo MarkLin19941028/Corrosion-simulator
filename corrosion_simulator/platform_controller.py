@@ -343,6 +343,17 @@ def build_single_metal_polarization_figure(
     fig = go.Figure()
     metal = curve.parameters.metal or "Metal"
 
+    # Fill the exact E == E_corr NaN point with a finite cusp floor so the V-notch renders continuously
+    net_log10 = np.array(curve.log10_abs_net_uA_cm2, dtype=float, copy=True)
+    finite_mask = np.isfinite(net_log10)
+    if np.any(finite_mask):
+        cusp_floor = float(np.min(net_log10[finite_mask])) - 0.75
+        net_log10[~finite_mask] = cusp_floor
+        y_min = cusp_floor - 0.4
+        y_max = float(np.max(net_log10[finite_mask])) + 1.2
+    else:
+        y_min, y_max = -2.0, 4.0
+
     if mc_result is not None and mc_result.polarization_band is not None:
         band = mc_result.polarization_band
         fig.add_trace(
@@ -392,7 +403,7 @@ def build_single_metal_polarization_figure(
     fig.add_trace(
         go.Scatter(
             x=curve.potential_V_SHE,
-            y=curve.log10_abs_net_uA_cm2,
+            y=net_log10,
             mode="lines",
             line={"color": "#1f77b4", "width": 2.6},
             name=f"{metal} Net |i_net|",
@@ -413,6 +424,7 @@ def build_single_metal_polarization_figure(
         title=title or f"{metal} Polarization Curve (Tafel Plot)",
         xaxis_title="Potential E (V vs. SHE)",
         yaxis_title="log10(|i| / µA·cm⁻²)",
+        yaxis={"range": [y_min, y_max]},
         template="plotly_white",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
         margin={"l": 60, "r": 25, "t": 70, "b": 55},
@@ -615,6 +627,7 @@ def build_galvanic_polarization_figure(
         or f"Galvanic Polarization Overlay: {coupling.active_metal} (Active) vs. {coupling.noble_metal} (Noble)",
         xaxis_title="Potential E (V vs. SHE)",
         yaxis_title="log10(|i| / µA·cm⁻²)",
+        xaxis={"range": [float(e_min), float(e_max)]},
         template="plotly_white",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
         margin={"l": 60, "r": 25, "t": 75, "b": 55},

@@ -80,6 +80,9 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertGreaterEqual(len(payload.polarization_figure.data), 3)
         self.assertIn("Potential", payload.polarization_figure.layout.xaxis.title.text)
         self.assertIn("log10", payload.polarization_figure.layout.yaxis.title.text)
+        self.assertIsNotNone(payload.polarization_figure.layout.yaxis.range)
+        net_trace = [t for t in payload.polarization_figure.data if "Net |i_net|" in (t.name or "")][0]
+        self.assertTrue(all(math.isfinite(float(v)) for v in net_trace.y))
         self.assertIsInstance(payload.kinetics_risk_figure, go.Figure)
         self.assertGreaterEqual(len(payload.kinetics_risk_figure.data), 2)
 
