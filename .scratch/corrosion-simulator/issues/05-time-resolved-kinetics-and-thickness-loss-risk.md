@@ -4,10 +4,10 @@
 
 **Blocked by:** 02: Phase 1 Polarization Curve, Faraday Corrosion Rate & Galvanic Driving Force Screening
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Linear, Passivation, and Power-law kinetics models all satisfy $d(0) = 0$, enforce monotonically non-decreasing **Corrosion Depth** $d(t) \ge 0$ for all $t \ge 0$, and anchor their initial rate parameters directly to $\text{CR}_0$ (with Linear and Passivation sharing the exact initial slope $\left.\frac{dd}{dt}\right|_{t=0} = \text{CR}_0$).
-- [ ] Default kinetic model selection maps Pourbaix stability regimes (`Active` $\to$ Linear, `Passivation` $\to$ Passivation, transitional/inhibited $\to$ Power-law) while supporting explicit user selection or multi-model comparison.
-- [ ] **Time to Threshold** accurately computes the **Immersion Time** at which $d(t) = d_{\text{crit}}$ (and gracefully reports unreached / $\infty$ when $d_{\max} \le d_{\text{crit}}$ under Passivation), including propagated Monte Carlo uncertainty intervals.
-- [ ] **Thickness Loss Risk** computes continuous risk $R(t) = 1 - \exp(-\ln(2) \cdot d(t) / d_{\text{crit}}) \in [0, 1]$ (where $R(d_{\text{crit}}) = 0.5$) and classifies discrete tiers (`Low` $< 0.8 d_{\text{crit}}$, `Medium` $0.8\text{--}2.0 d_{\text{crit}}$, `High` $2.0\text{--}4.0 d_{\text{crit}}$, `Critical` $\ge 4.0 d_{\text{crit}}$).
-- [ ] Automated behavioral tests and the time-resolved risk demonstration notebook verify physical monotonicity, slope anchoring, threshold timing, risk classification, and depth/risk vs. time curve plotting with uncertainty bands.
+- [x] Linear, Passivation, and Power-law kinetics models all satisfy $d(0) = 0$, enforce monotonically non-decreasing **Corrosion Depth** $d(t) \ge 0$ for all $t \ge 0$, and anchor their initial rate parameters directly to $\text{CR}_0$ (with Linear and Passivation sharing the exact initial slope $\left.\frac{dd}{dt}\right|_{t=0} = \text{CR}_0$).
+- [x] Default kinetic model selection maps Pourbaix stability regimes (`Active` $\to$ Linear, `Passivation` $\to$ Passivation, transitional/inhibited $\to$ Power-law) while supporting explicit user selection or multi-model comparison.
+- [x] **Time to Threshold** accurately computes the **Immersion Time** at which $d(t) = d_{\text{crit}}$ (and gracefully reports unreached / $\infty$ when $d_{\max} \le d_{\text{crit}}$ under Passivation), including propagated Monte Carlo uncertainty intervals.
+- [x] **Thickness Loss Risk** computes continuous risk $R(t) = 1 - \exp(-\ln(2) \cdot d(t) / d_{\text{crit}}) \in [0, 1]$ (where $R(d_{\text{crit}}) = 0.5$) and classifies discrete tiers (`Low` $< 0.8 d_{\text{crit}}$, `Medium` $0.8\text{--}2.0 d_{\text{crit}}$, `High` $2.0\text{--}4.0 d_{\text{crit}}$, `Critical` $\ge 4.0 d_{\text{crit}}$).
+- [x] Automated behavioral tests and the time-resolved risk demonstration notebook verify physical monotonicity, slope anchoring, threshold timing, risk classification, and depth/risk vs. time curve plotting with uncertainty bands.

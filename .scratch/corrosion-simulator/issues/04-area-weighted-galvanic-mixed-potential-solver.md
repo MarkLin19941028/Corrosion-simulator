@@ -4,10 +4,10 @@
 
 **Blocked by:** 02: Phase 1 Polarization Curve, Faraday Corrosion Rate & Galvanic Driving Force Screening
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] For any pair of metals with distinct corrosion potentials ($E_{\text{corr, active}} < E_{\text{corr, noble}}$), the solver finds a unique **Mixed Potential ($E_{\text{galv}}$)** strictly within $(E_{\text{corr, active}}, E_{\text{corr, noble}})$ satisfying area-weighted current conservation $i_{\text{net, active}}(E_{\text{galv}}) + (A_{\text{noble}} / A_{\text{active}}) i_{\text{net, noble}}(E_{\text{galv}}) = 0$ to within numerical tolerance ($< 10^{-6}\text{ }\mu\text{A/cm}^2$).
-- [ ] The solver computes **Galvanic Current Density ($i_{\text{galv}}$)** on the **Active Metal**, **Acceleration Factor** ($i_{\text{galv}} / i_{\text{corr, active}} \ge 1.0$), and accelerated Faraday **Initial Corrosion Rate ($\text{CR}_0$)**, with **Acceleration Factor** increasing monotonically as $A_{\text{noble}} / A_{\text{active}}$ increases.
-- [ ] When parameter uncertainties are supplied, Monte Carlo propagation produces mean, standard deviation, and percentile confidence bands for $E_{\text{galv}}$, $i_{\text{galv}}$, **Acceleration Factor**, and accelerated $\text{CR}_0$.
-- [ ] Overlaid bimetallic Tafel plots clearly display both metals' polarization branches, the solved **Mixed Potential ($E_{\text{galv}}$)** operating line, and the shift from isolated $i_{\text{corr, active}}$ to coupled $i_{\text{galv}}$.
-- [ ] Automated behavioral tests and the galvanic analysis demonstration notebook verify root-finding accuracy, area-ratio scaling, uncertainty propagation, and plot rendering.
+- [x] For any pair of metals with distinct corrosion potentials ($E_{\text{corr, active}} < E_{\text{corr, noble}}$), the solver finds a unique **Mixed Potential ($E_{\text{galv}}$)** strictly within $(E_{\text{corr, active}}, E_{\text{corr, noble}})$ satisfying area-weighted current conservation $i_{\text{net, active}}(E_{\text{galv}}) + (A_{\text{noble}} / A_{\text{active}}) i_{\text{net, noble}}(E_{\text{galv}}) = 0$ to within numerical tolerance ($< 10^{-6}\text{ }\mu\text{A/cm}^2$).
+- [x] The solver computes **Galvanic Current Density ($i_{\text{galv}}$)** on the **Active Metal**, **Acceleration Factor** ($i_{\text{galv}} / i_{\text{corr, active}} \ge 1.0$), and accelerated Faraday **Initial Corrosion Rate ($\text{CR}_0$)**, with **Acceleration Factor** increasing monotonically as $A_{\text{noble}} / A_{\text{active}}$ increases.
+- [x] When parameter uncertainties are supplied, Monte Carlo propagation produces mean, standard deviation, and percentile confidence bands for $E_{\text{galv}}$, $i_{\text{galv}}$, **Acceleration Factor**, and accelerated $\text{CR}_0$.
+- [x] Overlaid bimetallic Tafel plots clearly display both metals' polarization branches, the solved **Mixed Potential ($E_{\text{galv}}$)** operating line, and the shift from isolated $i_{\text{corr, active}}$ to coupled $i_{\text{galv}}$.
+- [x] Automated behavioral tests and the galvanic analysis demonstration notebook verify root-finding accuracy, area-ratio scaling, uncertainty propagation, and plot rendering.
