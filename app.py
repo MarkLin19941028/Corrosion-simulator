@@ -118,21 +118,81 @@ def _render_confidence_and_warnings(
                 st.markdown(f"- {rec}")
 
 
+def _format_metal_label(metal: str, counts: dict[str, int], has_faraday: dict[str, bool]) -> str:
+    n = counts.get(metal, 0)
+    tags: list[str] = [f"n={n}"]
+    if n < 10:
+        tags.append("low data")
+    if not has_faraday.get(metal, True):
+        tags.append("no Faraday props")
+    return f"{metal} ({', '.join(tags)})"
+
+
 def _render_sidebar(controller: CorrosionPlatformController) -> SimulationRequest:
     options = controller.available_options()
-    metals = options["metals"]
+    all_metals: list[str] = options["metals"]
+    core_metals: list[str] = options.get("core_metals", all_metals)
+    metal_counts: dict[str, int] = options.get("metal_counts", {})
+    metal_categories: dict[str, str] = options.get("metal_categories", {})
+    metal_has_faraday: dict[str, bool] = options.get("metal_has_faraday", {})
+    categories: list[str] = options.get("categories", [])
 
     st.sidebar.title("Simulation Parameters")
 
-    st.sidebar.subheader("1. Metal Selection")
-    primary_metal = st.sidebar.selectbox("Primary Metal", options=metals, index=0)
+    if controller.artifact_status == "stale" and controller.artifact_warning:
+        st.sidebar.warning(controller.artifact_warning)
+    elif controller.artifact_status == "live_fallback" and controller.artifact_warning:
+        st.sidebar.info(controller.artifact_warning)
 
-    secondary_choices = ["None (Single Metal Only)"] + [m for m in metals if m != primary_metal]
-    default_secondary_idx = secondary_choices.index("Co") if "Co" in secondary_choices else 1
+    st.sidebar.subheader("1. Metal / Material Selection")
+    scope_options: list[tuple[str, str, str]] = [
+        ("all", "", f"All Materials ({len(all_metals)})"),
+    ]
+    if core_metals and len(core_metals) < len(all_metals):
+        scope_options.append(("core", "", f"Core Semiconductor Metals ({len(core_metals)})"))
+    if len(categories) > 1:
+        for cat in categories:
+            cat_count = sum(1 for m in all_metals if metal_categories.get(m, "metal") == cat)
+            scope_options.append(("category", cat, f"Category: {cat} ({cat_count})"))
+
+    if len(scope_options) > 1:
+        selected_scope = st.sidebar.selectbox(
+            "Primary Material Filter",
+            options=scope_options,
+            index=0,
+            format_func=lambda item: item[2],
+            help="Filter the Primary Material list by catalog tier or functional category.",
+        )
+        scope_kind, scope_val, _ = selected_scope
+        if scope_kind == "core":
+            metals = core_metals
+        elif scope_kind == "category":
+            metals = [m for m in all_metals if metal_categories.get(m, "metal") == scope_val]
+        else:
+            metals = all_metals
+    else:
+        metals = all_metals
+
+    if not metals:
+        metals = all_metals
+
+    primary_metal = st.sidebar.selectbox(
+        "Primary Material",
+        options=metals,
+        index=0,
+        format_func=lambda m: _format_metal_label(m, metal_counts, metal_has_faraday),
+    )
+
+    # Allow cross-category galvanic pairing (e.g., TiN barrier paired with Cu metal)
+    secondary_choices = ["None (Single Metal Only)"] + [m for m in all_metals if m != primary_metal]
+    default_secondary_idx = secondary_choices.index("Co") if "Co" in secondary_choices else (1 if len(secondary_choices) > 1 else 0)
     secondary_selection = st.sidebar.selectbox(
-        "Secondary Metal (Optional Galvanic Partner)",
+        "Secondary Material (Optional Galvanic Partner)",
         options=secondary_choices,
         index=default_secondary_idx,
+        format_func=lambda m: (
+            m if m.startswith("None") else _format_metal_label(m, metal_counts, metal_has_faraday)
+        ),
     )
     secondary_metal = None if secondary_selection.startswith("None") else secondary_selection
 
@@ -296,15 +356,20 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
     )
 
     c1, c2, c3, c4 = st.columns(4)
+    has_rate = math.isfinite(payload.initial_corrosion_rate_nm_min)
     c1.metric(
         "Initial Corrosion Rate (CR₀)",
-        f"{payload.initial_corrosion_rate_nm_min:.3g} nm/min",
-        delta=f"{payload.initial_corrosion_rate_mm_yr:.3g} mm/yr",
+        f"{payload.initial_corrosion_rate_nm_min:.3g} nm/min" if has_rate else "N/A",
+        delta=(
+            f"{payload.initial_corrosion_rate_mm_yr:.3g} mm/yr"
+            if has_rate
+            else "Missing physical properties"
+        ),
         delta_color="off",
     )
     c2.metric(
         f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s",
-        f"{payload.corrosion_depth_nm:.3f} nm",
+        f"{payload.corrosion_depth_nm:.3f} nm" if math.isfinite(payload.corrosion_depth_nm) else "N/A",
         delta=f"Threshold: {payload.request.d_crit_nm:.2f} nm",
         delta_color="off",
     )
@@ -315,14 +380,18 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
     )
     c3.metric(
         "Time to Threshold",
-        _format_time_s(payload.time_to_threshold_s),
+        _format_time_s(payload.time_to_threshold_s) if has_rate else "N/A",
         delta=ttt_ci,
         delta_color="off",
     )
     c4.metric(
         "Thickness Loss Risk",
         payload.thickness_loss_risk_tier,
-        delta=f"Score R(t) = {payload.thickness_loss_risk_score:.3f}",
+        delta=(
+            f"Score R(t) = {payload.thickness_loss_risk_score:.3f}"
+            if math.isfinite(payload.thickness_loss_risk_score)
+            else "Unavailable"
+        ),
         delta_color="off",
     )
 
@@ -368,7 +437,11 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
     c3.metric(
         "Acceleration Factor",
         f"{payload.acceleration_factor:.2f}×",
-        delta=f"Accelerated CR₀ = {payload.accelerated_cr0_nm_min:.3g} nm/min",
+        delta=(
+            f"Accelerated CR₀ = {payload.accelerated_cr0_nm_min:.3g} nm/min"
+            if math.isfinite(payload.accelerated_cr0_nm_min)
+            else "CR₀: N/A (missing physical properties)"
+        ),
         delta_color="off",
     )
     coupled_ttt_ci = (
@@ -376,10 +449,18 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
         if payload.mc_coupled_kinetics is not None
         else None
     )
+    has_coupled_rate = math.isfinite(payload.accelerated_cr0_nm_min)
     c4.metric(
         "Coupled Time to Threshold",
-        _format_time_s(payload.coupled_time_to_threshold_s),
-        delta=coupled_ttt_ci or f"Uncoupled: {_format_time_s(payload.uncoupled_time_to_threshold_s)}",
+        _format_time_s(payload.coupled_time_to_threshold_s) if has_coupled_rate else "N/A",
+        delta=(
+            coupled_ttt_ci
+            or (
+                f"Uncoupled: {_format_time_s(payload.uncoupled_time_to_threshold_s)}"
+                if has_coupled_rate
+                else "Unavailable"
+            )
+        ),
         delta_color="off",
     )
 
@@ -387,18 +468,30 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
         [
             {
                 "Condition": f"{payload.active_metal} Uncoupled",
-                "CR₀ (nm/min)": payload.uncoupled_cr0_nm_min,
-                f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s (nm)": payload.uncoupled_depth_nm,
-                "Time to Threshold": _format_time_s(payload.uncoupled_time_to_threshold_s),
-                "Thickness Loss Risk Score": round(payload.uncoupled_risk_score, 3),
+                "CR₀ (nm/min)": payload.uncoupled_cr0_nm_min if math.isfinite(payload.uncoupled_cr0_nm_min) else None,
+                f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s (nm)": (
+                    payload.uncoupled_depth_nm if math.isfinite(payload.uncoupled_depth_nm) else None
+                ),
+                "Time to Threshold": (
+                    _format_time_s(payload.uncoupled_time_to_threshold_s) if has_coupled_rate else "N/A"
+                ),
+                "Thickness Loss Risk Score": (
+                    round(payload.uncoupled_risk_score, 3) if math.isfinite(payload.uncoupled_risk_score) else None
+                ),
                 "Risk Tier": payload.uncoupled_risk_tier,
             },
             {
                 "Condition": f"{payload.active_metal} Coupled to {payload.noble_metal} (A_ratio={payload.request.cathode_to_anode_area_ratio:g})",
-                "CR₀ (nm/min)": payload.accelerated_cr0_nm_min,
-                f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s (nm)": payload.coupled_depth_nm,
-                "Time to Threshold": _format_time_s(payload.coupled_time_to_threshold_s),
-                "Thickness Loss Risk Score": round(payload.coupled_risk_score, 3),
+                "CR₀ (nm/min)": payload.accelerated_cr0_nm_min if math.isfinite(payload.accelerated_cr0_nm_min) else None,
+                f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s (nm)": (
+                    payload.coupled_depth_nm if math.isfinite(payload.coupled_depth_nm) else None
+                ),
+                "Time to Threshold": (
+                    _format_time_s(payload.coupled_time_to_threshold_s) if has_coupled_rate else "N/A"
+                ),
+                "Thickness Loss Risk Score": (
+                    round(payload.coupled_risk_score, 3) if math.isfinite(payload.coupled_risk_score) else None
+                ),
                 "Risk Tier": payload.coupled_risk_tier,
             },
         ]
@@ -408,6 +501,25 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
 
     st.plotly_chart(payload.galvanic_polarization_figure, width="stretch")
     st.plotly_chart(payload.comparative_kinetics_figure, width="stretch")
+
+
+def _render_galvanic_series_explorer(controller: CorrosionPlatformController) -> None:
+    """Allow users to inspect median E_corr ranking across a chosen material subset."""
+    if controller.database.galvanic_series.empty:
+        return
+    options = controller.available_options()
+    all_metals: list[str] = options["metals"]
+    default_subset = options.get("core_metals", all_metals[:8])[:10]
+    with st.expander("Galvanic Series Overview (Select Material Subset)", expanded=False):
+        selected_metals = st.multiselect(
+            "Materials to compare",
+            options=all_metals,
+            default=default_subset,
+            help="Select a subset of materials to keep the galvanic ranking readable as the catalog grows.",
+        )
+        if selected_metals:
+            sub = controller.database.summarize_galvanic_series(selected_metals)
+            st.dataframe(sub, width="stretch", hide_index=True)
 
 
 def _default_recipe_presets(base_request: SimulationRequest) -> list[CleaningRecipeSpec]:
@@ -675,6 +787,7 @@ def main() -> None:
         _render_single_metal_view(single_payload)
     with tab_galvanic:
         _render_galvanic_view(galvanic_payload)
+        _render_galvanic_series_explorer(controller)
     with tab_compare:
         comparison_payload = _render_recipe_comparison_view(controller, request)
     with tab_export:

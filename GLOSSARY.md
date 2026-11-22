@@ -7,7 +7,7 @@ A physics-informed and machine-learning-assisted electrochemical corrosion simul
 ### Materials & Solutions
 
 **Metal**:
-A conductive metallic element or alloy film exposed to a liquid chemical environment (specifically Cu, Co, W, Ru, Ti, Ta, Al, or Mo).
+A conductive metallic element, barrier compound, or alloy film exposed to a liquid chemical environment (core semiconductor metals Cu, Co, W, Ru, Ti, Ta, Al, Mo, plus extended materials such as TiN, Fe, Ni, Cr, Sn, Zn, and alloys).
 _Avoid_: Substrate, electrode, target
 
 **Solution**:
@@ -93,7 +93,7 @@ A qualitative screening tier (`Low`, `Medium`, `High`) based solely on the absol
 _Avoid_: Galvanic risk, couple risk
 
 **Thickness Loss Risk**:
-A time-dependent risk evaluation consisting of a continuous score $R(t) \in [0, 1]$ and a discrete tier (`Low`, `Medium`, `High`, `Critical`) determined by the ratio of cumulative Corrosion Depth $d(t)$ to the Critical Thickness Threshold $d_{\text{crit}}$.
+A time-dependent risk evaluation consisting of a continuous score $R(t) \in [0, 1]$ and a discrete tier (`Low`, `Medium`, `High`, `Critical`, or `N/A` when physical properties required for Faraday conversion are unavailable) determined by the ratio of cumulative Corrosion Depth $d(t)$ to the Critical Thickness Threshold $d_{\text{crit}}$.
 _Avoid_: Corrosion risk, damage score
 
 **Applicability Domain**:

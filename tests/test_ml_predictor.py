@@ -127,7 +127,7 @@ class TestFeatureExtractionAndApplicabilityDomain(unittest.TestCase):
         self.assertGreater(len(ood_res.experimental_recommendations), 0)
 
         # Unseen metal also receives Low confidence and actionable guidance
-        unseen_metal_res = checker.evaluate(ExposureCondition(metal="Ni", pH=4.0, temperature_C=25.0))
+        unseen_metal_res = checker.evaluate(ExposureCondition(metal="Zr", pH=4.0, temperature_C=25.0))
         self.assertEqual(unseen_metal_res.confidence_tier, "Low")
         self.assertFalse(unseen_metal_res.in_bounding_box)
         self.assertGreater(len(unseen_metal_res.experimental_recommendations), 0)

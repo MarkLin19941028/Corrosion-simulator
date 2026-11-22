@@ -52,11 +52,13 @@ from corrosion_simulator.physics import (
     PolarizationParameters,
     calculate_faraday_corrosion_rate,
     generate_polarization_curve,
+    has_faraday_properties,
     screen_galvanic_driving_force,
 )
 
 ParameterSource = Literal["database", "ml", "manual"]
 KineticsSelection = Literal["auto", "linear", "passivation", "power_law"]
+ArtifactStatus = Literal["fresh", "stale", "live_fallback", "live", "seed"]
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 _CONFIDENCE_BY_RANK = {0: "Low", 1: "Medium", 2: "High"}
@@ -114,14 +116,12 @@ class SimulationRequest:
     mc_seed: int = 42
 
     def __post_init__(self) -> None:
-        if self.primary_metal not in CORE_METALS:
-            raise ValueError(
-                f"Unsupported primary_metal '{self.primary_metal}'. Supported: {CORE_METALS}"
-            )
-        if self.secondary_metal is not None and self.secondary_metal not in CORE_METALS:
-            raise ValueError(
-                f"Unsupported secondary_metal '{self.secondary_metal}'. Supported: {CORE_METALS}"
-            )
+        if not isinstance(self.primary_metal, str) or not self.primary_metal.strip():
+            raise ValueError("primary_metal must be a non-empty material identifier.")
+        if self.secondary_metal is not None and (
+            not isinstance(self.secondary_metal, str) or not self.secondary_metal.strip()
+        ):
+            raise ValueError("secondary_metal must be None or a non-empty material identifier.")
         if self.cathode_to_anode_area_ratio <= 0 or not np.isfinite(self.cathode_to_anode_area_ratio):
             raise ValueError("cathode_to_anode_area_ratio must be strictly positive.")
         if self.immersion_time_s <= 0 or not np.isfinite(self.immersion_time_s):
@@ -207,10 +207,10 @@ class SingleMetalViewPayload:
     request: SimulationRequest
     resolved_parameters: ResolvedMetalParameters
     parameter_table: pd.DataFrame
-    faraday_result: FaradayCorrosionResult
+    faraday_result: FaradayCorrosionResult | None
     polarization_curve: PolarizationCurve
     mc_propagation: MonteCarloPropagationResult | None
-    kinetics_result: TimeResolvedKineticsResult
+    kinetics_result: TimeResolvedKineticsResult | None
     mc_kinetics: MonteCarloKineticsResult | None
     initial_corrosion_rate_nm_min: float
     initial_corrosion_rate_mm_yr: float
@@ -232,7 +232,7 @@ class SingleMetalViewPayload:
             "ml_model_family": (
                 self.request.ml_model_family if self.request.parameter_source == "ml" else None
             ),
-            "kinetics_model": self.kinetics_result.model,
+            "kinetics_model": self.kinetics_result.model if self.kinetics_result is not None else "unavailable",
             "pH": float(self.request.pH),
             "temperature_C": float(self.request.temperature_C),
             "immersion_time_s": float(self.request.immersion_time_s),
@@ -241,13 +241,21 @@ class SingleMetalViewPayload:
             "icorr_uA_cm2": float(self.resolved_parameters.parameters.icorr_uA_cm2),
             "beta_a_mV_dec": float(self.resolved_parameters.parameters.beta_a_mV_dec),
             "beta_c_mV_dec": float(self.resolved_parameters.parameters.beta_c_mV_dec),
-            "initial_corrosion_rate_nm_min": float(self.initial_corrosion_rate_nm_min),
-            "initial_corrosion_rate_mm_yr": float(self.initial_corrosion_rate_mm_yr),
-            "corrosion_depth_nm": float(self.corrosion_depth_nm),
+            "initial_corrosion_rate_nm_min": (
+                None if not math.isfinite(self.initial_corrosion_rate_nm_min) else float(self.initial_corrosion_rate_nm_min)
+            ),
+            "initial_corrosion_rate_mm_yr": (
+                None if not math.isfinite(self.initial_corrosion_rate_mm_yr) else float(self.initial_corrosion_rate_mm_yr)
+            ),
+            "corrosion_depth_nm": (
+                None if not math.isfinite(self.corrosion_depth_nm) else float(self.corrosion_depth_nm)
+            ),
             "time_to_threshold_s": (
                 None if not math.isfinite(self.time_to_threshold_s) else float(self.time_to_threshold_s)
             ),
-            "thickness_loss_risk_score": float(self.thickness_loss_risk_score),
+            "thickness_loss_risk_score": (
+                None if not math.isfinite(self.thickness_loss_risk_score) else float(self.thickness_loss_risk_score)
+            ),
             "thickness_loss_risk_tier": str(self.thickness_loss_risk_tier),
             "confidence_tier": str(self.confidence_tier),
             "warnings": list(self.warnings),
@@ -265,8 +273,8 @@ class GalvanicViewPayload:
     driving_force: GalvanicDrivingForceResult
     coupling_result: GalvanicCouplingResult
     mc_galvanic: MonteCarloGalvanicResult | None
-    uncoupled_kinetics: TimeResolvedKineticsResult
-    coupled_kinetics: TimeResolvedKineticsResult
+    uncoupled_kinetics: TimeResolvedKineticsResult | None
+    coupled_kinetics: TimeResolvedKineticsResult | None
     mc_coupled_kinetics: MonteCarloKineticsResult | None
     active_metal: str
     noble_metal: str
@@ -302,16 +310,24 @@ class GalvanicViewPayload:
             "ml_model_family": (
                 self.request.ml_model_family if self.request.parameter_source == "ml" else None
             ),
-            "kinetics_model": self.coupled_kinetics.model,
+            "kinetics_model": self.coupled_kinetics.model if self.coupled_kinetics is not None else "unavailable",
             "delta_Ecorr_V": float(self.driving_force.delta_Ecorr_V),
             "galvanic_driving_force_risk": str(self.galvanic_driving_force_risk),
             "mixed_potential_V_SHE": float(self.mixed_potential_V_SHE),
             "galvanic_current_density_uA_cm2": float(self.galvanic_current_density_uA_cm2),
             "acceleration_factor": float(self.acceleration_factor),
-            "uncoupled_cr0_nm_min": float(self.uncoupled_cr0_nm_min),
-            "accelerated_cr0_nm_min": float(self.accelerated_cr0_nm_min),
-            "uncoupled_depth_nm": float(self.uncoupled_depth_nm),
-            "coupled_depth_nm": float(self.coupled_depth_nm),
+            "uncoupled_cr0_nm_min": (
+                None if not math.isfinite(self.uncoupled_cr0_nm_min) else float(self.uncoupled_cr0_nm_min)
+            ),
+            "accelerated_cr0_nm_min": (
+                None if not math.isfinite(self.accelerated_cr0_nm_min) else float(self.accelerated_cr0_nm_min)
+            ),
+            "uncoupled_depth_nm": (
+                None if not math.isfinite(self.uncoupled_depth_nm) else float(self.uncoupled_depth_nm)
+            ),
+            "coupled_depth_nm": (
+                None if not math.isfinite(self.coupled_depth_nm) else float(self.coupled_depth_nm)
+            ),
             "uncoupled_time_to_threshold_s": (
                 None
                 if not math.isfinite(self.uncoupled_time_to_threshold_s)
@@ -322,8 +338,12 @@ class GalvanicViewPayload:
                 if not math.isfinite(self.coupled_time_to_threshold_s)
                 else float(self.coupled_time_to_threshold_s)
             ),
-            "uncoupled_risk_score": float(self.uncoupled_risk_score),
-            "coupled_risk_score": float(self.coupled_risk_score),
+            "uncoupled_risk_score": (
+                None if not math.isfinite(self.uncoupled_risk_score) else float(self.uncoupled_risk_score)
+            ),
+            "coupled_risk_score": (
+                None if not math.isfinite(self.coupled_risk_score) else float(self.coupled_risk_score)
+            ),
             "uncoupled_risk_tier": str(self.uncoupled_risk_tier),
             "coupled_risk_tier": str(self.coupled_risk_tier),
             "confidence_tier": str(self.confidence_tier),
@@ -788,19 +808,34 @@ class CorrosionPlatformController:
         self,
         database: HarmonizedDatabase,
         predictor: HybridMLPredictor | None = None,
+        *,
+        artifact_dir: str | Path | None = None,
+        artifact_status: ArtifactStatus = "live",
+        artifact_warning: str | None = None,
     ) -> None:
         self.database = database
+        self.artifact_dir: Path | None = Path(artifact_dir) if artifact_dir is not None else None
+        self.artifact_status: ArtifactStatus = artifact_status
+        self.artifact_warning: str | None = artifact_warning
         if predictor is None:
-            self.predictor = HybridMLPredictor(model_family="random_forest", random_state=42)
-            self.predictor.fit(database)
+            self.predictor = self._load_or_fit_predictor("random_forest")
         else:
             self.predictor = predictor
         self._predictors: dict[ModelFamily, HybridMLPredictor] = {
             self.predictor.model_family: self.predictor
         }
 
+    def _load_or_fit_predictor(self, model_family: ModelFamily) -> HybridMLPredictor:
+        if self.artifact_dir is not None:
+            prebuilt_path = self.artifact_dir / "models" / f"{model_family}.joblib"
+            if prebuilt_path.exists():
+                return HybridMLPredictor.load(prebuilt_path)
+        predictor = HybridMLPredictor(model_family=model_family, random_state=42)
+        predictor.fit(self.database)
+        return predictor
+
     def get_predictor(self, model_family: ModelFamily | None = None) -> HybridMLPredictor:
-        """Return a fitted predictor for ``model_family``, lazily fitting and caching on first use."""
+        """Return a fitted predictor for ``model_family``, loading prebuilt artifact or fitting on first use."""
         target_family = model_family or self.predictor.model_family
         if target_family not in SUPPORTED_MODEL_FAMILIES:
             raise ValueError(
@@ -809,8 +844,7 @@ class CorrosionPlatformController:
         cached = self._predictors.get(target_family)
         if cached is not None:
             return cached
-        predictor = HybridMLPredictor(model_family=target_family, random_state=42)
-        predictor.fit(self.database)
+        predictor = self._load_or_fit_predictor(target_family)
         self._predictors[target_family] = predictor
         return predictor
 
@@ -819,21 +853,63 @@ class CorrosionPlatformController:
         cls,
         raw_dir: str | Path = "data/raw",
         *,
+        processed_dir: str | Path = "data/processed",
         model_family: ModelFamily = "random_forest",
     ) -> CorrosionPlatformController:
-        """Load the default harmonized database (raw CSVs if present, else seed) and fit ML models."""
+        """Load prebuilt artifacts when available (fast path), else ingest ``raw_dir`` or seed data."""
+        from corrosion_simulator.build_artifacts import check_artifacts_freshness
+
         raw_path = Path(raw_dir)
+        proc_path = Path(processed_dir)
+        status, warning_msg = check_artifacts_freshness(raw_path, proc_path)
+
+        if status in ("fresh", "stale"):
+            database = HarmonizedDatabase.from_processed_directory(proc_path)
+            ctrl = cls(
+                database=database,
+                predictor=None,
+                artifact_dir=proc_path,
+                artifact_status=status,
+                artifact_warning=warning_msg,
+            )
+            if model_family != ctrl.predictor.model_family:
+                ctrl.predictor = ctrl.get_predictor(model_family)
+            return ctrl
+
+        # Fallback: build live from raw_dir (or seed if raw_dir has no CSVs)
         if raw_path.exists() and any(raw_path.rglob("*.csv")):
             database = HarmonizedDatabase.from_directory(raw_path)
+            live_status = "live_fallback"
+            live_warning = warning_msg
         else:
             database = HarmonizedDatabase.from_seed()
+            live_status = "seed"
+            live_warning = None
         predictor = HybridMLPredictor(model_family=model_family, random_state=42)
         predictor.fit(database)
-        return cls(database=database, predictor=predictor)
+        return cls(
+            database=database,
+            predictor=predictor,
+            artifact_dir=None,
+            artifact_status=live_status,
+            artifact_warning=live_warning,
+        )
 
-    def available_options(self) -> dict[str, list[str]]:
-        """Return sidebar selector options derived from the harmonized database."""
+    def available_options(self) -> dict[str, Any]:
+        """Return sidebar selector options dynamically derived from the harmonized database."""
         df = self.database.electrochemical_database
+        metals = self.database.available_metals or list(CORE_METALS)
+        counts = self.database.metal_sample_counts()
+        meta_df = self.database.material_metadata()
+        metal_tiers: dict[str, str] = {}
+        metal_categories: dict[str, str] = {}
+        metal_has_faraday: dict[str, bool] = {}
+        if not meta_df.empty:
+            for _, row in meta_df.iterrows():
+                m = str(row["metal"])
+                metal_tiers[m] = str(row["tier"])
+                metal_categories[m] = str(row["category"])
+                metal_has_faraday[m] = bool(row["has_faraday_properties"])
 
         def _extract_categories(col: str, defaults: list[str]) -> list[str]:
             values = set(defaults)
@@ -845,8 +921,16 @@ class CorrosionPlatformController:
             ordered = ["None"] + sorted(v for v in values if v != "None")
             return ordered
 
+        categories = sorted({metal_categories.get(m, "metal") for m in metals})
         return {
-            "metals": list(CORE_METALS),
+            "metals": metals,
+            "core_metals": [m for m in metals if metal_tiers.get(m, "core" if m in CORE_METALS else "extended") == "core"],
+            "extended_metals": [m for m in metals if metal_tiers.get(m, "core" if m in CORE_METALS else "extended") != "core"],
+            "metal_counts": counts,
+            "metal_tiers": metal_tiers,
+            "metal_categories": metal_categories,
+            "metal_has_faraday": metal_has_faraday,
+            "categories": categories,
             "oxidizer_types": _extract_categories("oxidizer_type", ["None", "H2O2", "HNO3", "FeCl3"]),
             "acid_types": _extract_categories(
                 "acid_type", ["None", "Citric acid", "H2SO4", "H3PO4", "HCl", "HF"]
@@ -1037,6 +1121,59 @@ class CorrosionPlatformController:
             if request.parameter_source == "manual" and request.manual_primary is not None and request.manual_primary.valence is not None
             else request.primary_valence
         )
+        curve = generate_polarization_curve(resolved.parameters)
+        warnings_list = list(resolved.warnings)
+        recs_list = list(resolved.experimental_recommendations)
+
+        if not has_faraday_properties(request.primary_metal, self.database.material_properties):
+            warnings_list.append(
+                f"Missing physical properties (density / equivalent weight) for {request.primary_metal}; "
+                "Faraday corrosion rate (nm/min) and thickness-loss kinetics are unavailable. "
+                "Add a row to data/raw/material_properties.csv to enable rate conversion."
+            )
+            pol_fig = build_single_metal_polarization_figure(
+                curve,
+                mc_result=None,
+                title=f"{request.primary_metal} Polarization Curve ({resolved.source.upper()})",
+            )
+            placeholder_fig = go.Figure()
+            placeholder_fig.add_annotation(
+                text=f"Faraday corrosion rate & kinetics unavailable for {request.primary_metal}<br>"
+                "(missing density / equivalent_weight_g_eq in material_properties.csv)",
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(size=14),
+            )
+            placeholder_fig.update_layout(
+                title=f"{request.primary_metal} Time-Resolved Kinetics (Unavailable)",
+                template="plotly_white",
+                height=360,
+            )
+            return SingleMetalViewPayload(
+                request=request,
+                resolved_parameters=resolved,
+                parameter_table=resolved.to_parameter_table(),
+                faraday_result=None,
+                polarization_curve=curve,
+                mc_propagation=None,
+                kinetics_result=None,
+                mc_kinetics=None,
+                initial_corrosion_rate_nm_min=float("nan"),
+                initial_corrosion_rate_mm_yr=float("nan"),
+                corrosion_depth_nm=float("nan"),
+                time_to_threshold_s=float("nan"),
+                thickness_loss_risk_score=float("nan"),
+                thickness_loss_risk_tier="N/A",
+                confidence_tier=resolved.confidence_tier,
+                warnings=_dedupe_preserve_order(warnings_list),
+                experimental_recommendations=_dedupe_preserve_order(recs_list),
+                polarization_figure=pol_fig,
+                kinetics_risk_figure=placeholder_fig,
+            )
+
         faraday = calculate_faraday_corrosion_rate(
             metal=request.primary_metal,
             icorr_uA_cm2=resolved.parameters.icorr_uA_cm2,
@@ -1044,7 +1181,6 @@ class CorrosionPlatformController:
             immersion_time_s=request.immersion_time_s,
             material_properties=self.database.material_properties,
         )
-        curve = generate_polarization_curve(resolved.parameters)
 
         mc_propagation: MonteCarloPropagationResult | None = None
         if resolved.ml_prediction is not None:
@@ -1241,7 +1377,83 @@ class CorrosionPlatformController:
             active_valence=active_valence,
             immersion_time_s=request.immersion_time_s,
             material_properties=self.database.material_properties,
+            allow_missing_faraday=True,
         )
+
+        galv_pol_fig = build_galvanic_polarization_figure(
+            coupling,
+            mc_galvanic=None,
+        )
+
+        if coupling.uncoupled_faraday is None or coupling.coupled_faraday is None:
+            extra_warnings.append(
+                f"Missing physical properties (density / equivalent weight) for Active Metal {coupling.active_metal}; "
+                "Faraday corrosion rate (nm/min) and coupled thickness-loss kinetics are unavailable. "
+                "Mixed potential (E_galv), galvanic current density (i_galv), and Acceleration Factor remain valid."
+            )
+            combined_rank = min(
+                _CONFIDENCE_RANK.get(primary_resolved.confidence_tier, 0),
+                _CONFIDENCE_RANK.get(secondary_resolved.confidence_tier, 0),
+            )
+            if force_low_confidence:
+                combined_rank = 0
+            combined_confidence = _CONFIDENCE_BY_RANK[combined_rank]
+            combined_warnings = _dedupe_preserve_order(
+                extra_warnings + primary_resolved.warnings + secondary_resolved.warnings
+            )
+            combined_recs = _dedupe_preserve_order(
+                extra_recs
+                + primary_resolved.experimental_recommendations
+                + secondary_resolved.experimental_recommendations
+            )
+            placeholder_fig = go.Figure()
+            placeholder_fig.add_annotation(
+                text=f"Coupled Faraday corrosion rate & kinetics unavailable for {coupling.active_metal}<br>"
+                "(missing density / equivalent_weight_g_eq in material_properties.csv)",
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(size=14),
+            )
+            placeholder_fig.update_layout(
+                title=f"Galvanic Kinetics Comparison — {coupling.active_metal} (Unavailable)",
+                template="plotly_white",
+                height=360,
+            )
+            return GalvanicViewPayload(
+                request=request,
+                primary_resolved=primary_resolved,
+                secondary_resolved=secondary_resolved,
+                driving_force=driving_force,
+                coupling_result=coupling,
+                mc_galvanic=None,
+                uncoupled_kinetics=None,
+                coupled_kinetics=None,
+                mc_coupled_kinetics=None,
+                active_metal=coupling.active_metal,
+                noble_metal=coupling.noble_metal,
+                galvanic_driving_force_risk=driving_force.risk_tier,
+                mixed_potential_V_SHE=float(coupling.mixed_potential_V_SHE),
+                galvanic_current_density_uA_cm2=float(coupling.galvanic_current_density_uA_cm2),
+                acceleration_factor=float(coupling.acceleration_factor),
+                uncoupled_cr0_nm_min=float("nan"),
+                accelerated_cr0_nm_min=float("nan"),
+                uncoupled_depth_nm=float("nan"),
+                coupled_depth_nm=float("nan"),
+                uncoupled_time_to_threshold_s=float("nan"),
+                coupled_time_to_threshold_s=float("nan"),
+                uncoupled_risk_score=float("nan"),
+                coupled_risk_score=float("nan"),
+                uncoupled_risk_tier="N/A",
+                coupled_risk_tier="N/A",
+                confidence_tier=combined_confidence,
+                warnings=combined_warnings,
+                experimental_recommendations=combined_recs,
+                galvanic_polarization_figure=galv_pol_fig,
+                comparative_kinetics_figure=placeholder_fig,
+            )
 
         mc_galvanic: MonteCarloGalvanicResult | None = None
         if primary_resolved.ml_prediction is not None and secondary_resolved.ml_prediction is not None:

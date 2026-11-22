@@ -134,6 +134,8 @@ class RecipeComparisonPayload:
 
 
 def _format_ttt_short(seconds: float) -> str:
+    if math.isnan(seconds):
+        return "N/A"
     if not math.isfinite(seconds):
         return "∞"
     if seconds >= 3600.0:
@@ -141,6 +143,12 @@ def _format_ttt_short(seconds: float) -> str:
     if seconds >= 60.0:
         return f"{seconds / 60.0:.2f} min"
     return f"{seconds:.1f} s"
+
+
+def _fmt_metric(value: float, fmt: str = ".3g", suffix: str = "") -> str:
+    if not math.isfinite(value):
+        return "N/A"
+    return f"{value:{fmt}}{suffix}"
 
 
 def build_recipe_comparison_bar_figure(
@@ -236,8 +244,10 @@ def build_recipe_comparison_radar_figure(
     mode: ComparisonMode,
 ) -> go.Figure:
     """Build normalized multi-axis Plotly radar chart (higher score = safer / lower corrosion)."""
-    max_cr0 = max((e.cr0_nm_min for e in entries), default=1.0) or 1.0
-    max_depth = max((e.corrosion_depth_nm for e in entries), default=1.0) or 1.0
+    finite_cr0 = [e.cr0_nm_min for e in entries if math.isfinite(e.cr0_nm_min)]
+    finite_depth = [e.corrosion_depth_nm for e in entries if math.isfinite(e.corrosion_depth_nm)]
+    max_cr0 = max(finite_cr0, default=1.0) or 1.0
+    max_depth = max(finite_depth, default=1.0) or 1.0
     finite_ttts = [e.time_to_threshold_s for e in entries if math.isfinite(e.time_to_threshold_s)]
     max_ttt = max(finite_ttts) if finite_ttts else 1.0
     max_af = max(((e.acceleration_factor or 1.0) for e in entries), default=1.0) or 1.0
@@ -253,10 +263,15 @@ def build_recipe_comparison_radar_figure(
 
     fig = go.Figure()
     for entry in entries:
-        low_cr0 = max(0.0, 1.0 - entry.cr0_nm_min / (max_cr0 * 1.1))
-        low_depth = max(0.0, 1.0 - entry.corrosion_depth_nm / (max_depth * 1.1))
-        low_risk = max(0.0, 1.0 - entry.risk_score)
-        long_ttt = 1.0 if not math.isfinite(entry.time_to_threshold_s) else min(1.0, entry.time_to_threshold_s / (max_ttt * 1.05))
+        low_cr0 = max(0.0, 1.0 - entry.cr0_nm_min / (max_cr0 * 1.1)) if math.isfinite(entry.cr0_nm_min) else 0.0
+        low_depth = max(0.0, 1.0 - entry.corrosion_depth_nm / (max_depth * 1.1)) if math.isfinite(entry.corrosion_depth_nm) else 0.0
+        low_risk = max(0.0, 1.0 - entry.risk_score) if math.isfinite(entry.risk_score) else 0.0
+        if math.isnan(entry.time_to_threshold_s):
+            long_ttt = 0.0
+        elif not math.isfinite(entry.time_to_threshold_s):
+            long_ttt = 1.0
+        else:
+            long_ttt = min(1.0, entry.time_to_threshold_s / (max_ttt * 1.05))
         values = [low_cr0, low_depth, low_risk, long_ttt]
         if mode == "galvanic":
             af = entry.acceleration_factor or 1.0
@@ -368,7 +383,13 @@ def compare_cleaning_recipes(
                 )
             )
 
-    raw_entries.sort(key=lambda e: (e.risk_score, e.corrosion_depth_nm, e.cr0_nm_min))
+    def _sort_key(e: RecipeEvaluationEntry) -> tuple[float, float, float]:
+        r = e.risk_score if math.isfinite(e.risk_score) else float("inf")
+        d = e.corrosion_depth_nm if math.isfinite(e.corrosion_depth_nm) else float("inf")
+        c = e.cr0_nm_min if math.isfinite(e.cr0_nm_min) else float("inf")
+        return (r, d, c)
+
+    raw_entries.sort(key=_sort_key)
     ranked_entries = [replace(entry, rank=idx) for idx, entry in enumerate(raw_entries, start=1)]
 
     best = ranked_entries[0]
@@ -379,8 +400,10 @@ def compare_cleaning_recipes(
     )
     rationale = (
         f"Recommended Cleaning Recipe: '{best.recipe.name}' — lowest Thickness Loss Risk score "
-        f"({best.risk_score:.3f}, {best.risk_tier}), final Corrosion Depth {best.corrosion_depth_nm:.3f} nm, "
-        f"CR₀ {best.cr0_nm_min:.3g} nm/min, Time to Threshold {_format_ttt_short(best.time_to_threshold_s)}"
+        f"({_fmt_metric(best.risk_score, '.3f')}, {best.risk_tier}), "
+        f"final Corrosion Depth {_fmt_metric(best.corrosion_depth_nm, '.3f', ' nm')}, "
+        f"CR₀ {_fmt_metric(best.cr0_nm_min, '.3g', ' nm/min')}, "
+        f"Time to Threshold {_format_ttt_short(best.time_to_threshold_s)}"
         f"{af_clause} (Confidence Tier: {best.confidence_tier})."
     )
 
@@ -392,10 +415,10 @@ def compare_cleaning_recipes(
             "pH": e.recipe.pH,
             "Temp (°C)": e.recipe.temperature_C,
             "Immersion Time (s)": e.recipe.immersion_time_s,
-            "CR₀ (nm/min)": round(e.cr0_nm_min, 4),
-            "Corrosion Depth (nm)": round(e.corrosion_depth_nm, 4),
+            "CR₀ (nm/min)": round(e.cr0_nm_min, 4) if math.isfinite(e.cr0_nm_min) else None,
+            "Corrosion Depth (nm)": round(e.corrosion_depth_nm, 4) if math.isfinite(e.corrosion_depth_nm) else None,
             "Time to Threshold": _format_ttt_short(e.time_to_threshold_s),
-            "Thickness Loss Risk Score": round(e.risk_score, 4),
+            "Thickness Loss Risk Score": round(e.risk_score, 4) if math.isfinite(e.risk_score) else None,
             "Risk Tier": e.risk_tier,
             "Confidence Tier": e.confidence_tier,
             "Source": e.parameter_source.upper(),
@@ -466,28 +489,42 @@ def _render_composite_figure(
 
     ax_kin = fig.add_subplot(n_rows, 2, 2)
     kin = single_payload.kinetics_result
-    ax_kin.plot(kin.times_s, kin.depth_nm, color="#1f77b4", linewidth=2.0, label=f"Depth ({kin.model})")
-    if single_payload.mc_kinetics is not None:
-        ax_kin.fill_between(
-            kin.times_s,
-            single_payload.mc_kinetics.depth_p05_nm,
-            single_payload.mc_kinetics.depth_p95_nm,
-            color="#1f77b4",
-            alpha=0.18,
-            label="Depth 90% Band",
-        )
-    ax_kin.axhline(kin.d_crit_nm, color="#d62728", linestyle="--", linewidth=1.2, label=f"d_crit={kin.d_crit_nm:.2f} nm")
-    ax_kin.set_title(f"{single_payload.request.primary_metal} Corrosion Depth & Risk")
-    ax_kin.set_xlabel("Immersion Time (s)")
-    ax_kin.set_ylabel("Corrosion Depth (nm)", color="#1f77b4")
-    ax_kin.set_ylim(bottom=0.0)
-    ax_kin.grid(True, alpha=0.3)
+    if kin is not None:
+        ax_kin.plot(kin.times_s, kin.depth_nm, color="#1f77b4", linewidth=2.0, label=f"Depth ({kin.model})")
+        if single_payload.mc_kinetics is not None:
+            ax_kin.fill_between(
+                kin.times_s,
+                single_payload.mc_kinetics.depth_p05_nm,
+                single_payload.mc_kinetics.depth_p95_nm,
+                color="#1f77b4",
+                alpha=0.18,
+                label="Depth 90% Band",
+            )
+        ax_kin.axhline(kin.d_crit_nm, color="#d62728", linestyle="--", linewidth=1.2, label=f"d_crit={kin.d_crit_nm:.2f} nm")
+        ax_kin.set_title(f"{single_payload.request.primary_metal} Corrosion Depth & Risk")
+        ax_kin.set_xlabel("Immersion Time (s)")
+        ax_kin.set_ylabel("Corrosion Depth (nm)", color="#1f77b4")
+        ax_kin.set_ylim(bottom=0.0)
+        ax_kin.grid(True, alpha=0.3)
 
-    ax_risk = ax_kin.twinx()
-    ax_risk.plot(kin.times_s, kin.risk_score, color="#d62728", linestyle=":", linewidth=1.8, label="Risk R(t)")
-    ax_risk.set_ylabel("Thickness Loss Risk R(t)", color="#d62728")
-    ax_risk.set_ylim(0.0, 1.05)
-    ax_kin.legend(fontsize=8, loc="upper left")
+        ax_risk = ax_kin.twinx()
+        ax_risk.plot(kin.times_s, kin.risk_score, color="#d62728", linestyle=":", linewidth=1.8, label="Risk R(t)")
+        ax_risk.set_ylabel("Thickness Loss Risk R(t)", color="#d62728")
+        ax_risk.set_ylim(0.0, 1.05)
+        ax_kin.legend(fontsize=8, loc="upper left")
+    else:
+        ax_kin.axis("off")
+        ax_kin.text(
+            0.5,
+            0.5,
+            f"Corrosion Depth & Risk unavailable for {single_payload.request.primary_metal}\n"
+            "(missing density / equivalent weight)",
+            ha="center",
+            va="center",
+            fontsize=10,
+            color="#475569",
+        )
+        ax_kin.set_title(f"{single_payload.request.primary_metal} Corrosion Depth & Risk (N/A)")
 
     next_row = 2
     if galvanic_payload is not None:
@@ -520,21 +557,35 @@ def _render_composite_figure(
         ax_gt.legend(fontsize=8, loc="best")
 
         ax_gd = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 2)
-        ax_gd.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#1f77b4", label=f"{g.active_metal} Uncoupled")
-        ax_gd.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#d62728", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
-        ax_gd.axhline(g.request.d_crit_nm, color="#555555", linestyle=":", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
-        ax_gd.set_title(f"Galvanic Depth: Uncoupled vs. Coupled ({g.active_metal})")
-        ax_gd.set_xlabel("Immersion Time (s)")
-        ax_gd.set_ylabel("Corrosion Depth (nm)")
-        ax_gd.set_ylim(bottom=0.0)
-        ax_gd.grid(True, alpha=0.3)
-        ax_gd.legend(fontsize=8, loc="upper left")
+        if g.uncoupled_kinetics is not None and g.coupled_kinetics is not None:
+            ax_gd.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#1f77b4", label=f"{g.active_metal} Uncoupled")
+            ax_gd.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#d62728", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
+            ax_gd.axhline(g.request.d_crit_nm, color="#555555", linestyle=":", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
+            ax_gd.set_title(f"Galvanic Depth: Uncoupled vs. Coupled ({g.active_metal})")
+            ax_gd.set_xlabel("Immersion Time (s)")
+            ax_gd.set_ylabel("Corrosion Depth (nm)")
+            ax_gd.set_ylim(bottom=0.0)
+            ax_gd.grid(True, alpha=0.3)
+            ax_gd.legend(fontsize=8, loc="upper left")
+        else:
+            ax_gd.axis("off")
+            ax_gd.text(
+                0.5,
+                0.5,
+                f"Galvanic Corrosion Depth unavailable for {g.active_metal}\n"
+                "(missing density / equivalent weight)",
+                ha="center",
+                va="center",
+                fontsize=10,
+                color="#475569",
+            )
+            ax_gd.set_title(f"Galvanic Depth: {g.active_metal} (N/A)")
         next_row += 1
 
     if comparison_payload is not None:
         names = [e.recipe.name for e in comparison_payload.entries]
-        risks = [e.risk_score for e in comparison_payload.entries]
-        depths = [e.corrosion_depth_nm for e in comparison_payload.entries]
+        risks = [e.risk_score if math.isfinite(e.risk_score) else 0.0 for e in comparison_payload.entries]
+        depths = [e.corrosion_depth_nm if math.isfinite(e.corrosion_depth_nm) else 0.0 for e in comparison_payload.entries]
         bar_colors = ["#2ca02c" if e.rank == 1 else "#1f77b4" for e in comparison_payload.entries]
 
         ax_cmp1 = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 1)
@@ -810,6 +861,11 @@ def export_report_pdf(
             suffix = f" {unit}" if unit else ""
             return f" [90% CI: {st_dict['p05']:.3g}–{st_dict['p95']:.3g}{suffix}]"
 
+        single_kin_model = (
+            single_payload.kinetics_result.model
+            if single_payload.kinetics_result is not None
+            else "unavailable"
+        )
         lines = [
             "CORROSION SIMULATOR — TECHNICAL ANALYSIS REPORT",
             f"Generated (UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
@@ -819,15 +875,15 @@ def export_report_pdf(
             f"  Primary Metal: {req.primary_metal}   |   Secondary Metal: {req.secondary_metal or 'None'} (Area Ratio: {req.cathode_to_anode_area_ratio:g})",
             f"  Solution: Oxidizer={req.oxidizer_type} ({req.oxidizer_concentration:g}), Acid={req.acid_type} ({req.acid_concentration:g}), Inhibitor={req.inhibitor_type} ({req.inhibitor_concentration:g})",
             f"  pH: {req.pH:.2f}   |   Temperature: {req.temperature_C:.1f} °C   |   Immersion Time: {req.immersion_time_s:.1f} s   |   d_crit: {req.d_crit_nm:.2f} nm",
-            f"  Parameter Source: {req.parameter_source.upper()}   |   Kinetics Model: {single_payload.kinetics_result.model}",
+            f"  Parameter Source: {req.parameter_source.upper()}   |   Kinetics Model: {single_kin_model}",
             "",
             "2. SINGLE METAL ANALYSIS",
             f"  E_corr: {params.Ecorr_V_SHE:.4f} V vs. SHE   |   i_corr: {params.icorr_uA_cm2:.3g} µA/cm²",
             f"  beta_a: {params.beta_a_mV_dec:.1f} mV/dec   |   beta_c: {params.beta_c_mV_dec:.1f} mV/dec",
-            f"  Initial Corrosion Rate (CR_0): {single_payload.initial_corrosion_rate_nm_min:.4g} nm/min{_ci_str('single_cr0_nm_min', 'nm/min')}",
-            f"  Corrosion Depth @ {req.immersion_time_s:.0f} s: {single_payload.corrosion_depth_nm:.4f} nm{_ci_str('single_corrosion_depth_nm', 'nm')}",
+            f"  Initial Corrosion Rate (CR_0): {_fmt_metric(single_payload.initial_corrosion_rate_nm_min, '.4g', ' nm/min')}{_ci_str('single_cr0_nm_min', 'nm/min')}",
+            f"  Corrosion Depth @ {req.immersion_time_s:.0f} s: {_fmt_metric(single_payload.corrosion_depth_nm, '.4f', ' nm')}{_ci_str('single_corrosion_depth_nm', 'nm')}",
             f"  Time to Threshold: {_format_ttt_short(single_payload.time_to_threshold_s)}{_ci_str('single_time_to_threshold_s', 's')}",
-            f"  Thickness Loss Risk: {single_payload.thickness_loss_risk_tier} (R = {single_payload.thickness_loss_risk_score:.3f})   |   Confidence Tier: {single_payload.confidence_tier}",
+            f"  Thickness Loss Risk: {single_payload.thickness_loss_risk_tier} (R = {_fmt_metric(single_payload.thickness_loss_risk_score, '.3f')})   |   Confidence Tier: {single_payload.confidence_tier}",
         ]
 
         if galvanic_payload is not None:
@@ -839,8 +895,8 @@ def export_report_pdf(
                     f"  Active Metal: {g.active_metal}   |   Noble Metal: {g.noble_metal}   |   Driving Force Risk: {g.galvanic_driving_force_risk}",
                     f"  Mixed Potential (E_galv): {g.mixed_potential_V_SHE:.4f} V vs. SHE{_ci_str('galvanic_mixed_potential_V_SHE', 'V')}",
                     f"  Galvanic Current Density (i_galv): {g.galvanic_current_density_uA_cm2:.3g} µA/cm²",
-                    f"  Acceleration Factor: {g.acceleration_factor:.2f}×{_ci_str('galvanic_acceleration_factor', '×')}   |   Accelerated CR_0: {g.accelerated_cr0_nm_min:.4g} nm/min",
-                    f"  Coupled Depth: {g.coupled_depth_nm:.4f} nm{_ci_str('galvanic_coupled_depth_nm', 'nm')} (Uncoupled: {g.uncoupled_depth_nm:.4f} nm)",
+                    f"  Acceleration Factor: {g.acceleration_factor:.2f}×{_ci_str('galvanic_acceleration_factor', '×')}   |   Accelerated CR_0: {_fmt_metric(g.accelerated_cr0_nm_min, '.4g', ' nm/min')}",
+                    f"  Coupled Depth: {_fmt_metric(g.coupled_depth_nm, '.4f', ' nm')}{_ci_str('galvanic_coupled_depth_nm', 'nm')} (Uncoupled: {_fmt_metric(g.uncoupled_depth_nm, '.4f', ' nm')})",
                     f"  Coupled Time to Threshold: {_format_ttt_short(g.coupled_time_to_threshold_s)}   |   Risk Tier: {g.coupled_risk_tier}   |   Confidence: {g.confidence_tier}",
                 ]
             )
@@ -919,8 +975,8 @@ def export_report_html(
             <div class="kpi"><span>Mixed Potential (E_galv)</span><strong>{g.mixed_potential_V_SHE:.3f} V vs. SHE</strong></div>
             <div class="kpi"><span>Galvanic Current Density (i_galv)</span><strong>{g.galvanic_current_density_uA_cm2:.3g} µA/cm²</strong></div>
             <div class="kpi"><span>Acceleration Factor</span><strong>{g.acceleration_factor:.2f}×</strong></div>
-            <div class="kpi"><span>Coupled Depth</span><strong>{g.coupled_depth_nm:.3f} nm</strong></div>
-            <div class="kpi"><span>Coupled Risk Tier</span><strong>{html.escape(g.coupled_risk_tier)} ({g.coupled_risk_score:.3f})</strong></div>
+            <div class="kpi"><span>Coupled Depth</span><strong>{_fmt_metric(g.coupled_depth_nm, '.3f', ' nm')}</strong></div>
+            <div class="kpi"><span>Coupled Risk Tier</span><strong>{html.escape(g.coupled_risk_tier)} ({_fmt_metric(g.coupled_risk_score, '.3f')})</strong></div>
             <div class="kpi"><span>Galvanic Confidence Tier</span><strong>{html.escape(g.confidence_tier)}</strong></div>
           </div>
         </section>
@@ -1011,11 +1067,11 @@ def export_report_html(
   <section>
     <h2>Single Metal Analysis — {html.escape(req.primary_metal)}</h2>
     <div class="kpi-grid">
-      <div class="kpi"><span>Initial Corrosion Rate (CR₀)</span><strong>{single_payload.initial_corrosion_rate_nm_min:.3g} nm/min</strong></div>
-      <div class="kpi"><span>Corrosion Depth</span><strong>{single_payload.corrosion_depth_nm:.3f} nm</strong></div>
+      <div class="kpi"><span>Initial Corrosion Rate (CR₀)</span><strong>{_fmt_metric(single_payload.initial_corrosion_rate_nm_min, '.3g', ' nm/min')}</strong></div>
+      <div class="kpi"><span>Corrosion Depth</span><strong>{_fmt_metric(single_payload.corrosion_depth_nm, '.3f', ' nm')}</strong></div>
       <div class="kpi"><span>Time to Threshold</span><strong>{html.escape(_format_ttt_short(single_payload.time_to_threshold_s))}</strong></div>
-      <div class="kpi"><span>Thickness Loss Risk</span><strong>{html.escape(single_payload.thickness_loss_risk_tier)} ({single_payload.thickness_loss_risk_score:.3f})</strong></div>
-      <div class="kpi"><span>Kinetics Model</span><strong>{html.escape(single_payload.kinetics_result.model)}</strong></div>
+      <div class="kpi"><span>Thickness Loss Risk</span><strong>{html.escape(single_payload.thickness_loss_risk_tier)} ({_fmt_metric(single_payload.thickness_loss_risk_score, '.3f')})</strong></div>
+      <div class="kpi"><span>Kinetics Model</span><strong>{html.escape(single_payload.kinetics_result.model if single_payload.kinetics_result is not None else 'unavailable')}</strong></div>
     </div>
     {param_table_html}
   </section>

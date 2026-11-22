@@ -11,6 +11,10 @@ from typing import Any, Final
 import numpy as np
 import pandas as pd
 
+from corrosion_simulator.element_constants import (
+    PURE_ELEMENT_PROPERTIES,
+    infer_base_element,
+)
 from corrosion_simulator.seed_data import SEED_MATERIAL_PROPERTIES, build_seed_tables
 
 CORE_METALS: Final[tuple[str, ...]] = ("Cu", "Co", "W", "Ru", "Ti", "Ta", "Al", "Mo")
@@ -316,6 +320,91 @@ class HarmonizedDatabase:
     solution_properties: pd.DataFrame
     galvanic_series: pd.DataFrame = field(default_factory=pd.DataFrame)
     data_dictionary: pd.DataFrame = field(default_factory=pd.DataFrame)
+    rejected_records: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    @property
+    def available_metals(self) -> list[str]:
+        """Return distinct materials present in the database, ordered with core metals first."""
+        counts = self.metal_sample_counts()
+        present = set(counts.keys())
+        core_ordered = [m for m in CORE_METALS if m in present]
+        extended = sorted(
+            (m for m in present if m not in CORE_METALS),
+            key=lambda m: (-counts.get(m, 0), m),
+        )
+        return core_ordered + extended
+
+    def metal_sample_counts(self) -> dict[str, int]:
+        """Return the number of harmonized electrochemical records per material."""
+        if self.electrochemical_database.empty or "metal" not in self.electrochemical_database.columns:
+            return {}
+        vc = self.electrochemical_database["metal"].astype(str).str.strip().value_counts()
+        return {str(k): int(v) for k, v in vc.items()}
+
+    def summarize_galvanic_series(self, metals: list[str] | None = None) -> pd.DataFrame:
+        """Return median E_corr and i_corr Galvanic Series summary for the requested material subset."""
+        gs = self.galvanic_series
+        if gs.empty or "metal" not in gs.columns:
+            return pd.DataFrame(
+                columns=["metal", "median_Ecorr_V_SHE", "median_icorr_uA_cm2", "solutions_covered"]
+            )
+        subset = gs[gs["metal"].isin(metals)] if metals is not None else gs
+        if subset.empty:
+            return pd.DataFrame(
+                columns=["metal", "median_Ecorr_V_SHE", "median_icorr_uA_cm2", "solutions_covered"]
+            )
+        return (
+            subset.groupby("metal", as_index=False)
+            .agg(
+                median_Ecorr_V_SHE=("Ecorr_V_SHE", "median"),
+                median_icorr_uA_cm2=("icorr_uA_cm2", "median"),
+                solutions_covered=("solution_id", "nunique"),
+            )
+            .sort_values("median_Ecorr_V_SHE", ascending=True)
+            .reset_index(drop=True)
+        )
+
+    def material_metadata(self) -> pd.DataFrame:
+        """Return per-material summary metadata (tier, category, sample count, Faraday readiness)."""
+        counts = self.metal_sample_counts()
+        metals = self.available_metals
+        mat_idx = (
+            self.material_properties.set_index("metal")
+            if not self.material_properties.empty and "metal" in self.material_properties.columns
+            else pd.DataFrame()
+        )
+        rows: list[dict[str, Any]] = []
+        for metal in metals:
+            row = mat_idx.loc[metal] if (not mat_idx.empty and metal in mat_idx.index) else None
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            tier = (
+                str(row["tier"])
+                if row is not None and "tier" in row and not pd.isna(row["tier"])
+                else ("core" if metal in CORE_METALS else "extended")
+            )
+            category = (
+                str(row["category"])
+                if row is not None and "category" in row and not pd.isna(row["category"])
+                else "metal"
+            )
+            has_faraday = (
+                bool(row["has_faraday_properties"])
+                if row is not None
+                and "has_faraday_properties" in row
+                and not pd.isna(row["has_faraday_properties"])
+                else False
+            )
+            rows.append(
+                {
+                    "metal": metal,
+                    "tier": tier,
+                    "category": category,
+                    "n_samples": counts.get(metal, 0),
+                    "has_faraday_properties": has_faraday,
+                }
+            )
+        return pd.DataFrame(rows)
 
     @classmethod
     def from_seed(cls) -> HarmonizedDatabase:
@@ -334,8 +423,8 @@ class HarmonizedDatabase:
         cls,
         raw_dir: str | Path = "data/raw",
         *,
-        filter_to_core_metals: bool = True,
-        supplement_missing_core_metals: bool = True,
+        filter_to_core_metals: bool = False,
+        supplement_missing_core_metals: bool = False,
     ) -> HarmonizedDatabase:
         """Ingest raw CSV tables from ``raw_dir`` (or fall back to the built-in seed dataset)."""
         base_path = Path(raw_dir)
@@ -372,9 +461,10 @@ class HarmonizedDatabase:
             )
             if has_echem_cols or "electrochemical" in name_lower or "ml_training" in name_lower:
                 if not (cols & {"metal", "symbol", "material_id"}):
-                    parent_name = csv_path.parent.name
-                    if parent_name in CORE_METALS:
-                        df["metal"] = parent_name
+                    if csv_path.parent != base_path:
+                        parent_name = csv_path.parent.name.strip()
+                        if parent_name and (not filter_to_core_metals or parent_name in CORE_METALS):
+                            df["metal"] = parent_name
                 echem_frames.append(df)
             elif "material_properties" in name_lower or (
                 "density_g_cm3" in cols and "molar_mass_g_mol" in cols and not has_echem_cols
@@ -404,7 +494,7 @@ class HarmonizedDatabase:
         material_df: pd.DataFrame | None = None,
         solution_df: pd.DataFrame | None = None,
         *,
-        filter_to_core_metals: bool = True,
+        filter_to_core_metals: bool = False,
         supplement_missing_core_metals: bool = False,
     ) -> HarmonizedDatabase:
         """Harmonize, deduplicate, normalize units, filter, and impute electrochemical tables."""
@@ -421,7 +511,7 @@ class HarmonizedDatabase:
             # Determine which of the 8 core metals lack valid (Ecorr, icorr) records in echem_raw
             prelim_mat = cls._harmonize_materials(mat_raw, echem_raw, filter_to_core_metals=filter_to_core_metals)
             prelim_sol, prelim_echem_sol = cls._harmonize_solutions(sol_raw, echem_raw)
-            prelim_valid = cls._harmonize_electrochemical_records(
+            prelim_valid, _ = cls._harmonize_electrochemical_records(
                 prelim_echem_sol,
                 prelim_mat,
                 prelim_sol,
@@ -448,7 +538,7 @@ class HarmonizedDatabase:
         harmonized_solutions, echem_with_sol = cls._harmonize_solutions(sol_raw, echem_raw)
 
         # 3. Harmonize Electrochemical Records (potentials -> V vs. SHE, currents -> uA/cm2, slopes -> +mV/dec)
-        harmonized_echem = cls._harmonize_electrochemical_records(
+        harmonized_echem, rejected_records = cls._harmonize_electrochemical_records(
             echem_with_sol,
             harmonized_materials,
             harmonized_solutions,
@@ -472,6 +562,7 @@ class HarmonizedDatabase:
             solution_properties=harmonized_solutions,
             galvanic_series=galvanic_series,
             data_dictionary=data_dictionary,
+            rejected_records=rejected_records,
         )
 
     @staticmethod
@@ -481,12 +572,15 @@ class HarmonizedDatabase:
         *,
         filter_to_core_metals: bool,
     ) -> pd.DataFrame:
-        seed_mat_df = pd.DataFrame(SEED_MATERIAL_PROPERTIES)
         frames: list[pd.DataFrame] = []
+        observed_metals: set[str] = set()
 
         if not mat_raw.empty:
             df = mat_raw.copy()
             df["metal"] = _coalesce_column(df, ["metal", "symbol", "material_id"])
+            observed_metals.update(
+                m for m in df["metal"].dropna().astype(str).str.strip() if m and m.lower() != "nan"
+            )
             frames.append(df)
 
         if not echem_raw.empty:
@@ -498,6 +592,7 @@ class HarmonizedDatabase:
                     "material_id",
                     "material_name",
                     "category",
+                    "base_element",
                     "density_g_cm3",
                     "molar_mass_g_mol",
                     "valence",
@@ -521,9 +616,29 @@ class HarmonizedDatabase:
             if mat_cols:
                 sub = echem_raw[mat_cols].copy()
                 sub["metal"] = _coalesce_column(sub, ["metal", "symbol", "material_id"])
+                observed_metals.update(
+                    m for m in sub["metal"].dropna().astype(str).str.strip() if m and m.lower() != "nan"
+                )
                 frames.append(sub)
 
-        frames.append(seed_mat_df)
+        # Supplement missing physical attributes for pure elements that actually appear in the dataset
+        # (and for all core metals when filter_to_core_metals=True)
+        fallback_rows: list[dict[str, Any]] = []
+        seed_mat_map = {row["metal"]: row for row in SEED_MATERIAL_PROPERTIES}
+        candidate_fallbacks = set(observed_metals)
+        if filter_to_core_metals:
+            candidate_fallbacks.update(CORE_METALS)
+        for metal_sym in sorted(candidate_fallbacks):
+            if metal_sym in seed_mat_map:
+                fallback_rows.append(dict(seed_mat_map[metal_sym]))
+            elif metal_sym in PURE_ELEMENT_PROPERTIES:
+                fallback_rows.append(dict(PURE_ELEMENT_PROPERTIES[metal_sym]))
+        if fallback_rows:
+            frames.append(pd.DataFrame(fallback_rows))
+
+        if not frames:
+            return pd.DataFrame()
+
         combined = pd.concat(frames, ignore_index=True)
         combined["metal"] = combined["metal"].astype(str).str.strip()
         combined = combined[
@@ -533,19 +648,65 @@ class HarmonizedDatabase:
         if filter_to_core_metals:
             combined = combined[combined["metal"].isin(CORE_METALS)]
 
-        # Deduplicate by Metal, preferring first non-null attribute values
+        # Deduplicate by Metal, preferring first non-null attribute values (explicit mat_raw > echem_raw > pure-element fallback)
         deduped = combined.groupby("metal", as_index=False, sort=False).first()
         deduped["symbol"] = deduped["metal"]
         deduped["material_id"] = deduped["metal"]
-        # Enforce canonical Dissolution Valence (z) from GLOSSARY.md and recompute equivalent_weight_g_eq
-        deduped["valence"] = (
-            deduped["metal"]
-            .map(DEFAULT_DISSOLUTION_VALENCE)
-            .fillna(deduped.get("valence", 2))
-            .astype(int)
+        deduped["tier"] = np.where(deduped["metal"].isin(CORE_METALS), "core", "extended")
+
+        if "category" not in deduped.columns:
+            deduped["category"] = "metal"
+        else:
+            deduped["category"] = deduped["category"].fillna("metal").astype(str).str.strip()
+            deduped.loc[deduped["category"].isin({"", "nan"}), "category"] = "metal"
+
+        if "base_element" not in deduped.columns:
+            deduped["base_element"] = deduped["metal"].map(infer_base_element)
+        else:
+            inferred = deduped["metal"].map(infer_base_element)
+            deduped["base_element"] = deduped["base_element"].where(
+                deduped["base_element"].notna() & (deduped["base_element"].astype(str).str.strip() != ""),
+                inferred,
+            )
+
+        # Enforce canonical Dissolution Valence (z) for core metals; preserve explicit valence for extended materials/alloys
+        raw_valence = (
+            pd.to_numeric(deduped["valence"], errors="coerce")
+            if "valence" in deduped.columns
+            else pd.Series([np.nan] * len(deduped), index=deduped.index)
         )
-        molar_mass = pd.to_numeric(deduped["molar_mass_g_mol"], errors="coerce")
-        deduped["equivalent_weight_g_eq"] = (molar_mass / deduped["valence"]).round(4)
+        canonical_valence = pd.to_numeric(deduped["metal"].map(DEFAULT_DISSOLUTION_VALENCE), errors="coerce")
+        deduped["valence"] = canonical_valence.where(canonical_valence.notna(), raw_valence)
+
+        molar_mass = (
+            pd.to_numeric(deduped["molar_mass_g_mol"], errors="coerce")
+            if "molar_mass_g_mol" in deduped.columns
+            else pd.Series([np.nan] * len(deduped), index=deduped.index)
+        )
+        density = (
+            pd.to_numeric(deduped["density_g_cm3"], errors="coerce")
+            if "density_g_cm3" in deduped.columns
+            else pd.Series([np.nan] * len(deduped), index=deduped.index)
+        )
+        explicit_ew = (
+            pd.to_numeric(deduped["equivalent_weight_g_eq"], errors="coerce")
+            if "equivalent_weight_g_eq" in deduped.columns
+            else pd.Series([np.nan] * len(deduped), index=deduped.index)
+        )
+        computed_ew = (molar_mass / deduped["valence"]).round(4)
+        # For core metals, always synchronize EW = M / canonical z; for alloys/compounds, honor explicit EW if provided
+        is_core = deduped["metal"].isin(CORE_METALS)
+        deduped["equivalent_weight_g_eq"] = np.where(
+            is_core,
+            computed_ew,
+            explicit_ew.where(explicit_ew.notna() & (explicit_ew > 0.0), computed_ew),
+        )
+        deduped["has_faraday_properties"] = (
+            density.notna()
+            & (density > 0.0)
+            & pd.to_numeric(deduped["equivalent_weight_g_eq"], errors="coerce").notna()
+            & (pd.to_numeric(deduped["equivalent_weight_g_eq"], errors="coerce") > 0.0)
+        )
         return deduped.reset_index(drop=True)
 
     @staticmethod
@@ -681,14 +842,32 @@ class HarmonizedDatabase:
         solutions: pd.DataFrame,
         *,
         filter_to_core_metals: bool,
-    ) -> pd.DataFrame:
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         if echem.empty:
-            return pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame()
 
         df = echem.copy()
-        df["metal"] = _coalesce_column(df, ["metal", "symbol", "material_id"]).astype(str).str.strip()
+        rejected_frames: list[pd.DataFrame] = []
+        raw_metal = _coalesce_column(df, ["metal", "symbol", "material_id"])
+        df["metal"] = raw_metal.astype(str).str.strip()
+        invalid_metal_mask = raw_metal.isna() | df["metal"].isin({"", "nan", "None"})
+        if invalid_metal_mask.any():
+            rej = df.loc[invalid_metal_mask].copy()
+            rej["rejection_reason"] = "missing_metal_identifier"
+            rejected_frames.append(rej)
+            df = df.loc[~invalid_metal_mask].copy()
+
         if filter_to_core_metals:
-            df = df[df["metal"].isin(CORE_METALS)].copy()
+            non_core_mask = ~df["metal"].isin(CORE_METALS)
+            if non_core_mask.any():
+                rej = df.loc[non_core_mask].copy()
+                rej["rejection_reason"] = "filtered_non_core_metal"
+                rejected_frames.append(rej)
+                df = df.loc[~non_core_mask].copy()
+
+        if df.empty:
+            rejected_all = pd.concat(rejected_frames, ignore_index=True) if rejected_frames else pd.DataFrame()
+            return pd.DataFrame(), rejected_all
 
         if "record_id" not in df.columns:
             df["record_id"] = [f"REC_{i + 1:05d}" for i in range(len(df))]
@@ -850,12 +1029,31 @@ class HarmonizedDatabase:
 
         df["icorr_uA_cm2"] = normalized_icorr
 
-        # Filter out records missing Ecorr or icorr
-        df = df[
-            df["Ecorr_V_SHE"].notna() & df["icorr_uA_cm2"].notna() & (df["icorr_uA_cm2"] > 0.0)
-        ].copy()
+        # Filter out records missing Ecorr or icorr, quarantining them with explicit reasons
+        missing_ecorr = df["Ecorr_V_SHE"].isna()
+        missing_icorr = df["icorr_uA_cm2"].isna() | (df["icorr_uA_cm2"] <= 0.0)
+        invalid_mask = missing_ecorr | missing_icorr
+        if invalid_mask.any():
+            rej = df.loc[invalid_mask].copy()
+            reasons: list[str] = []
+            for idx in rej.index:
+                parts: list[str] = []
+                if bool(missing_ecorr.loc[idx]):
+                    parts.append("missing_or_unconvertible_Ecorr")
+                if bool(missing_icorr.loc[idx]):
+                    parts.append("missing_or_nonpositive_icorr")
+                reasons.append(";".join(parts))
+            rej["rejection_reason"] = reasons
+            rejected_frames.append(rej)
+            df = df.loc[~invalid_mask].copy()
+
+        rejected_all = (
+            pd.concat(rejected_frames, ignore_index=True)
+            if rejected_frames
+            else pd.DataFrame(columns=["record_id", "metal", "solution_id", "rejection_reason"])
+        )
         if df.empty:
-            return df
+            return df, rejected_all
 
         df["log10_icorr_uA_cm2"] = np.log10(df["icorr_uA_cm2"])
 
@@ -902,7 +1100,7 @@ class HarmonizedDatabase:
         penalty = np.where(df["is_imputed"], IMPUTATION_QUALITY_PENALTY, 0.0)
         df["quality_score"] = np.clip(base_quality - penalty, 0.05, 1.0)
 
-        return df.reset_index(drop=True)
+        return df.reset_index(drop=True), rejected_all.reset_index(drop=True)
 
     @staticmethod
     def _build_galvanic_series(echem_df: pd.DataFrame) -> pd.DataFrame:
@@ -972,10 +1170,12 @@ class HarmonizedDatabase:
         known_metadata: dict[str, tuple[str, str, str]] = {
             "record_id": ("identifier", "dimensionless", "Unique electrochemical measurement record identifier."),
             "material_id": ("identifier", "dimensionless", "Canonical Metal identifier matching symbol."),
-            "metal": ("categorical", "dimensionless", "Conductive metallic element or alloy film (Cu, Co, W, Ru, Ti, Ta, Al, Mo)."),
+            "metal": ("categorical", "dimensionless", "Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."),
             "symbol": ("categorical", "dimensionless", "Chemical symbol of the Metal."),
             "material_name": ("text", "dimensionless", "Full English name of the Metal."),
-            "category": ("categorical", "dimensionless", "Semiconductor film functional category (metal, barrier, liner)."),
+            "category": ("categorical", "dimensionless", "Semiconductor film functional category (metal, barrier, liner, semiconductor)."),
+            "tier": ("categorical", "dimensionless", "Material catalog tier (core semiconductor metal vs. extended material)."),
+            "has_faraday_properties": ("boolean", "dimensionless", "True when density and equivalent weight are available for Faraday corrosion-rate conversion."),
             "sample_name": ("text", "dimensionless", "Original experimental sample or specimen designation reported in the source publication."),
             "metal_form": ("categorical", "dimensionless", "Physical morphology or deposition form of the Metal (thin film, PVD, ALD, bulk, foil, rod)."),
             "surface_preparation": ("text", "dimensionless", "Pre-exposure surface conditioning or polishing treatment (e.g., CMP, mechanical polish, annealed)."),
@@ -1340,8 +1540,34 @@ class HarmonizedDatabase:
                 }
         raise ValueError(f"Unknown solution_id: {solution_id!r}")
 
+    @staticmethod
+    def compute_raw_directory_fingerprint(raw_dir: str | Path = "data/raw") -> dict[str, Any]:
+        """Compute a deterministic SHA-256 fingerprint of all CSV files under ``raw_dir``."""
+        base_path = Path(raw_dir)
+        files_info: dict[str, dict[str, Any]] = {}
+        combined_hasher = hashlib.sha256()
+        if base_path.exists():
+            for csv_path in sorted(base_path.rglob("*.csv")):
+                rel = str(csv_path.relative_to(base_path)).replace("\\", "/")
+                data = csv_path.read_bytes()
+                file_sha = hashlib.sha256(data).hexdigest()
+                files_info[rel] = {
+                    "sha256": file_sha,
+                    "size_bytes": len(data),
+                }
+                combined_hasher.update(rel.encode("utf-8"))
+                combined_hasher.update(b":")
+                combined_hasher.update(file_sha.encode("utf-8"))
+                combined_hasher.update(b"\n")
+        return {
+            "raw_dir": str(base_path),
+            "combined_sha256": combined_hasher.hexdigest(),
+            "file_count": len(files_info),
+            "files": files_info,
+        }
+
     def export_to_directory(self, output_dir: str | Path = "data/processed") -> dict[str, Path]:
-        """Save all harmonized tables and the data dictionary to ``output_dir``."""
+        """Save all harmonized tables and the data dictionary to ``output_dir`` as CSV/Markdown."""
         out_path = Path(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
@@ -1352,6 +1578,7 @@ class HarmonizedDatabase:
             "galvanic_series": out_path / "galvanic_series.csv",
             "data_dictionary": out_path / "data_dictionary.csv",
             "data_dictionary_markdown": out_path / "DATA_DICTIONARY.md",
+            "rejected_records": out_path / "rejected_rows.csv",
         }
 
         self.electrochemical_database.to_csv(paths["electrochemical_database"], index=False)
@@ -1362,4 +1589,79 @@ class HarmonizedDatabase:
         paths["data_dictionary_markdown"].write_text(
             self.render_data_dictionary_markdown(), encoding="utf-8"
         )
+        self.rejected_records.to_csv(paths["rejected_records"], index=False)
         return paths
+
+    def export_to_parquet(self, output_dir: str | Path = "data/processed") -> dict[str, Path]:
+        """Save all harmonized tables to ``output_dir`` as Parquet for fast startup loading."""
+        out_path = Path(output_dir)
+        out_path.mkdir(parents=True, exist_ok=True)
+
+        def _sanitize_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
+            clean = df.copy()
+            for col in clean.columns:
+                if clean[col].dtype == object:
+                    # Coerce mixed object columns to strings where non-null to satisfy Arrow typing
+                    non_null = clean[col].dropna()
+                    if not non_null.empty and len({type(v) for v in non_null}) > 1:
+                        clean[col] = clean[col].where(clean[col].isna(), clean[col].astype(str))
+            return clean
+
+        paths = {
+            "electrochemical_database": out_path / "electrochemical_database.parquet",
+            "material_properties": out_path / "material_properties.parquet",
+            "solution_properties": out_path / "solution_properties.parquet",
+            "galvanic_series": out_path / "galvanic_series.parquet",
+            "data_dictionary": out_path / "data_dictionary.parquet",
+        }
+        _sanitize_for_parquet(self.electrochemical_database).to_parquet(
+            paths["electrochemical_database"], index=False
+        )
+        _sanitize_for_parquet(self.material_properties).to_parquet(
+            paths["material_properties"], index=False
+        )
+        _sanitize_for_parquet(self.solution_properties).to_parquet(
+            paths["solution_properties"], index=False
+        )
+        _sanitize_for_parquet(self.galvanic_series).to_parquet(
+            paths["galvanic_series"], index=False
+        )
+        _sanitize_for_parquet(self.data_dictionary).to_parquet(
+            paths["data_dictionary"], index=False
+        )
+        return paths
+
+    @classmethod
+    def from_processed_directory(cls, processed_dir: str | Path = "data/processed") -> HarmonizedDatabase:
+        """Load prebuilt harmonized tables from Parquet (preferred) or CSV in ``processed_dir``."""
+        base_path = Path(processed_dir)
+        if not base_path.exists():
+            raise FileNotFoundError(f"Processed artifact directory does not exist: {base_path}")
+
+        def _load_table(stem: str, required: bool = True) -> pd.DataFrame:
+            pq_path = base_path / f"{stem}.parquet"
+            csv_path = base_path / f"{stem}.csv"
+            if pq_path.exists():
+                return pd.read_parquet(pq_path)
+            if csv_path.exists():
+                return pd.read_csv(csv_path, encoding="utf-8-sig")
+            if required:
+                raise FileNotFoundError(f"Missing processed table {stem}.parquet or {stem}.csv in {base_path}")
+            return pd.DataFrame()
+
+        echem = _load_table("electrochemical_database", required=True)
+        materials = _load_table("material_properties", required=True)
+        solutions = _load_table("solution_properties", required=True)
+        galvanic = _load_table("galvanic_series", required=False)
+        dictionary = _load_table("data_dictionary", required=False)
+        rejected_path = base_path / "rejected_rows.csv"
+        rejected = pd.read_csv(rejected_path, encoding="utf-8-sig") if rejected_path.exists() else pd.DataFrame()
+
+        return cls(
+            electrochemical_database=echem,
+            material_properties=materials,
+            solution_properties=solutions,
+            galvanic_series=galvanic,
+            data_dictionary=dictionary,
+            rejected_records=rejected,
+        )

@@ -29,6 +29,10 @@ from corrosion_simulator.database import (
     HarmonizedDatabase,
     normalize_category_label as _clean_category,
 )
+from corrosion_simulator.element_constants import (
+    PURE_ELEMENT_PROPERTIES,
+    infer_base_element,
+)
 from corrosion_simulator.physics import (
     PolarizationParameters,
     calculate_faraday_corrosion_rate,
@@ -79,6 +83,8 @@ TAFEL_SLOPE_MIN_MV_DEC: Final[float] = 20.0
 TAFEL_SLOPE_MAX_MV_DEC: Final[float] = 500.0
 ECORR_THERMO_MIN_V_SHE: Final[float] = -2.5
 ECORR_THERMO_MAX_V_SHE: Final[float] = 2.5
+GP_MAX_TRAINING_SAMPLES: Final[int] = 2500
+DEFAULT_LOW_SAMPLE_THRESHOLD: Final[int] = 10
 
 _MATERIAL_DESCRIPTOR_COLS: Final[tuple[str, ...]] = (
     "standard_potential_V_SHE",
@@ -169,18 +175,35 @@ class ElectrochemicalFeatureExtractor:
 
     def __init__(self, material_properties: pd.DataFrame | None = None) -> None:
         self._material_lookup: dict[str, dict[str, float]] = {}
-        for metal, row in _SEED_MATERIAL_MAP.items():
+        for metal, row in PURE_ELEMENT_PROPERTIES.items():
             self._material_lookup[metal] = {
-                col: float(row[col]) for col in _MATERIAL_DESCRIPTOR_COLS if col in row
+                col: float(row[col])
+                for col in _MATERIAL_DESCRIPTOR_COLS
+                if col in row and not pd.isna(row[col])
             }
         if material_properties is not None and not material_properties.empty:
-            col_key = "metal" if "metal" in material_properties.columns else "symbol"
-            if col_key in material_properties.columns:
+            col_key = next(
+                (c for c in ("metal", "material_id", "symbol") if c in material_properties.columns),
+                None,
+            )
+            if col_key is not None:
                 for _, row in material_properties.iterrows():
                     metal = str(row[col_key]).strip()
                     if not metal:
                         continue
+                    # For alloys/compounds (e.g., TiN, TaN), inherit base-element descriptors first
+                    base_elem = (
+                        str(row["base_element"]).strip()
+                        if "base_element" in row and not pd.isna(row["base_element"])
+                        else infer_base_element(metal)
+                    )
                     entry = self._material_lookup.setdefault(metal, {})
+                    if base_elem and base_elem in PURE_ELEMENT_PROPERTIES:
+                        for col in _MATERIAL_DESCRIPTOR_COLS:
+                            if col not in entry and col in PURE_ELEMENT_PROPERTIES[base_elem]:
+                                val = PURE_ELEMENT_PROPERTIES[base_elem][col]
+                                if not pd.isna(val):
+                                    entry[col] = float(val)
                     for col in _MATERIAL_DESCRIPTOR_COLS:
                         if col in row and not pd.isna(row[col]):
                             entry[col] = float(row[col])
@@ -217,11 +240,20 @@ class ElectrochemicalFeatureExtractor:
             else:
                 work[col] = np.nan
 
-        # Populate material descriptors from lookup whenever missing
+        # Populate material descriptors from lookup (with base-element fallback for unseen alloys/compounds)
+        def _resolve_descriptor(material_name: str, col_name: str) -> float:
+            direct = self._material_lookup.get(material_name, {}).get(col_name)
+            if direct is not None:
+                return float(direct)
+            base_elem = infer_base_element(material_name)
+            if base_elem:
+                base_val = self._material_lookup.get(base_elem, {}).get(col_name)
+                if base_val is not None:
+                    return float(base_val)
+            return float("nan")
+
         for col in _MATERIAL_DESCRIPTOR_COLS:
-            mapped = work["metal"].map(
-                lambda m, c=col: self._material_lookup.get(m, {}).get(c, np.nan)
-            )
+            mapped = work["metal"].map(lambda m, c=col: _resolve_descriptor(m, c))
             if col in work.columns:
                 work[col] = pd.to_numeric(work[col], errors="coerce").fillna(mapped)
             else:
@@ -372,6 +404,7 @@ class ApplicabilityDomainChecker:
         medium_distance_threshold: float = 0.35,
         high_distance_threshold: float = 0.75,
         min_high_confidence_samples: int = 5,
+        min_low_confidence_samples: int = DEFAULT_LOW_SAMPLE_THRESHOLD,
     ) -> None:
         if k < 1:
             raise ValueError("k must be at least 1.")
@@ -379,6 +412,7 @@ class ApplicabilityDomainChecker:
         self.medium_distance_threshold = float(medium_distance_threshold)
         self.high_distance_threshold = float(high_distance_threshold)
         self.min_high_confidence_samples = int(min_high_confidence_samples)
+        self.min_low_confidence_samples = int(min_low_confidence_samples)
 
         self._metal_stats: dict[str, dict[str, Any]] = {}
         self._global_spans: dict[str, float] = {}
@@ -517,9 +551,21 @@ class ApplicabilityDomainChecker:
         knn_mean_dist = float(np.mean(nearest_dists))
 
         in_box = len(out_of_box) == 0 and len(unseen_cats) == 0
-        if not in_box or knn_mean_dist > self.high_distance_threshold:
+        low_sample_threshold = getattr(self, "min_low_confidence_samples", DEFAULT_LOW_SAMPLE_THRESHOLD)
+        is_low_sample = n_samples < low_sample_threshold
+        if is_low_sample:
+            warnings.append(
+                f"Low training sample count for {metal} (n={n_samples} < {low_sample_threshold}); "
+                "prediction relies heavily on cross-material physical descriptors."
+            )
+            recommendations.append(
+                f"Collect additional experimental polarization data for {metal} (currently n={n_samples}) "
+                f"to raise coverage above {low_sample_threshold} records."
+            )
+
+        if not in_box or knn_mean_dist > self.high_distance_threshold or is_low_sample:
             tier: ConfidenceTier = "Low"
-            if in_box:
+            if in_box and not is_low_sample:
                 warnings.append(
                     f"Sparse local {metal} training density (k={eff_k} mean distance={knn_mean_dist:.3f})."
                 )
@@ -617,15 +663,60 @@ class _UncertainTargetModel:
         random_state: int = 42,
         n_estimators: int = 100,
         n_bootstrap: int = 10,
+        max_gp_samples: int = GP_MAX_TRAINING_SAMPLES,
     ) -> None:
         self.model_family = model_family
         self.random_state = int(random_state)
         self.n_estimators = int(n_estimators)
         self.n_bootstrap = int(n_bootstrap)
+        self.max_gp_samples = int(max_gp_samples)
+        self.gp_subsampled: bool = False
         self._scaler: StandardScaler | None = None
         self._model: Any = None
         self._secondary_model: Any = None
         self._ensemble: list[Any] = []
+
+    def _subsample_for_gp(self, X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Deterministically cap GP training size to prevent O(N^3) blowup on large datasets."""
+        if len(y) <= self.max_gp_samples:
+            self.gp_subsampled = False
+            return X, y
+        self.gp_subsampled = True
+        rng = np.random.default_rng(self.random_state)
+        # Stratified-like selection across sorted target quantiles for representative coverage
+        order = np.argsort(y)
+        bins = np.array_split(order, min(20, self.max_gp_samples))
+        selected: list[int] = []
+        remaining = self.max_gp_samples
+        for i, b in enumerate(bins):
+            quota = remaining // (len(bins) - i)
+            take = min(len(b), quota)
+            if take > 0:
+                chosen = rng.choice(b, size=take, replace=False)
+                selected.extend(int(idx) for idx in chosen)
+                remaining -= take
+        idx_arr = np.array(sorted(selected), dtype=int)
+        return X[idx_arr], y[idx_arr]
+
+    def _fit_gp_regressor(self, X: np.ndarray, y: np.ndarray) -> GaussianProcessRegressor:
+        X_gp, y_gp = self._subsample_for_gp(X, y)
+        self._scaler = StandardScaler()
+        X_scaled = self._scaler.fit_transform(X_gp)
+        kernel = (
+            ConstantKernel(1.0, (1e-3, 1e3))
+            * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e3), nu=2.5)
+            + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-5, 1e1))
+        )
+        gpr = GaussianProcessRegressor(
+            kernel=kernel,
+            normalize_y=True,
+            random_state=self.random_state,
+            n_restarts_optimizer=1,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            gpr.fit(X_scaled, y_gp)
+        return gpr
 
     def fit(
         self,
@@ -681,23 +772,7 @@ class _UncertainTargetModel:
                 hgbr.fit(X[idx], y[idx], sample_weight=w_boot)
                 self._ensemble.append(hgbr)
         elif self.model_family == "gaussian_process":
-            self._scaler = StandardScaler()
-            X_scaled = self._scaler.fit_transform(X)
-            kernel = (
-                ConstantKernel(1.0, (1e-3, 1e3))
-                * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e3), nu=2.5)
-                + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-5, 1e1))
-            )
-            gpr = GaussianProcessRegressor(
-                kernel=kernel,
-                normalize_y=True,
-                random_state=self.random_state,
-                n_restarts_optimizer=1,
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", ConvergenceWarning)
-                gpr.fit(X_scaled, y)
-            self._model = gpr
+            self._model = self._fit_gp_regressor(X, y)
         elif self.model_family == "rf_gp_ensemble":
             rf = RandomForestRegressor(
                 n_estimators=self.n_estimators,
@@ -706,24 +781,7 @@ class _UncertainTargetModel:
             )
             rf.fit(X, y, sample_weight=sample_weight)
             self._model = rf
-
-            self._scaler = StandardScaler()
-            X_scaled = self._scaler.fit_transform(X)
-            kernel = (
-                ConstantKernel(1.0, (1e-3, 1e3))
-                * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e3), nu=2.5)
-                + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-5, 1e1))
-            )
-            gpr = GaussianProcessRegressor(
-                kernel=kernel,
-                normalize_y=True,
-                random_state=self.random_state,
-                n_restarts_optimizer=1,
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", ConvergenceWarning)
-                gpr.fit(X_scaled, y)
-            self._secondary_model = gpr
+            self._secondary_model = self._fit_gp_regressor(X, y)
         else:
             raise ValueError(f"Unsupported model_family: {self.model_family!r}")
         return self
@@ -920,6 +978,7 @@ class HybridMLPredictor:
         knn_k: int = 3,
         exclude_imputed_tafel: bool = True,
         use_quality_weights: bool = True,
+        max_gp_samples: int = GP_MAX_TRAINING_SAMPLES,
     ) -> None:
         if model_family not in SUPPORTED_MODEL_FAMILIES:
             raise ValueError(
@@ -932,6 +991,7 @@ class HybridMLPredictor:
         self.knn_k = int(knn_k)
         self.exclude_imputed_tafel = bool(exclude_imputed_tafel)
         self.use_quality_weights = bool(use_quality_weights)
+        self.max_gp_samples = int(max_gp_samples)
 
         self.feature_extractor: ElectrochemicalFeatureExtractor | None = None
         self.applicability_checker: ApplicabilityDomainChecker | None = None
@@ -969,6 +1029,7 @@ class HybridMLPredictor:
                 random_state=self.random_state + idx * 17,
                 n_estimators=self.n_estimators,
                 n_bootstrap=self.n_bootstrap,
+                max_gp_samples=self.max_gp_samples,
             )
             model.fit(X[mask], y_all[mask], sample_weight=w_target)
             self.models[target_name] = model

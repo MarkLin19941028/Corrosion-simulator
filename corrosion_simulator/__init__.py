@@ -11,6 +11,11 @@ from corrosion_simulator.database import (
     normalize_current_density_to_uA_cm2,
     normalize_tafel_slope_to_mV_dec,
 )
+from corrosion_simulator.element_constants import (
+    PURE_ELEMENT_PROPERTIES,
+    infer_base_element,
+    lookup_pure_element_properties,
+)
 from corrosion_simulator.galvanic import (
     GalvanicCouplingResult,
     MonteCarloGalvanicResult,

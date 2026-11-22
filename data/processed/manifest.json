@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "built_at_utc": "2026-11-22T17:42:30.095687+00:00",
+  "raw_fingerprint": {
+    "raw_dir": "data/raw",
+    "combined_sha256": "6e503177424d9d88c3008ef0d9871ec15edaed802eb0b5a816c3128f168ad0b0",
+    "file_count": 3,
+    "files": {
+      "material_properties.csv": {
+        "sha256": "2b29e770a3a5e8277cfa13957bd603a87dd1ba49f70393a3848b93ad872ffe7b",
+        "size_bytes": 1661
+      },
+      "ml_training_dataset.csv": {
+        "sha256": "dc34f63e4d077c693cfe227a1a775025fcec9f6909522e92b5b5c023cd8fa108",
+        "size_bytes": 5421019
+      },
+      "solution_properties.csv": {
+        "sha256": "9eba78255f31ef67c3a3a9d86c365f97d027e84e76122250926406bf5af85866",
+        "size_bytes": 185455
+      }
+    }
+  },
+  "filter_to_core_metals": false,
+  "supplement_missing_core_metals": false,
+  "n_records": 1228,
+  "n_rejected": 3028,
+  "n_solutions": 528,
+  "n_materials": 19,
+  "available_metals": [
+    "Cu",
+    "Co",
+    "W",
+    "Ru",
+    "Ti",
+    "Ta",
+    "Al",
+    "Mo",
+    "Fe",
+    "Cr",
+    "TiN",
+    "Sn",
+    "Ni",
+    "Mg",
+    "Pt",
+    "Pd",
+    "Zn",
+    "Mn",
+    "Au"
+  ],
+  "core_metals_present": [
+    "Cu",
+    "Co",
+    "W",
+    "Ru",
+    "Ti",
+    "Ta",
+    "Al",
+    "Mo"
+  ],
+  "extended_metals_present": [
+    "Fe",
+    "Cr",
+    "TiN",
+    "Sn",
+    "Ni",
+    "Mg",
+    "Pt",
+    "Pd",
+    "Zn",
+    "Mn",
+    "Au"
+  ],
+  "metal_sample_counts": {
+    "Cu": 536,
+    "Co": 176,
+    "Fe": 129,
+    "Al": 82,
+    "Mo": 62,
+    "Ti": 58,
+    "Cr": 46,
+    "TiN": 34,
+    "Sn": 16,
+    "Ni": 15,
+    "W": 15,
+    "Pt": 12,
+    "Mg": 12,
+    "Ru": 12,
+    "Ta": 7,
+    "Pd": 6,
+    "Zn": 5,
+    "Mn": 3,
+    "Au": 2
+  },
+  "missing_faraday_materials": [],
+  "tables": {
+    "electrochemical_database": "electrochemical_database.parquet",
+    "material_properties": "material_properties.parquet",
+    "solution_properties": "solution_properties.parquet",
+    "galvanic_series": "galvanic_series.parquet",
+    "data_dictionary": "data_dictionary.parquet"
+  },
+  "models": {
+    "random_forest": {
+      "path": "models/random_forest.joblib",
+      "target_training_counts": {
+        "Ecorr_V_SHE": 1228,
+        "log10_icorr_uA_cm2": 1228,
+        "beta_a_mV_dec": 458,
+        "beta_c_mV_dec": 400
+      },
+      "gp_subsampled": false
+    },
+    "extra_trees": {
+      "path": "models/extra_trees.joblib",
+      "target_training_counts": {
+        "Ecorr_V_SHE": 1228,
+        "log10_icorr_uA_cm2": 1228,
+        "beta_a_mV_dec": 458,
+        "beta_c_mV_dec": 400
+      },
+      "gp_subsampled": false
+    },
+    "hist_gradient_boosting": {
+      "path": "models/hist_gradient_boosting.joblib",
+      "target_training_counts": {
+        "Ecorr_V_SHE": 1228,
+        "log10_icorr_uA_cm2": 1228,
+        "beta_a_mV_dec": 458,
+        "beta_c_mV_dec": 400
+      },
+      "gp_subsampled": false
+    }
+  },
+  "warnings": [
+    "Quarantined 3028 invalid/incomplete raw record(s) to rejected_rows.csv."
+  ]
+}

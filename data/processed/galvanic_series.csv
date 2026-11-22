@@ -1,12 +1,19 @@
 solution_id,metal,solution_name,pH,oxidizer_type,oxidizer_concentration,temperature_C,Ecorr_V_SHE,icorr_uA_cm2,beta_a_mV_dec,beta_c_mV_dec,record_count,galvanic_rank,metals_in_solution,relative_nobility
-SOL_012944a9,Co,0.5 M HCl; 2.0 M HCl; 1.0 M HCl; 0.5 M H2SO4; 2 M HCl; 1 M HCl; 37 % HCl,0.22,None,0.0,24.85,0.05499999999999999,45.8,47.55,155.75,2,1,1,Isolated
+SOL_012944a9,Zn,0.5 M HCl; 2.0 M HCl; 1.0 M HCl; 0.5 M H2SO4; 2 M HCl; 1 M HCl; 37 % HCl,0.22,None,0.0,24.85,0.04849999999999999,45.9,46.7,162.6,2,1,5,Most Active (Anodic)
+SOL_012944a9,Ni,0.5 M HCl; 2.0 M HCl; 1.0 M HCl; 0.5 M H2SO4; 2 M HCl; 1 M HCl; 37 % HCl,0.22,None,0.0,24.85,0.05199999999999999,40.099999999999994,45.1,158.10000000000002,2,2,5,Intermediate
+SOL_012944a9,Co,0.5 M HCl; 2.0 M HCl; 1.0 M HCl; 0.5 M H2SO4; 2 M HCl; 1 M HCl; 37 % HCl,0.22,None,0.0,24.85,0.05499999999999999,45.8,47.55,155.75,2,3,5,Intermediate
+SOL_012944a9,Mn,0.5 M HCl; 2.0 M HCl; 1.0 M HCl; 0.5 M H2SO4; 2 M HCl; 1 M HCl; 37 % HCl,0.22,None,0.0,24.85,0.0595,63.35,51.95,143.85000000000002,2,4,5,Intermediate
+SOL_012944a9,Sn,0.5 M HCl; 2.0 M HCl; 1.0 M HCl; 0.5 M H2SO4; 2 M HCl; 1 M HCl; 37 % HCl,0.22,None,0.0,24.85,0.095,93.5,126.4,135.95,7,5,5,Most Noble (Cathodic)
 SOL_0147723f,Co,50 mM citric acid,9.0,None,0.0,25.0,0.441,18.0,139.15,104.0,2,1,1,Isolated
 SOL_02a4d481,Ti,8 M NaOH; 2 M HF,1.4,None,0.0,37.0,-0.1996,0.1187,127.0,112.3,1,1,2,Most Active (Anodic)
 SOL_02a4d481,Co,8 M NaOH; 2 M HF,1.4,None,0.0,37.0,-0.0184,0.0097,115.8,77.6,5,2,2,Most Noble (Cathodic)
-SOL_0997a695,Al,3.5 % NaCl,7.0,None,0.0,25.0,-1.123,151.4,82.9,421.9,2,1,4,Most Active (Anodic)
-SOL_0997a695,Mo,3.5 % NaCl,7.0,None,0.0,25.0,-0.139,0.095,193.0,140.5,10,2,4,Intermediate
-SOL_0997a695,Co,3.5 % NaCl,7.0,None,0.0,25.0,0.012999999999999984,0.37,139.15,104.0,7,3,4,Intermediate
-SOL_0997a695,Cu,3.5 % NaCl,7.0,None,0.0,25.0,0.5336000000000001,25.378,75.5,138.6,5,4,4,Most Noble (Cathodic)
+SOL_04cdbc36,Fe,3 % NaCl; 4.5 % NaCl; 4.9 % FeCl3; 14.3 % FeCl3,7.0,FeCl3,4.9,25.0,-1.3319999999999999,3.54,83.0,143.5,18,1,1,Isolated
+SOL_0997a695,Al,3.5 % NaCl,7.0,None,0.0,25.0,-1.123,151.4,82.9,421.9,2,1,6,Most Active (Anodic)
+SOL_0997a695,Mo,3.5 % NaCl,7.0,None,0.0,25.0,-0.139,0.095,193.0,140.5,10,2,6,Intermediate
+SOL_0997a695,Co,3.5 % NaCl,7.0,None,0.0,25.0,0.012999999999999984,0.37,139.15,104.0,7,3,6,Intermediate
+SOL_0997a695,Fe,3.5 % NaCl,7.0,None,0.0,25.0,0.241,10.55,102.7,115.8,12,4,6,Intermediate
+SOL_0997a695,Cr,3.5 % NaCl,7.0,None,0.0,25.0,0.267,0.45,339.0,203.0,1,5,6,Intermediate
+SOL_0997a695,Cu,3.5 % NaCl,7.0,None,0.0,25.0,0.5336000000000001,25.378,75.5,138.6,5,6,6,Most Noble (Cathodic)
 SOL_0a9be240,Mo,3.5 % NaCl,7.4,None,0.0,25.0,-0.022999999999999993,6.809,143.0,93.0,1,1,1,Isolated
 SOL_0aaa7ea2,Cu,1 M HNO3; 1.0 M HNO3,0.0,HNO3,1.0,25.0,0.35309999999999997,121.7,145.8,209.1,9,1,1,Isolated
 SOL_0bc16123,Co,0.5 M NaCl,7.0,None,0.0,30.0,0.251,1.8,139.15,104.0,2,1,1,Isolated
@@ -16,11 +23,14 @@ SOL_0c0ba6a0,Cu,25 wt% NaCl,7.0,None,0.0,27.0,0.198,159.7,75.5,138.6,1,1,1,Isola
 SOL_0ce7647c,Ti,1 M KOH,14.0,None,0.0,25.0,-1.0539999999999998,0.206,189.7,106.0,1,1,1,Isolated
 SOL_0cf5ac26,Cu,0.6 M NaCl,7.0,None,0.0,25.0,-0.3735,267.5,154.5,161.5,6,1,1,Isolated
 SOL_0e49e901,Co,pH 10.0 solution,10.0,None,0.0,25.0,0.04100000000000001,2.0620000000000003,139.15,104.0,2,1,1,Isolated
+SOL_128b6b7e,Fe,pH 5.0 solution,5.0,None,0.0,24.85,-0.35200000000000004,2.86,102.7,115.8,3,1,1,Isolated
 SOL_12cb17c7,Cu,0.9 % NaCl; 0.5 mol L−1 HCl; 1.0 mol L−1 HCl; 1 mol L−1 HCl,5.5,None,0.0,25.0,0.0116,2.46,52.3,86.8,5,1,1,Isolated
 SOL_138f259e,Cu,3.5 % NaCl,7.0,None,0.0,24.85,0.19999999999999998,1315.58,166.0,145.8,14,1,1,Isolated
-SOL_149b7d95,Co,0.09 wt% H2O2; 09 wt% H2O2,10.0,H2O2,0.09,25.0,0.347,1.246,67.5,104.5,1,1,1,Isolated
+SOL_149b7d95,Co,0.09 wt% H2O2; 09 wt% H2O2,10.0,H2O2,0.09,25.0,0.347,1.246,67.5,104.5,1,1,2,Most Active (Anodic)
+SOL_149b7d95,TiN,0.09 wt% H2O2; 09 wt% H2O2,10.0,H2O2,0.09,25.0,0.347,1.246,60.0,120.0,1,2,2,Most Noble (Cathodic)
 SOL_151966dd,Cu,3.5 wt% NaCl,7.0,None,0.0,65.0,-0.06939999999999999,165.45000000000002,75.5,162.0,12,1,1,Isolated
-SOL_15712b15,Mo,0.5 mol/L H2SO4; 0.5 M H2SO4,3.0,None,0.0,80.0,-0.03999999999999998,534.0,143.0,93.0,8,1,1,Isolated
+SOL_15712b15,Fe,0.5 mol/L H2SO4; 0.5 M H2SO4,3.0,None,0.0,80.0,-0.06999999999999995,0.26,102.7,115.8,1,1,2,Most Active (Anodic)
+SOL_15712b15,Mo,0.5 mol/L H2SO4; 0.5 M H2SO4,3.0,None,0.0,80.0,-0.03999999999999998,534.0,143.0,93.0,8,2,2,Most Noble (Cathodic)
 SOL_164813ae,Cu,3.5 % NaCl,7.0,None,0.0,40.0,0.04899999999999999,0.062,75.5,138.6,7,1,3,Most Active (Anodic)
 SOL_164813ae,Co,3.5 % NaCl,7.0,None,0.0,40.0,0.11,2.814,139.15,104.0,14,2,3,Intermediate
 SOL_164813ae,W,3.5 % NaCl,7.0,None,0.0,40.0,0.137,2.98,44.6,44.6,5,3,3,Most Noble (Cathodic)
@@ -28,44 +38,67 @@ SOL_1748c273,Ti,0.5 M H2SO4; 1 M KOH; 3.5 wt% NaCl,0.22,None,0.0,25.0,-0.5279999
 SOL_197ec9a7,Ru,1 M HCl; 1.0 M KOH; 1 M KOH,0.0,None,0.0,25.0,-0.5720000000000001,186.0,60.0,70.35,2,1,1,Isolated
 SOL_1a4a7733,Cu,1 M HCl; 37 % HCl,0.0,None,0.0,25.0,0.0050000000000000044,92.5,53.0,274.7,11,1,1,Isolated
 SOL_1b281b4e,Co,3.5 % NaCl; 5 % NaCl; 1 M NaCl,7.0,None,0.0,25.0,0.173,1.77,139.15,104.0,1,1,1,Isolated
-SOL_1cae3082,Cu,3.5 % NaCl,7.0,None,0.0,5.0,-0.059,19.825000000000003,75.5,138.6,2,1,1,Isolated
+SOL_1cae3082,Cu,3.5 % NaCl,7.0,None,0.0,5.0,-0.059,19.825000000000003,75.5,138.6,2,1,2,Most Active (Anodic)
+SOL_1cae3082,Ni,3.5 % NaCl,7.0,None,0.0,5.0,0.191,6.57,45.1,149.4,1,2,2,Most Noble (Cathodic)
+SOL_1cc5b3cc,TiN,5 % NaOH,13.88,None,0.0,24.0,1.0,30.0,164.0,300.0,1,1,1,Isolated
 SOL_1fba95d6,Cu,1.0 M HNO3; 1 M HNO3; 2 M HNO3,0.0,HNO3,1.0,48.0,0.21660000000000001,210.0,75.3,209.1,7,1,1,Isolated
 SOL_20412959,Mo,3.5 wt% NaCl; 3.5 % NaCl; 0.1 M NaCl,7.0,None,0.0,70.0,-0.44899999999999995,4.38,122.0,150.0,5,1,1,Isolated
 SOL_20c52c93,Cu,0.2 g/L Na2SO4; 0.2 g/L NaHCO3; 0.2 g/L NaNO3,2.42,None,0.0,24.85,0.249,0.91,75.5,138.6,7,1,1,Isolated
+SOL_21c141fa,Pd,5 M NaOH,7.4,None,0.0,37.0,0.18455,2.5300000000000002,353.9,185.5,6,1,1,Isolated
 SOL_22474219,Mo,1 M H2SO4,1.8,None,0.0,19.85,-0.271,75.0,143.0,93.0,5,1,1,Isolated
-SOL_259f62b0,Co,3.5 wt% NaCl,4.5,None,0.0,18.0,-0.30000000000000004,77.125,139.15,104.0,4,1,1,Isolated
-SOL_26778fa7,Ti,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.95,0.245,189.7,106.0,1,1,4,Most Active (Anodic)
-SOL_26778fa7,Cu,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.5523,0.4139,75.5,138.6,6,2,4,Intermediate
-SOL_26778fa7,Al,3.5 wt% NaCl,7.0,None,0.0,25.0,0.022999999999999993,2.35,82.9,421.9,10,3,4,Intermediate
-SOL_26778fa7,Co,3.5 wt% NaCl,7.0,None,0.0,25.0,0.031,0.9,139.15,104.0,1,4,4,Most Noble (Cathodic)
-SOL_27132454,Al,,7.0,None,0.0,27.0,-0.5840000000000001,19.99,82.9,421.9,21,1,7,Most Active (Anodic)
-SOL_27132454,Ta,,7.0,None,0.0,25.0,-0.254,0.12,60.0,120.0,1,2,7,Intermediate
-SOL_27132454,W,,7.0,None,0.0,1.46,-0.21899999999999997,129.68,46.0,46.3,1,3,7,Intermediate
-SOL_27132454,Ti,,7.0,None,0.0,25.0,-0.07700000000000001,0.348,189.7,106.0,19,4,7,Intermediate
-SOL_27132454,Cu,,7.0,None,0.0,37.0,-0.07,0.20700000000000002,75.5,138.6,40,5,7,Intermediate
-SOL_27132454,Mo,,7.0,None,0.0,45.0,-0.012999999999999998,0.235,83.0,85.5,6,6,7,Intermediate
-SOL_27132454,Co,,7.0,None,0.0,25.0,0.011200000000000002,2.883,139.15,104.0,20,7,7,Most Noble (Cathodic)
+SOL_259f62b0,Fe,3.5 wt% NaCl,4.5,None,0.0,18.0,-0.374,112.3,102.7,115.8,1,1,2,Most Active (Anodic)
+SOL_259f62b0,Co,3.5 wt% NaCl,4.5,None,0.0,18.0,-0.30000000000000004,77.125,139.15,104.0,4,2,2,Most Noble (Cathodic)
+SOL_26778fa7,Ti,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.95,0.245,189.7,106.0,1,1,5,Most Active (Anodic)
+SOL_26778fa7,Cu,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.5523,0.4139,75.5,138.6,6,2,5,Intermediate
+SOL_26778fa7,Cr,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.019000000000000017,2.7,339.0,203.0,1,3,5,Intermediate
+SOL_26778fa7,Al,3.5 wt% NaCl,7.0,None,0.0,25.0,0.022999999999999993,2.35,82.9,421.9,10,4,5,Intermediate
+SOL_26778fa7,Co,3.5 wt% NaCl,7.0,None,0.0,25.0,0.031,0.9,139.15,104.0,1,5,5,Most Noble (Cathodic)
+SOL_27132454,Mg,,7.0,None,0.0,25.0,-1.2189999999999999,19.939999999999998,86.80000000000001,183.7,6,1,12,Most Active (Anodic)
+SOL_27132454,Al,,7.0,None,0.0,27.0,-0.5840000000000001,19.99,82.9,421.9,21,2,12,Intermediate
+SOL_27132454,Cr,,7.0,None,0.0,25.0,-0.43900000000000006,30.0,339.0,203.0,5,3,12,Intermediate
+SOL_27132454,Ta,,7.0,None,0.0,25.0,-0.254,0.12,60.0,120.0,1,4,12,Intermediate
+SOL_27132454,W,,7.0,None,0.0,1.46,-0.21899999999999997,129.68,46.0,46.3,1,5,12,Intermediate
+SOL_27132454,TiN,,7.0,None,0.0,25.0,-0.11100000000000002,6.65,164.0,300.0,12,6,12,Intermediate
+SOL_27132454,Fe,,7.0,None,0.0,25.0,-0.09900000000000003,0.68665,102.7,115.8,20,7,12,Intermediate
+SOL_27132454,Ti,,7.0,None,0.0,25.0,-0.07700000000000001,0.348,189.7,106.0,19,8,12,Intermediate
+SOL_27132454,Cu,,7.0,None,0.0,37.0,-0.07,0.20700000000000002,75.5,138.6,40,9,12,Intermediate
+SOL_27132454,Ni,,7.0,None,0.0,25.0,-0.069,1.2,45.1,149.4,5,10,12,Intermediate
+SOL_27132454,Mo,,7.0,None,0.0,45.0,-0.012999999999999998,0.235,83.0,85.5,6,11,12,Intermediate
+SOL_27132454,Co,,7.0,None,0.0,25.0,0.011200000000000002,2.883,139.15,104.0,20,12,12,Most Noble (Cathodic)
 SOL_28d58406,Ti,8 g/L NaCl; 0.2 g/L KCl; 1.44 g/L Na2HPO4,7.4,None,0.0,37.0,0.10950000000000001,0.039,276.0,98.5,6,1,1,Isolated
 SOL_2b6cd836,Cu,3.5 % NaCl,7.2,None,0.0,25.0,-0.254,4.3,75.5,138.6,2,1,1,Isolated
+SOL_2b9e9649,Fe,1.0 M HCl,0.0,None,0.0,25.0,0.7082999999999999,0.0302,195.9,115.8,3,1,1,Isolated
 SOL_2e189ff4,Cu,1 M HCl; 1 M HNO3; 1.0 M HCl,0.0,HNO3,1.0,25.0,0.483,64.4,214.4,209.1,5,1,1,Isolated
-SOL_2e906cf4,Ti,pH 7.4 solution,7.4,None,0.0,37.0,-0.0664,0.0462,111.85,102.5,2,1,2,Most Active (Anodic)
-SOL_2e906cf4,Co,pH 7.4 solution,7.4,None,0.0,37.0,0.006500000000000006,0.26,139.15,104.0,2,2,2,Most Noble (Cathodic)
+SOL_2e906cf4,Ni,pH 7.4 solution,7.4,None,0.0,37.0,-0.3755,0.02315,63.0,118.5,2,1,5,Most Active (Anodic)
+SOL_2e906cf4,Ti,pH 7.4 solution,7.4,None,0.0,37.0,-0.0664,0.0462,111.85,102.5,2,2,5,Intermediate
+SOL_2e906cf4,TiN,pH 7.4 solution,7.4,None,0.0,37.0,-0.056050000000000016,0.243,164.0,300.0,6,3,5,Intermediate
+SOL_2e906cf4,Co,pH 7.4 solution,7.4,None,0.0,37.0,0.006500000000000006,0.26,139.15,104.0,2,4,5,Intermediate
+SOL_2e906cf4,Cr,pH 7.4 solution,7.4,None,0.0,37.0,0.006500000000000006,0.26,339.0,203.0,2,5,5,Most Noble (Cathodic)
 SOL_302ce980,Cu,3.5 wt% NaCl; 2 M HCl,0.0,None,0.0,35.0,0.02499999999999998,0.925,75.5,138.6,4,1,1,Isolated
 SOL_30dd83e1,Ti,4 M KCl; 0.1 M PBS; 10 % HCl; 1000 ppm FeCl3,7.0,FeCl3,1000.0,95.0,-0.14400000000000002,0.107,60.0,120.0,1,1,2,Most Active (Anodic)
 SOL_30dd83e1,Cu,4 M KCl; 0.1 M PBS; 10 % HCl; 1000 ppm FeCl3,7.0,FeCl3,1000.0,95.0,-0.023500000000000007,3.65,60.0,120.0,2,2,2,Most Noble (Cathodic)
 SOL_31951397,Mo,3 M KOH,14.0,None,0.0,25.0,-0.9378,661.0,143.0,93.0,3,1,1,Isolated
 SOL_34610330,Co,0.9 % NaCl; 0.5 M NaCl,7.0,None,0.0,37.0,0.261,0.26,716.0,104.0,1,1,1,Isolated
 SOL_349baff9,Cu,3.5 % NaCl; 0.1 M NaOH,13.0,None,0.0,37.0,-0.419,70.6,181.9,176.7,3,1,1,Isolated
+SOL_35b9b839,TiN,10 wt% NaOH; 15 wt% HCl; 3.5 wt% NaCl,4.0,None,0.0,5.0,0.11299999999999999,4.2035,164.0,300.0,2,1,1,Isolated
 SOL_38ac0b26,Cu,10 wt% NaCl; 25 wt% NaCl,7.0,None,0.0,27.0,-0.011999999999999983,1364.1,75.5,138.6,1,1,1,Isolated
 SOL_3c4f320f,Cu,0.9 % NaCl; 3.5 % NaCl,5.07,None,0.0,37.0,0.276,1.0,75.5,138.6,1,1,1,Isolated
+SOL_3c885611,Fe,0.1 M NaCl,7.0,None,0.0,35.0,-0.133,0.0211,102.7,115.8,3,1,1,Isolated
 SOL_3d5c36f5,Cu,0.5 mol/L H2O2; 3.5 wt% NaCl; 3.5 % NaCl; 3.0 % NaCl,8.2,H2O2,0.5,30.0,0.0069999999999999785,1.284,52.3,222.7,5,1,1,Isolated
 SOL_44391a60,Co,10 mM glycine,3.0,None,0.0,21.85,0.063,20.0,139.15,104.0,2,1,1,Isolated
-SOL_48624a20,Co,50 mM citric acid,7.0,None,0.0,24.85,0.261,350.0,139.15,104.0,1,1,1,Isolated
+SOL_48624a20,Co,50 mM citric acid,7.0,None,0.0,24.85,0.261,350.0,139.15,104.0,1,1,2,Most Active (Anodic)
+SOL_48624a20,TiN,50 mM citric acid,7.0,None,0.0,24.85,0.261,350.0,164.0,300.0,1,2,2,Most Noble (Cathodic)
+SOL_4a86dcf0,Cr,5 % NaCl,7.0,None,0.0,25.0,0.246,0.24,339.0,203.0,1,1,1,Isolated
 SOL_4b333bcc,Cu,10 % acetic acid; 3.5 wt % NaCl,1.46,None,0.0,25.0,-0.21900000000000003,19.1,75.5,138.6,1,1,1,Isolated
+SOL_4c601875,Fe,8 % HF; 7 % HNO3,0.0,HNO3,7.0,25.0,-0.014000000000000012,0.49,60.0,120.0,9,1,1,Isolated
 SOL_4e914fbc,Co,pH 6.8 solution,6.8,None,0.0,25.0,-0.11929999999999999,0.027,139.15,104.0,12,1,1,Isolated
 SOL_4f5b0152,Cu,4 M H2SO4,0.0,None,0.0,25.0,0.005,49.0,75.5,138.6,1,1,1,Isolated
 SOL_50b4c12f,Al,3.5 % NaCl; 5 % NaCl,7.0,None,0.0,50.0,-0.5055000000000001,16.562,82.7,398.5,5,1,1,Isolated
-SOL_519c3355,Al,3.5 wt% NaCl; 15 % H2SO4; 5 % NaOH; 10 % HNO3,0.0,HNO3,10.0,25.0,-0.9189999999999999,44.8,60.0,120.0,1,1,1,Isolated
+SOL_519c3355,Al,3.5 wt% NaCl; 15 % H2SO4; 5 % NaOH; 10 % HNO3,0.0,HNO3,10.0,25.0,-0.9189999999999999,44.8,60.0,120.0,1,1,2,Most Active (Anodic)
+SOL_519c3355,TiN,3.5 wt% NaCl; 15 % H2SO4; 5 % NaOH; 10 % HNO3,0.0,HNO3,10.0,25.0,-0.6960000000000001,39.0,60.0,120.0,1,2,2,Most Noble (Cathodic)
+SOL_51ca07b9,Fe,0.5 M H2SO4,0.22,None,0.0,25.0,0.181,0.129,102.7,115.8,4,1,1,Isolated
+SOL_52c8c768,Ni,3.5 wt% NaCl; 10 % oxalic acid,2.05,None,0.0,25.0,0.04200000000000001,0.231,45.1,149.4,2,1,1,Isolated
+SOL_52ebfce9,Fe,20 % NaCl,7.0,None,0.0,25.0,-0.253,1.45,102.7,115.8,1,1,1,Isolated
 SOL_5464a529,Cu,10 mM BTA; 0.13 M glycine; 1 wt% H2O2; 0.05 M oxalic acid; 5 wt% H2O2; 1 M oxalic acid; 2 M glycine; 100 mM BTA; 13 wt% H2O2; 0.26 M glycine; 5 % H2O2; 0.05 M NaNO3; 1 wt% glycine; 0.05 M NaOH,10.0,H2O2,1.0,25.0,0.246,0.01,52.3,222.7,1,1,1,Isolated
 SOL_5518a43f,Al,5 wt% NaCl; 0.5 wt% NaCl,6.5,None,0.0,25.0,-0.4,0.469,82.9,421.9,10,1,1,Isolated
 SOL_55c36b0c,Cu,25 mM citric acid,2.05,None,0.0,25.0,0.399,6.553,75.5,138.6,1,1,1,Isolated
@@ -74,34 +107,53 @@ SOL_5c1f50fb,Cu,2 M HCl,0.0,None,0.0,25.0,-0.14890000000000003,0.216,72.3,101.8,
 SOL_5d1fc71e,Cu,0.1 M Na2SO4,7.0,None,0.0,25.0,0.2412,0.598,75.5,138.6,2,1,1,Isolated
 SOL_5e7a6fe7,Ti,3 M HCl; 0.9 % NaCl,0.0,None,0.0,25.0,0.0165,0.1576,189.7,106.0,6,1,1,Isolated
 SOL_5eb41912,Cu,3.5 wt % NaCl; 3.5 wt% NaCl,7.0,None,0.0,20.0,-0.028799999999999992,7.29,75.5,138.6,7,1,1,Isolated
+SOL_5f2d7050,Sn,3.5 % NaCl,7.0,None,0.0,50.0,-0.2931,7.0,149.1,135.95,1,1,1,Isolated
 SOL_6092af85,Co,0.9 % NaCl; 1 % citric acid,2.05,None,0.0,25.0,0.0562,946500.0,139.15,104.0,2,1,1,Isolated
-SOL_60a54b43,Co,50 mM EDTA; 0.01 M KNO3; 1 wt% H2O2; 5 mM BTA; 3 mM citric acid; 6.6 mM glycine; 30 wt% H2O2; 50 mM oxalic acid; 50 mM glycine; 50 mM citric acid,12.0,H2O2,1.0,25.0,0.381,171.0,67.5,104.5,1,1,1,Isolated
+SOL_60a54b43,Co,50 mM EDTA; 0.01 M KNO3; 1 wt% H2O2; 5 mM BTA; 3 mM citric acid; 6.6 mM glycine; 30 wt% H2O2; 50 mM oxalic acid; 50 mM glycine; 50 mM citric acid,12.0,H2O2,1.0,25.0,0.381,171.0,67.5,104.5,1,1,2,Most Active (Anodic)
+SOL_60a54b43,TiN,50 mM EDTA; 0.01 M KNO3; 1 wt% H2O2; 5 mM BTA; 3 mM citric acid; 6.6 mM glycine; 30 wt% H2O2; 50 mM oxalic acid; 50 mM glycine; 50 mM citric acid,12.0,H2O2,1.0,25.0,0.381,171.0,60.0,120.0,1,2,2,Most Noble (Cathodic)
 SOL_611d06cc,Cu,3.5 wt% NaCl; 3.5 % NaCl,7.0,None,0.0,25.0,-0.23099999999999998,4.3629999999999995,75.5,138.6,8,1,1,Isolated
 SOL_612c1b24,Cu,0.2 g/L NaOH; 20 g/L Na2CO3; 7 mol/L HNO3; 5.5 mol/L HF; 3.5 % NaCl,0.0,HNO3,7.0,55.0,-0.338,4.975,104.9,209.1,8,1,1,Isolated
+SOL_61b1755d,Mg,1 M NaOH; 0.1 M NaH2PO4; 0.85 wt% NaCl,14.0,None,0.0,37.0,0.511,0.135,86.80000000000001,183.7,1,1,1,Isolated
 SOL_6277fabc,Cu,1 M HCl,0.0,None,0.0,24.85,0.095,65.0,76.0,261.0,13,1,1,Isolated
 SOL_63315bcf,Cu,0.05 M H2SO4; 0.005 M H2SO4,2.0,None,0.0,90.0,0.257,0.1,75.5,138.6,1,1,1,Isolated
-SOL_65066582,Co,11.5 M HNO3,0.0,HNO3,11.5,25.0,-0.028000000000000025,0.17,245.0,135.0,3,1,1,Isolated
+SOL_65066582,Fe,11.5 M HNO3,0.0,HNO3,11.5,25.0,-0.03200000000000003,0.213,60.0,120.0,1,1,2,Most Active (Anodic)
+SOL_65066582,Co,11.5 M HNO3,0.0,HNO3,11.5,25.0,-0.028000000000000025,0.17,245.0,135.0,3,2,2,Most Noble (Cathodic)
 SOL_66049042,Co,0.1 M NaCl; 3.5 % NaCl,7.0,None,0.0,10.0,-0.29900000000000004,1.78,132.0,132.0,1,1,1,Isolated
-SOL_684f596d,Co,pH 7.4 solution,7.4,None,0.0,25.0,0.19720000000000001,0.14,139.15,104.0,1,1,1,Isolated
+SOL_6833432f,Pt,1 M HCl,0.0,None,0.0,25.0,0.241,116200.0,140.3,176.3,12,1,1,Isolated
+SOL_684f596d,Cr,pH 7.4 solution,7.4,None,0.0,25.0,0.008800000000000016,0.19,339.0,203.0,2,1,2,Most Active (Anodic)
+SOL_684f596d,Co,pH 7.4 solution,7.4,None,0.0,25.0,0.19720000000000001,0.14,139.15,104.0,1,2,2,Most Noble (Cathodic)
 SOL_686fc9b3,Cu,3.5 wt% NaCl; 3.5 % NaCl; 30 g/L NaOH; 20 g/L Na2CO3,14.0,None,0.0,25.0,0.04999999999999999,0.784,75.5,138.6,7,1,1,Isolated
 SOL_6b494fb8,Cu,3.5 % NaCl; 0.9 M NaCl,7.0,None,0.0,60.0,0.19,0.013000000000000001,75.5,530.0,8,1,1,Isolated
-SOL_6b5952f3,Al,0.5 M H2SO4; 1 M NaCl; 0.5 M NaCl,0.22,None,0.0,25.0,-0.1855,59.9,82.9,421.9,4,1,2,Most Active (Anodic)
-SOL_6b5952f3,Co,0.5 M H2SO4; 1 M NaCl; 0.5 M NaCl,0.22,None,0.0,25.0,-0.143,7.05,139.15,104.0,7,2,2,Most Noble (Cathodic)
+SOL_6b5952f3,Al,0.5 M H2SO4; 1 M NaCl; 0.5 M NaCl,0.22,None,0.0,25.0,-0.1855,59.9,82.9,421.9,4,1,3,Most Active (Anodic)
+SOL_6b5952f3,Co,0.5 M H2SO4; 1 M NaCl; 0.5 M NaCl,0.22,None,0.0,25.0,-0.143,7.05,139.15,104.0,7,2,3,Intermediate
+SOL_6b5952f3,Fe,0.5 M H2SO4; 1 M NaCl; 0.5 M NaCl,0.22,None,0.0,25.0,-0.112,4.19,102.7,115.8,1,3,3,Most Noble (Cathodic)
 SOL_6be90ec2,Cu,3.5 % NaCl; 0.5 M HCl; 3 % NaCl; 1 M HCl,0.3,None,0.0,25.0,0.5256,30.604,109.94999999999999,147.25,6,1,1,Isolated
-SOL_6e4f2657,Co,3.5 wt% NaCl; 0.5 M NaHCO3,11.0,None,0.0,25.0,0.5811999999999999,0.05,185.3,210.4,1,1,1,Isolated
+SOL_6dab0343,Fe,pH 7.2 solution,7.2,None,0.0,25.0,0.212,1.27,67.0,104.0,3,1,1,Isolated
+SOL_6e4f2657,Co,3.5 wt% NaCl; 0.5 M NaHCO3,11.0,None,0.0,25.0,0.5811999999999999,0.05,185.3,210.4,1,1,2,Most Active (Anodic)
+SOL_6e4f2657,Fe,3.5 wt% NaCl; 0.5 M NaHCO3,11.0,None,0.0,25.0,0.8511,32.5,95.4,120.3,1,2,2,Most Noble (Cathodic)
 SOL_6ebe2a08,Co,pH 13.0 solution,13.0,None,0.0,25.0,-0.1352,18.25,139.15,104.0,1,1,2,Most Active (Anodic)
 SOL_6ebe2a08,W,pH 13.0 solution,13.0,None,0.0,25.0,0.0021999999999999797,32.56,46.0,46.3,1,2,2,Most Noble (Cathodic)
 SOL_6f0e2674,Mo,2.2 M H2SO4; 0.4 M HCl; 0.06 M FeCl3; 0.07 M CuCl2; 10 wt% oxalic acid,0.0,FeCl3,0.06,60.0,0.242,2.76,60.0,120.0,1,1,1,Isolated
 SOL_6f168d15,Mo,3.5 wt% NaCl,7.0,None,0.0,70.0,0.243,0.24,143.0,93.0,1,1,1,Isolated
 SOL_70de0a64,Cu,1 M H2SO4; 3.5 wt% NaCl; 1 M HCl; 0.1 M NH4OH,0.0,None,0.0,25.0,0.11380000000000001,16.85,31.65,36.8,6,1,1,Isolated
+SOL_72104010,Fe,1.0 M HCl,0.0,None,0.0,35.0,0.69005,0.02625,102.7,115.8,6,1,1,Isolated
 SOL_74496ef9,Cu,1.0 M HNO3; 0.5 M H2SO4; 1 M HNO3; 10 mM HCl; 10 mM acetic acid,0.22,HNO3,1.0,27.85,0.27344999999999997,36.285,104.9,209.1,12,1,1,Isolated
 SOL_744c18e7,Co,0.3 wt% H2O2; 1.0 wt% glycine; 0.05 wt% BTA; 30 % H2O2; 0.05 % BTA,7.0,H2O2,0.3,25.0,0.421,9.55,67.5,104.5,3,1,1,Isolated
 SOL_74e52c7a,W,0.4 mol/L HNO3; 0.2 mol/L H2SO4,0.62,HNO3,0.4,25.0,0.025499999999999995,30.0,343.3,162.8,4,1,1,Isolated
 SOL_780d5756,Cu,3.5 wt % NaCl; 3.5 % NaCl; 1 % HNO3; 5 g/L NaCl,7.0,HNO3,1.0,35.0,-0.33699999999999997,12.11,104.9,180.0,3,1,1,Isolated
-SOL_786199a6,Cu,1.0 M HCl; 1 M HCl; 5 % acetic acid; 2 % NaOH,0.0,None,0.0,29.85,0.2324,90.66,117.3,136.4,15,1,1,Isolated
-SOL_7e312a30,Cu,3.5 % NaCl; 3.5 wt% NaCl,7.0,None,0.0,60.0,-0.03785000000000002,12.3425,75.5,138.6,4,1,1,Isolated
+SOL_786199a6,Zn,1.0 M HCl; 1 M HCl; 5 % acetic acid; 2 % NaOH,0.0,None,0.0,29.85,-0.17120000000000002,313.4,168.7,115.1,1,1,2,Most Active (Anodic)
+SOL_786199a6,Cu,1.0 M HCl; 1 M HCl; 5 % acetic acid; 2 % NaOH,0.0,None,0.0,29.85,0.2324,90.66,117.3,136.4,15,2,2,Most Noble (Cathodic)
+SOL_79c47bfb,Zn,1 M HCl; 1 M NaOH,8.5,None,0.0,37.0,-0.809,81.0,105.0,513.0,1,1,1,Isolated
+SOL_7a073ded,Mg,57 g/L NaCl,7.0,None,0.0,35.0,-0.509,2.93,86.80000000000001,183.7,3,1,2,Most Active (Anodic)
+SOL_7a073ded,Zn,57 g/L NaCl,7.0,None,0.0,35.0,-0.509,2.71,77.2,162.6,1,2,2,Most Noble (Cathodic)
+SOL_7e312a30,Fe,3.5 % NaCl; 3.5 wt% NaCl,7.0,None,0.0,60.0,-0.579,84.12,102.7,115.8,1,1,3,Most Active (Anodic)
+SOL_7e312a30,Cr,3.5 % NaCl; 3.5 wt% NaCl,7.0,None,0.0,60.0,-0.10620000000000002,5.472,339.0,203.0,1,2,3,Intermediate
+SOL_7e312a30,Cu,3.5 % NaCl; 3.5 wt% NaCl,7.0,None,0.0,60.0,-0.03785000000000002,12.3425,75.5,138.6,4,3,3,Most Noble (Cathodic)
 SOL_7e93098f,Cu,3.5 wt% NaCl; 3.5 % NaCl; 35 g/L NaCl,7.0,None,0.0,37.0,0.10930000000000001,102.1,75.5,138.6,5,1,1,Isolated
 SOL_7ffb9a85,Co,50 mM citric acid; 1 wt% H2O2; 5 wt% H2O2; 0.1 wt% H2O2; 0.5 wt% H2O2; 500 mM citric acid; 1 wt% citric acid,4.0,H2O2,1.0,25.0,-0.259,50.0,67.5,104.5,1,1,1,Isolated
+SOL_8131fe5c,Sn,3.5 % NaCl,7.0,None,0.0,30.0,0.242,40.0,149.1,135.95,1,1,1,Isolated
+SOL_87e6d751,Fe,20 % NaNO3; 10 mM citric acid,2.05,None,0.0,25.0,-0.14300000000000002,3.2,102.7,115.8,1,1,1,Isolated
+SOL_89709ecc,Sn,3.5 wt % NaCl; 3.5 % NaCl,7.0,None,0.0,25.0,-0.42100000000000004,0.27949999999999997,149.1,135.95,4,1,1,Isolated
 SOL_8ba641fd,Cu,3.5 wt % NaCl,7.0,None,0.0,25.0,0.246,244.2,75.5,138.6,1,1,1,Isolated
 SOL_900fa415,Cu,0.5 M H2SO4,0.22,None,0.0,34.85,0.16999999999999998,1.15,81.6,163.1,13,1,1,Isolated
 SOL_92abb510,Cu,1 M HNO3,0.0,HNO3,1.0,24.85,0.17250000000000001,1654.0,104.9,209.1,1,1,1,Isolated
@@ -109,28 +161,38 @@ SOL_92c6b2eb,Cu,0.1 M HCl,1.0,None,0.0,25.0,-0.224,13.575000000000001,75.5,138.6
 SOL_9458bb41,Ti,3.5 % NaCl,7.0,None,0.0,25.0,0.05099999999999999,0.19,189.7,106.0,3,1,1,Isolated
 SOL_94c9b991,Co,0.5 M HCl; 1.0 M HCl; 1 M HCl,0.3,None,0.0,70.0,0.242,8.1,32.0,81.0,1,1,1,Isolated
 SOL_95ba7c0b,Cu,0.5 M H2SO4; 3.5 wt% NaCl; 3.5 % NaCl,7.0,None,0.0,25.0,-0.11670000000000003,0.408,75.5,138.6,15,1,1,Isolated
-SOL_95e4a071,Co,50 mM EDTA,12.0,None,0.0,25.0,0.251,58.0,139.15,104.0,1,1,1,Isolated
+SOL_95e4a071,Co,50 mM EDTA,12.0,None,0.0,25.0,0.251,58.0,139.15,104.0,1,1,2,Most Active (Anodic)
+SOL_95e4a071,TiN,50 mM EDTA,12.0,None,0.0,25.0,0.251,58.0,164.0,300.0,1,2,2,Most Noble (Cathodic)
 SOL_983a76b2,Al,3.5 wt% NaCl,6.8,None,0.0,25.0,-0.6880000000000001,0.0002,82.9,421.9,13,1,1,Isolated
 SOL_999cbf47,Cu,1 mol/L HCl,0.0,None,0.0,85.0,0.421,134.0,85.0,56.0,5,1,1,Isolated
 SOL_9bf00d47,Cu,1 mol/L H2SO4; 0.6 mol/L NaCl,0.0,None,0.0,25.0,0.099,0.025,75.5,138.6,1,1,1,Isolated
-SOL_9c8381fc,Co,3.5 wt% NaCl; 3.5 % NaCl; 10 wt% oxalic acid,2.05,None,0.0,25.0,-0.469,28.1,139.15,104.0,3,1,1,Isolated
+SOL_9c8381fc,Co,3.5 wt% NaCl; 3.5 % NaCl; 10 wt% oxalic acid,2.05,None,0.0,25.0,-0.469,28.1,139.15,104.0,3,1,2,Most Active (Anodic)
+SOL_9c8381fc,Fe,3.5 wt% NaCl; 3.5 % NaCl; 10 wt% oxalic acid,2.05,None,0.0,25.0,-0.039000000000000035,0.475,102.7,115.8,1,2,2,Most Noble (Cathodic)
+SOL_9d385734,Fe,0.5 M H2SO4,0.47,None,0.0,25.0,1.397,4.4,102.7,115.8,1,1,1,Isolated
 SOL_9da615cb,Ti,0.5 M H2SO4,0.22,None,0.0,25.0,-0.22799999999999998,42.6,189.7,106.0,1,1,1,Isolated
 SOL_9ed02125,Cu,137 mM NaCl; 2.7 mM KCl; 4.3 mM Na2HPO4; 1.4 mM KH2PO4,7.4,None,0.0,37.0,0.19674999999999998,0.0048000000000000004,75.5,138.6,8,1,1,Isolated
 SOL_a0bf9674,Cu,1 M HNO3; 0.5 M H2SO4; 1.0 M HNO3,0.22,HNO3,1.0,24.85,0.11000000000000001,90.45,104.9,209.1,5,1,1,Isolated
-SOL_a2e5b1fc,Cu,5 % H2SO4,0.05,None,0.0,80.0,0.28200000000000003,32.535000000000004,75.5,138.6,6,1,1,Isolated
+SOL_a2e5b1fc,Ni,5 % H2SO4,0.05,None,0.0,80.0,0.08749999999999997,2893.19,45.1,149.4,2,1,3,Most Active (Anodic)
+SOL_a2e5b1fc,Cu,5 % H2SO4,0.05,None,0.0,80.0,0.28200000000000003,32.535000000000004,75.5,138.6,6,2,3,Intermediate
+SOL_a2e5b1fc,Fe,5 % H2SO4,0.05,None,0.0,80.0,0.2925,1789.535,102.7,115.8,2,3,3,Most Noble (Cathodic)
 SOL_a4770e38,Co,1000 ppm glycine; 5 % citric acid,10.0,None,0.0,25.0,0.258,0.587,139.15,104.0,3,1,1,Isolated
 SOL_a63fa1d3,Mo,1.0 M NaCl; 3.0 M H3PO4,1.31,None,0.0,24.85,-0.1605,52.305,123.5,32.95,12,1,1,Isolated
 SOL_a7154ec6,Ru,0.72 wt% H2O2; 1 wt% citric acid,9.6,H2O2,0.72,25.0,0.5529999999999999,0.593,60.0,120.0,6,1,1,Isolated
+SOL_a77c277c,Fe,6 % FeCl3; 0.05 mol/L HCl; 3.5 % NaCl,1.3,FeCl3,6.0,25.0,0.251,150.0,83.0,143.5,2,1,1,Isolated
 SOL_a7d9a682,Cu,3.5 wt % NaCl; 10 wt % H2SO4,0.0,None,0.0,25.0,0.251,371.9,75.5,138.6,1,1,1,Isolated
 SOL_a899740e,Co,1 M HCl,5.7,None,0.0,37.0,0.14049999999999999,0.00915,167.35000000000002,104.15,8,1,1,Isolated
-SOL_a8db4ef2,Co,pH 1.15 solution,1.15,None,0.0,37.0,0.004999999999999977,0.2195,139.15,104.0,4,1,1,Isolated
+SOL_a8db4ef2,Co,pH 1.15 solution,1.15,None,0.0,37.0,0.004999999999999977,0.2195,139.15,104.0,4,1,2,Most Active (Anodic)
+SOL_a8db4ef2,Cr,pH 1.15 solution,1.15,None,0.0,37.0,0.004999999999999977,0.2195,339.0,203.0,8,2,2,Most Noble (Cathodic)
 SOL_ab45f3c3,Cu,3.5 % NaCl,8.2,None,0.0,35.0,-0.5245,1.45,36.5,32.0,2,1,1,Isolated
+SOL_ab58eebf,Fe,20 % NaNO3,7.0,None,0.0,25.0,-0.133,2.35,102.7,115.8,1,1,1,Isolated
 SOL_abf65689,Cu,0.5 M KCl; 3.5 M KCl,7.0,None,0.0,20.0,-0.333,1.5,75.5,138.6,5,1,1,Isolated
 SOL_ac5cdcc5,Ta,0.6 mol/L NaCl,7.0,None,0.0,25.0,-0.251,0.038,60.0,120.0,1,1,1,Isolated
+SOL_ad13d6af,Fe,20 % NaNO3; 10 mM HNO3,2.0,HNO3,10.0,25.0,-0.07300000000000001,2.7,60.0,120.0,1,1,1,Isolated
 SOL_ad44f027,Mo,10 % H2SO4,0.0,None,0.0,25.0,-0.1755,1.586,143.0,93.0,5,1,1,Isolated
 SOL_adc2fc94,Cu,10 % DMSO,7.4,None,0.0,37.0,0.741,11.1,75.5,138.6,1,1,1,Isolated
 SOL_af471e21,Al,3.5 % NaCl; 35 g/L NaCl; 2.5 % HNO3; 1.5 % HCl; 1 % HF; 50 g/L NaOH; 180 g/L H2SO4,0.57,HNO3,2.5,10.0,-0.833,2.47,60.0,120.0,5,1,1,Isolated
 SOL_b0e314cd,Ta,1 mol/L HCl; 0.6 mol/L NaCl,0.0,None,0.0,25.0,0.017999999999999988,0.079,60.0,120.0,1,1,1,Isolated
+SOL_b113598c,Sn,3.5 % NaCl,2.0,None,0.0,84.85,0.017000000000000015,115.0,149.1,135.95,1,1,1,Isolated
 SOL_b2da44ea,Ti,2 % HNO3; 0.9 % NaCl,1.0,HNO3,2.0,37.0,-0.29,0.0519,60.0,120.0,1,1,2,Most Active (Anodic)
 SOL_b2da44ea,Cu,2 % HNO3; 0.9 % NaCl,1.0,HNO3,2.0,37.0,-0.08399999999999999,0.5284,104.9,209.1,4,2,2,Most Noble (Cathodic)
 SOL_b3533a19,Co,0.1 M NaCl; 0.1 mol/L NaCl,2.3,None,0.0,37.0,0.151,20.77,139.15,104.0,3,1,1,Isolated
@@ -139,20 +201,31 @@ SOL_b5d0dda1,Cu,0.5 M H2SO4; 0.5 mol/L H2SO4; 2.0 M HNO3,0.22,HNO3,2.0,55.0,0.27
 SOL_b5d79743,Cu,5 g/L KOH,11.5,None,0.0,28.0,-0.26039999999999996,206550.0,330.70000000000005,163.60000000000002,6,1,1,Isolated
 SOL_b7d2dbfd,Ti,2 ppm HF; 0.1 ppm HF; 12.5 ppm H2SO4; 1.8 ppm HF; 0.5 M NaCl; 0.1 M HCl; 3.5 % NaCl; 0.3 M H2SO4; 0.5 M H2SO4,3.0,None,0.0,80.0,0.6,1.23,189.7,106.0,1,1,1,Isolated
 SOL_b7f9d08a,Co,3.5 % NaCl,7.0,None,0.0,24.0,-0.07599999999999998,0.176,336.5,112.5,2,1,1,Isolated
-SOL_b9800adb,Co,5 % NaCl; 1.0 M HCl; 5 wt% NaCl,4.2,None,0.0,25.0,-0.384,23.44,139.15,104.0,1,1,1,Isolated
+SOL_b951931c,Fe,pH 3.0 solution,3.0,None,0.0,24.85,-0.36000000000000004,48.1,102.7,115.8,1,1,1,Isolated
+SOL_b9800adb,Fe,5 % NaCl; 1.0 M HCl; 5 wt% NaCl,4.2,None,0.0,25.0,-0.42650000000000005,5.0915,104.05000000000001,115.8,8,1,2,Most Active (Anodic)
+SOL_b9800adb,Co,5 % NaCl; 1.0 M HCl; 5 wt% NaCl,4.2,None,0.0,25.0,-0.384,23.44,139.15,104.0,1,2,2,Most Noble (Cathodic)
 SOL_bb0b69ee,Co,15 mM BTA; 0.025 M citric acid; 0.02 M KNO3,10.0,None,0.0,24.85,-0.16000000000000003,2.154,139.15,104.0,1,1,1,Isolated
-SOL_bb641cd9,Ti,0.9 % NaCl,7.0,None,0.0,25.0,-0.11050000000000001,2.8,189.7,106.0,2,1,3,Most Active (Anodic)
-SOL_bb641cd9,Al,0.9 % NaCl,7.0,None,0.0,25.0,0.016999999999999987,0.9,82.9,421.9,1,2,3,Intermediate
-SOL_bb641cd9,Co,0.9 % NaCl,7.0,None,0.0,25.0,0.023999999999999994,1.0,139.15,104.0,2,3,3,Most Noble (Cathodic)
+SOL_bb641cd9,Ti,0.9 % NaCl,7.0,None,0.0,25.0,-0.11050000000000001,2.8,189.7,106.0,2,1,5,Most Active (Anodic)
+SOL_bb641cd9,Fe,0.9 % NaCl,7.0,None,0.0,25.0,-0.04999999999999999,2.3,102.7,115.8,1,2,5,Intermediate
+SOL_bb641cd9,Mn,0.9 % NaCl,7.0,None,0.0,25.0,-0.01200000000000001,1.3,51.95,143.85000000000002,1,3,5,Intermediate
+SOL_bb641cd9,Al,0.9 % NaCl,7.0,None,0.0,25.0,0.016999999999999987,0.9,82.9,421.9,1,4,5,Intermediate
+SOL_bb641cd9,Co,0.9 % NaCl,7.0,None,0.0,25.0,0.023999999999999994,1.0,139.15,104.0,2,5,5,Most Noble (Cathodic)
 SOL_bd2a20f9,Co,1 M KOH; 1 M H2SO4,0.0,None,0.0,80.0,0.0252,0.0001,53.1,104.0,1,1,1,Isolated
-SOL_bfaf2531,Cu,pH 7.0 solution,7.0,None,0.0,37.0,-0.479,101.0,327.0,360.0,1,1,1,Isolated
+SOL_bfaf2531,Fe,pH 7.0 solution,7.0,None,0.0,37.0,-0.489,116.0,380.0,514.0,1,1,2,Most Active (Anodic)
+SOL_bfaf2531,Cu,pH 7.0 solution,7.0,None,0.0,37.0,-0.479,101.0,327.0,360.0,1,2,2,Most Noble (Cathodic)
 SOL_c1447d36,Cu,0.1 M Na2SO4; 0.5 M CuSO4; 0.5 M H2SO4,2.7,None,0.0,25.0,0.17469999999999997,1.7,55.3,138.6,6,1,1,Isolated
 SOL_c1f3dbcf,Cu,3.0 wt% NaCl; 0.2 g/L Na2SO4; 0.2 g/L NaHCO3; 0.2 g/L NaNO3,5.0,None,0.0,25.0,0.197,0.0049,59.3,149.3,11,1,1,Isolated
 SOL_c2863dbf,Ti,pH 3.0 solution,3.0,None,0.0,23.0,-0.253,0.0002,189.7,88.85,2,1,2,Most Active (Anodic)
 SOL_c2863dbf,Ru,pH 3.0 solution,3.0,None,0.0,23.0,-0.22649999999999998,0.0001,60.0,70.35,2,2,2,Most Noble (Cathodic)
-SOL_c38de676,Co,3.5 wt % NaCl; 1.5 M H2SO4; 0.06 M H2O2; 0.2 M H2O2,0.0,H2O2,0.06,65.0,-0.30450000000000005,1.2,67.5,104.5,4,1,1,Isolated
+SOL_c31256ac,Mg,1.5 g/L CuSO4,7.0,None,0.0,25.0,-1.2810000000000001,258.2,72.2,187.4,1,1,1,Isolated
+SOL_c38de676,Fe,3.5 wt % NaCl; 1.5 M H2SO4; 0.06 M H2O2; 0.2 M H2O2,0.0,H2O2,0.06,65.0,-0.471,10.0,72.0,128.0,1,1,2,Most Active (Anodic)
+SOL_c38de676,Co,3.5 wt % NaCl; 1.5 M H2SO4; 0.06 M H2O2; 0.2 M H2O2,0.0,H2O2,0.06,65.0,-0.30450000000000005,1.2,67.5,104.5,4,2,2,Most Noble (Cathodic)
 SOL_c696309c,Co,0.5 M HCl,0.3,None,0.0,70.0,0.27,281.0,32.0,81.0,1,1,1,Isolated
-SOL_c7ad8591,Cu,pH 4.0 solution,4.0,None,0.0,25.0,-0.196,0.2666,75.5,138.6,1,1,1,Isolated
+SOL_c7ad8591,Cu,pH 4.0 solution,4.0,None,0.0,25.0,-0.196,0.2666,75.5,138.6,1,1,2,Most Active (Anodic)
+SOL_c7ad8591,Ni,pH 4.0 solution,4.0,None,0.0,25.0,0.251,23.04,45.1,149.4,1,2,2,Most Noble (Cathodic)
+SOL_c889ee08,TiN,5 % NaOH; 3 % NaCl; 0.3 % NaCl,13.88,None,0.0,24.0,0.0743,186.0,164.0,300.0,1,1,1,Isolated
+SOL_c917fe7f,Cr,3.5 wt% NaCl; 3.5 wt % NaCl,7.0,None,0.0,25.0,0.068,0.9,339.0,203.0,11,1,1,Isolated
+SOL_ca1a3b14,Fe,1 M NaNO3; 0.01 M HNO3,2.0,HNO3,0.01,25.0,-0.07600000000000001,1.1,60.0,120.0,1,1,1,Isolated
 SOL_ca8007cc,Co,10 mM BTA; 50 mM EDTA; 5 mM BTA; 1 wt% H2O2; 0.01 M KNO3; 50 mM citric acid; 50 mM glycine; 10 mM EG; 2 mM BTA,11.0,H2O2,1.0,25.0,0.04,64.55,67.5,104.5,2,1,2,Most Active (Anodic)
 SOL_ca8007cc,Cu,10 mM BTA; 50 mM EDTA; 5 mM BTA; 1 wt% H2O2; 0.01 M KNO3; 50 mM citric acid; 50 mM glycine; 10 mM EG; 2 mM BTA,11.0,H2O2,1.0,25.0,0.04,64.55,52.3,222.7,2,2,2,Most Noble (Cathodic)
 SOL_cb5f20d5,Cu,3 % NaCl,7.0,None,0.0,25.0,0.03069999999999999,6.4,75.5,138.6,6,1,1,Isolated
@@ -160,34 +233,47 @@ SOL_cd15f726,Ti,0.9 wt% NaCl; 0.9 % NaCl,7.0,None,0.0,37.0,-0.08400000000000002,
 SOL_cd15f726,Cu,0.9 wt% NaCl; 0.9 % NaCl,7.0,None,0.0,37.0,-0.03400000000000003,1.93,75.5,138.6,3,2,2,Most Noble (Cathodic)
 SOL_cf5d6786,W,1 M H2SO4; 3.5 % NaCl; 96 % H2SO4,0.0,None,0.0,25.0,0.06384999999999999,23.153999999999996,140.85,107.30000000000001,2,1,2,Most Active (Anodic)
 SOL_cf5d6786,Co,1 M H2SO4; 3.5 % NaCl; 96 % H2SO4,0.0,None,0.0,25.0,0.376,23.153999999999996,139.15,104.0,2,2,2,Most Noble (Cathodic)
+SOL_cfa19c41,Fe,3.5 % NaCl; 3.5 wt% NaCl,7.0,None,0.0,25.0,-0.09900000000000003,81.3,102.7,115.8,5,1,1,Isolated
 SOL_d4c9c287,Cu,3.5 % NaCl; 3.5 wt% NaCl,7.0,None,0.0,24.85,-0.06459999999999999,0.23,63.9,83.9,9,1,1,Isolated
 SOL_d4ebbac0,Co,1 M HCl,4.9,None,0.0,37.0,0.3089,0.031,139.15,104.0,1,1,1,Isolated
 SOL_d51a328d,Cu,0.6 mol/L NaCl; 1 mol/L HCl; 1 mol/L H2SO4; 1 mol/L NaCl,0.0,None,0.0,25.0,-0.252,0.81,75.5,138.6,1,1,2,Most Active (Anodic)
 SOL_d51a328d,Ta,0.6 mol/L NaCl; 1 mol/L HCl; 1 mol/L H2SO4; 1 mol/L NaCl,0.0,None,0.0,25.0,-0.251,0.27,60.0,120.0,3,2,2,Most Noble (Cathodic)
+SOL_d67aef17,TiN,150 g/L H2SO4; 300 g/L HCl; 80 g/L NaOH; 5 % NaCl,0.0,None,0.0,25.0,-0.332,71.0,164.0,300.0,2,1,1,Isolated
 SOL_d7e26f35,Al,5.0 wt% NaCl; 1.0 M NaOH; 5 wt% NaCl,14.0,None,0.0,25.0,0.1975,1.18,82.9,421.9,1,1,2,Most Active (Anodic)
 SOL_d7e26f35,Co,5.0 wt% NaCl; 1.0 M NaOH; 5 wt% NaCl,14.0,None,0.0,25.0,0.1975,1.18,139.15,104.0,1,2,2,Most Noble (Cathodic)
 SOL_d88c4907,Co,10 % NaOH,9.0,None,0.0,60.0,0.251,21.711,139.15,104.0,1,1,1,Isolated
 SOL_d8ed904e,Cu,3 % NaCl,7.0,None,0.0,24.85,0.076,2.5984999999999996,68.9,158.45,2,1,1,Isolated
 SOL_da60f2b2,Mo,3.5 wt% NaCl; 3.5 % NaCl,4.0,None,0.0,25.0,0.45200000000000007,0.603,143.0,93.0,2,1,1,Isolated
-SOL_deb4bf44,Al,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.4388,2.89,82.9,421.9,2,1,2,Most Active (Anodic)
-SOL_deb4bf44,Cu,3.5 wt% NaCl,7.0,None,0.0,25.0,0.05099999999999999,0.223,75.5,138.6,3,2,2,Most Noble (Cathodic)
+SOL_daeb64e4,Mg,0.01 M NaCl,2.0,None,0.0,25.0,-0.20900000000000002,160.0,86.80000000000001,183.7,1,1,1,Isolated
+SOL_deb4bf44,Al,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.4388,2.89,82.9,421.9,2,1,3,Most Active (Anodic)
+SOL_deb4bf44,Fe,3.5 wt% NaCl,7.0,None,0.0,25.0,-0.399,0.26,102.7,115.8,3,2,3,Intermediate
+SOL_deb4bf44,Cu,3.5 wt% NaCl,7.0,None,0.0,25.0,0.05099999999999999,0.223,75.5,138.6,3,3,3,Most Noble (Cathodic)
+SOL_dff843da,Fe,0.5 M NaCl; 0.01 M NaHCO3; 2.0 M H2SO4,1.0,None,0.0,60.0,0.7963,14.254999999999999,117.69999999999999,152.2,2,1,1,Isolated
 SOL_e445bb86,Ru,0.1 M Na2SO4,7.0,None,0.0,70.0,-0.499,4.07,60.0,70.35,2,1,1,Isolated
-SOL_e492179f,Cu,3 % NaCl; 3.0 % NaCl,7.0,None,0.0,19.85,0.045,2.012,65.0,119.5,2,1,2,Most Active (Anodic)
-SOL_e492179f,Mo,3 % NaCl; 3.0 % NaCl,7.0,None,0.0,19.85,0.16099999999999998,0.6505,243.5,93.0,2,2,2,Most Noble (Cathodic)
+SOL_e492179f,Cu,3 % NaCl; 3.0 % NaCl,7.0,None,0.0,19.85,0.045,2.012,65.0,119.5,2,1,3,Most Active (Anodic)
+SOL_e492179f,Sn,3 % NaCl; 3.0 % NaCl,7.0,None,0.0,19.85,0.139,0.839,298.5,102.0,2,2,3,Intermediate
+SOL_e492179f,Mo,3 % NaCl; 3.0 % NaCl,7.0,None,0.0,19.85,0.16099999999999998,0.6505,243.5,93.0,2,3,3,Most Noble (Cathodic)
 SOL_e4d4fcf7,Cu,0.5 % acetic acid; 0.1 M acetic acid,14.0,None,0.0,25.0,-0.03,5.5,75.5,138.6,2,1,1,Isolated
 SOL_e52ece58,Cu,3.5 wt% NaCl,7.0,None,0.0,60.0,0.17099999999999999,22.14,75.5,138.6,5,1,1,Isolated
 SOL_e579c1d4,Mo,3.5 % NaCl; 0.9 % NaCl,7.0,None,0.0,25.0,-0.11099999999999999,0.74,143.0,93.0,1,1,2,Most Active (Anodic)
 SOL_e579c1d4,Al,3.5 % NaCl; 0.9 % NaCl,7.0,None,0.0,25.0,0.013999999999999985,1.245,82.9,421.9,2,2,2,Most Noble (Cathodic)
+SOL_e5fb36da,Cr,1 M H2SO4,0.0,None,0.0,25.0,0.1968,125.195,339.0,203.0,8,1,1,Isolated
+SOL_e61b2a82,Fe,1 M NaNO3,7.0,None,0.0,25.0,-0.0635,5.84,102.7,115.8,2,1,1,Isolated
 SOL_e659f5bb,Co,pH 6.2 solution,6.2,None,0.0,30.0,0.19720000000000001,0.0073,139.15,104.0,1,1,1,Isolated
 SOL_e76690cf,Co,85 wt% H3PO4,1.0,None,0.0,30.0,-0.37599999999999995,1.804,139.15,104.0,5,1,1,Isolated
+SOL_e7ba2f3b,TiN,3.5 % NaCl; 3 % NaCl,7.0,None,0.0,25.0,0.206,14.4,164.0,300.0,5,1,1,Isolated
 SOL_e82a103d,Co,3.5 wt% NaCl; 1 M H2SO4; 3.5 % NaCl,0.0,None,0.0,25.0,-0.6140000000000001,66.0,139.15,104.0,11,1,1,Isolated
 SOL_e82a3b8e,Cu,3.5 % NaCl,7.0,None,0.0,50.0,-0.4769,6.97,75.5,138.6,3,1,1,Isolated
 SOL_e882ce06,Cu,1.3 M NaOH; 3.5 wt% NaCl; 0.1 M HCl,1.0,None,0.0,40.0,0.405,4110.0,75.5,138.6,5,1,1,Isolated
+SOL_e8e8850b,Fe,3 % NaCl,7.0,None,0.0,20.0,-0.2435,34.025,102.7,115.8,6,1,1,Isolated
 SOL_eb61d522,Cu,0.9 % NaCl,7.0,None,0.0,46.3,-0.15599999999999997,10.2,179.0,232.0,3,1,1,Isolated
 SOL_ec8c9eb7,Co,3.5 % NaCl,7.0,None,0.0,10.0,-0.262,0.25,132.0,129.0,1,1,1,Isolated
 SOL_ef9ea89a,Cu,0.5 M HCl,0.3,None,0.0,10.0,-0.2885,3.05,75.5,138.6,6,1,1,Isolated
+SOL_f0553d5f,Fe,pH 4.0 solution,4.0,None,0.0,24.85,-0.36000000000000004,18.3,102.7,115.8,1,1,1,Isolated
 SOL_f1501c8b,Co,3.5 % NaCl; 10 wt% HCl; 10 % NaOH,9.0,None,0.0,60.0,0.02255,6.40885,217.35,104.0,6,1,1,Isolated
+SOL_f2095729,Cr,3.5 % NaCl,7.0,None,0.0,15.0,-0.05570000000000003,16.95,339.0,203.0,6,1,1,Isolated
 SOL_f28516b7,Co,50 mM citric acid,7.5,None,0.0,24.85,-0.32599999999999996,3.0,139.15,104.0,2,1,1,Isolated
+SOL_f2a9b0fa,Au,3 M KCl,7.0,None,0.0,37.0,0.3405,3.0,60.0,120.0,2,1,1,Isolated
 SOL_f49951eb,Cu,3.5 % NaCl; 1 mol/L H2SO4; 1 mol/L HCl; 0.01 mol/L H2SO4; 0.5 mol/L H2SO4; 1 mol/L NaCl; 0.05 mol/L H2SO4; 0.35 g/L NaHCO3; 0.6 mol/L NaCl,0.0,None,0.0,59.85,0.391,0.5075,75.5,138.6,12,1,1,Isolated
 SOL_f5fe1932,Al,0.05 M NaCl,7.0,None,0.0,25.0,-0.453,3.32,24.0,239.0,3,1,1,Isolated
 SOL_f851bad7,Co,2.0 % NaCl,7.0,None,0.0,50.0,-0.04299999999999998,0.37,139.15,104.0,3,1,1,Isolated

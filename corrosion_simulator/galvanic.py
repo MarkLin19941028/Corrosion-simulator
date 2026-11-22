@@ -27,6 +27,7 @@ from corrosion_simulator.physics import (
     PolarizationParameters,
     calculate_faraday_corrosion_rate,
     generate_polarization_curve,
+    has_faraday_properties,
     wagner_traud_anodic_current,
     wagner_traud_net_current,
 )
@@ -51,18 +52,26 @@ class GalvanicCouplingResult:
     noble_net_current_uA_cm2: float
     current_balance_residual_uA_cm2: float
     acceleration_factor: float
-    uncoupled_faraday: FaradayCorrosionResult
-    coupled_faraday: FaradayCorrosionResult
+    uncoupled_faraday: FaradayCorrosionResult | None
+    coupled_faraday: FaradayCorrosionResult | None
     solution_id: str | None = None
     temperature_C: float | None = None
 
     @property
     def uncoupled_cr_nm_min(self) -> float:
-        return self.uncoupled_faraday.corrosion_rate_nm_min
+        return (
+            self.uncoupled_faraday.corrosion_rate_nm_min
+            if self.uncoupled_faraday is not None
+            else float("nan")
+        )
 
     @property
     def coupled_cr_nm_min(self) -> float:
-        return self.coupled_faraday.corrosion_rate_nm_min
+        return (
+            self.coupled_faraday.corrosion_rate_nm_min
+            if self.coupled_faraday is not None
+            else float("nan")
+        )
 
     @property
     def uncoupled_cr_mm_yr(self) -> float:
@@ -143,6 +152,7 @@ def solve_galvanic_couple(
     active_valence: int | None = None,
     immersion_time_s: float | None = None,
     material_properties: pd.DataFrame | None = None,
+    allow_missing_faraday: bool = False,
 ) -> GalvanicCouplingResult:
     """Solve area-weighted bimetallic Mixed Potential (E_galv), Galvanic Current Density, and Faraday CR_0."""
     if not math.isfinite(cathode_to_anode_area_ratio) or cathode_to_anode_area_ratio <= 0.0:
@@ -207,20 +217,24 @@ def solve_galvanic_couple(
     i_galv = wagner_traud_anodic_current(e_galv, active_p)
     accel_factor = i_galv / active_p.icorr_uA_cm2
 
-    uncoupled_faraday = calculate_faraday_corrosion_rate(
-        active_metal,
-        active_p.icorr_uA_cm2,
-        valence=active_valence,
-        immersion_time_s=immersion_time_s,
-        material_properties=material_properties,
-    )
-    coupled_faraday = calculate_faraday_corrosion_rate(
-        active_metal,
-        i_galv,
-        valence=active_valence,
-        immersion_time_s=immersion_time_s,
-        material_properties=material_properties,
-    )
+    if allow_missing_faraday and not has_faraday_properties(active_metal, material_properties):
+        uncoupled_faraday: FaradayCorrosionResult | None = None
+        coupled_faraday: FaradayCorrosionResult | None = None
+    else:
+        uncoupled_faraday = calculate_faraday_corrosion_rate(
+            active_metal,
+            active_p.icorr_uA_cm2,
+            valence=active_valence,
+            immersion_time_s=immersion_time_s,
+            material_properties=material_properties,
+        )
+        coupled_faraday = calculate_faraday_corrosion_rate(
+            active_metal,
+            i_galv,
+            valence=active_valence,
+            immersion_time_s=immersion_time_s,
+            material_properties=material_properties,
+        )
 
     sol_id = active_p.solution_id if active_p.solution_id is not None else noble_p.solution_id
     temp_c = active_p.temperature_C if active_p.temperature_C is not None else noble_p.temperature_C

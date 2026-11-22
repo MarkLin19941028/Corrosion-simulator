@@ -434,10 +434,12 @@ class TestDirectoryIngestionSeedFallbackAndExport(unittest.TestCase):
 
     def test_workspace_raw_directory_ingests_and_exports_unified_tables(self) -> None:
         db = HarmonizedDatabase.from_directory("data/raw")
-        self.assertEqual(set(db.material_properties["metal"]), set(CORE_METALS))
-        self.assertEqual(set(db.electrochemical_database["metal"]), set(CORE_METALS))
-        # Raw dataset + missing-metal seed records should have >150 valid core-metal records
-        self.assertGreater(len(db.electrochemical_database), 150)
+        # Data-driven ingestion includes all 8 core metals plus extended materials (e.g., Fe, Cr, Ni, TiN)
+        self.assertTrue(set(CORE_METALS).issubset(set(db.material_properties["metal"])))
+        self.assertTrue(set(CORE_METALS).issubset(set(db.electrochemical_database["metal"])))
+        self.assertGreater(len(db.available_metals), len(CORE_METALS))
+        # Raw dataset should have >1000 valid harmonized records across all materials
+        self.assertGreater(len(db.electrochemical_database), 1000)
         self.assertEqual(db.material_properties["metal"].duplicated().sum(), 0)
         self.assertEqual(db.solution_properties["solution_id"].duplicated().sum(), 0)
         # Solution is independent of operating temperature per GLOSSARY.md

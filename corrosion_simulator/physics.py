@@ -19,19 +19,19 @@ from corrosion_simulator.database import (
     ExposureLookupResult,
     HarmonizedDatabase,
 )
-from corrosion_simulator.seed_data import SEED_MATERIAL_PROPERTIES
+from corrosion_simulator.element_constants import PURE_ELEMENT_PROPERTIES
 
 FARADAY_CONSTANT_C_MOL: Final[float] = 96485.33212
 SECONDS_PER_MINUTE: Final[float] = 60.0
 SECONDS_PER_YEAR: Final[float] = 365.0 * 24.0 * 3600.0  # ASTM G102 convention (31,536,000 s/yr)
 
 _DEFAULT_METAL_CONSTANTS: Final[dict[str, tuple[float, float, int]]] = {
-    row["metal"]: (
-        float(row["molar_mass_g_mol"]),
-        float(row["density_g_cm3"]),
-        int(DEFAULT_DISSOLUTION_VALENCE[row["metal"]]),
+    sym: (
+        float(props["molar_mass_g_mol"]),
+        float(props["density_g_cm3"]),
+        int(DEFAULT_DISSOLUTION_VALENCE.get(sym, props["valence"])),
     )
-    for row in SEED_MATERIAL_PROPERTIES
+    for sym, props in PURE_ELEMENT_PROPERTIES.items()
 }
 
 
@@ -276,25 +276,43 @@ class FaradayCorrosionResult:
 def _resolve_metal_constants(
     metal: str,
     material_properties: pd.DataFrame | None = None,
-) -> tuple[float, float, int]:
-    """Return (molar_mass_g_mol, density_g_cm3, default_valence) for a Metal."""
+) -> tuple[float, float, int, float | None]:
+    """Return ``(molar_mass_g_mol, density_g_cm3, default_valence, equivalent_weight_g_eq)`` for a Material.
+
+    Supports both pure elements (with built-in fallback constants) and alloys/compounds
+    that provide ``equivalent_weight_g_eq`` directly in ``material_properties``.
+    """
     metal_key = str(metal).strip()
     molar_mass: float | None = None
     density: float | None = None
     default_valence: int | None = None
+    equiv_weight: float | None = None
 
     if material_properties is not None and not material_properties.empty:
-        col = "metal" if "metal" in material_properties.columns else "symbol"
-        if col in material_properties.columns:
+        col = next(
+            (c for c in ("metal", "material_id", "symbol") if c in material_properties.columns),
+            None,
+        )
+        if col is not None:
             match = material_properties[material_properties[col].astype(str).str.strip() == metal_key]
             if not match.empty:
                 row = match.iloc[0]
                 if "molar_mass_g_mol" in row and not pd.isna(row["molar_mass_g_mol"]):
-                    molar_mass = float(row["molar_mass_g_mol"])
+                    val = float(row["molar_mass_g_mol"])
+                    if math.isfinite(val) and val > 0.0:
+                        molar_mass = val
                 if "density_g_cm3" in row and not pd.isna(row["density_g_cm3"]):
-                    density = float(row["density_g_cm3"])
+                    val = float(row["density_g_cm3"])
+                    if math.isfinite(val) and val > 0.0:
+                        density = val
                 if "valence" in row and not pd.isna(row["valence"]):
-                    default_valence = int(row["valence"])
+                    val = float(row["valence"])
+                    if math.isfinite(val) and val > 0.0:
+                        default_valence = int(round(val))
+                if "equivalent_weight_g_eq" in row and not pd.isna(row["equivalent_weight_g_eq"]):
+                    val = float(row["equivalent_weight_g_eq"])
+                    if math.isfinite(val) and val > 0.0:
+                        equiv_weight = val
 
     fallback = _DEFAULT_METAL_CONSTANTS.get(metal_key)
     if fallback is not None:
@@ -305,11 +323,30 @@ def _resolve_metal_constants(
         if default_valence is None:
             default_valence = fallback[2]
 
+    # Allow alloys/compounds that provide equivalent_weight_g_eq + density_g_cm3 without explicit molar_mass/valence
+    if density is not None and equiv_weight is not None:
+        if default_valence is None:
+            default_valence = 1
+        if molar_mass is None:
+            molar_mass = equiv_weight * default_valence
+
     if molar_mass is None or density is None or default_valence is None:
         raise ValueError(
             f"Unsupported Metal {metal!r}: missing molar mass, density, or Dissolution Valence."
         )
-    return molar_mass, density, default_valence
+    return molar_mass, density, default_valence, equiv_weight
+
+
+def has_faraday_properties(
+    metal: str,
+    material_properties: pd.DataFrame | None = None,
+) -> bool:
+    """Return ``True`` if Faraday corrosion rate (nm/min) can be computed for ``metal``."""
+    try:
+        _resolve_metal_constants(metal, material_properties)
+        return True
+    except ValueError:
+        return False
 
 
 def calculate_faraday_corrosion_rate(
@@ -328,14 +365,23 @@ def calculate_faraday_corrosion_rate(
             f"immersion_time_s must be non-negative and finite, got {immersion_time_s!r}"
         )
 
-    molar_mass, density, default_valence = _resolve_metal_constants(metal, material_properties)
+    molar_mass, density, default_valence, equiv_weight = _resolve_metal_constants(
+        metal, material_properties
+    )
     z = default_valence if valence is None else int(valence)
     if z <= 0:
         raise ValueError(f"Dissolution Valence (z) must be a positive integer, got {z!r}")
 
-    # Volume dissolution velocity v (cm/s) = (i [A/cm2] * M [g/mol]) / (z * F [C/mol] * rho [g/cm3])
+    # Volume dissolution velocity v (cm/s) = (i [A/cm2] * EW [g/eq]) / (F [C/mol] * rho [g/cm3])
+    # When caller does not override valence and an explicit equivalent_weight_g_eq is supplied (e.g. alloys/compounds),
+    # honor equivalent_weight_g_eq directly; otherwise compute M / z.
+    effective_ew = (
+        equiv_weight
+        if (valence is None and equiv_weight is not None)
+        else (molar_mass / z)
+    )
     current_A_cm2 = float(icorr_uA_cm2) * 1e-6
-    velocity_cm_s = (current_A_cm2 * molar_mass) / (z * FARADAY_CONSTANT_C_MOL * density)
+    velocity_cm_s = (current_A_cm2 * effective_ew) / (FARADAY_CONSTANT_C_MOL * density)
 
     # 1 cm = 1e7 nm; 1 min = 60 s -> CR [nm/min] = v [cm/s] * 1e7 * 60
     cr_nm_min = velocity_cm_s * 1e7 * SECONDS_PER_MINUTE
