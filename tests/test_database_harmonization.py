@@ -454,14 +454,17 @@ class TestDirectoryIngestionSeedFallbackAndExport(unittest.TestCase):
             db.electrochemical_database[db.electrochemical_database["metal"] == "Ru"]["valence"]
         )
         self.assertEqual(ru_echem_valences, {4})
-        # Verify ExposureCondition object lookup
+        # Verify ExposureCondition object lookup against an actual Cu record in the database
+        cu_row = db.electrochemical_database[
+            db.electrochemical_database["metal"] == "Cu"
+        ].iloc[0]
         cond_res = db.lookup_exposure_condition(
             ExposureCondition(
                 metal="Cu",
-                pH=4.0,
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                temperature_C=25.0,
+                pH=float(cu_row["pH"]),
+                oxidizer_type=str(cu_row["oxidizer_type"]),
+                oxidizer_concentration=float(cu_row["oxidizer_concentration"]),
+                temperature_C=float(cu_row["temperature_C"]),
             )
         )
         self.assertTrue(cond_res.is_exact_match)
