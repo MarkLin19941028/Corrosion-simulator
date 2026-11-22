@@ -6,6 +6,7 @@ Launch with:
 
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import pandas as pd
@@ -17,6 +18,12 @@ from corrosion_simulator.platform_controller import (
     ManualElectrochemicalInput,
     SimulationRequest,
     SingleMetalViewPayload,
+)
+from corrosion_simulator.reporting import (
+    CleaningRecipeSpec,
+    RecipeComparisonPayload,
+    compare_cleaning_recipes,
+    generate_all_report_exports,
 )
 
 SOURCE_LABELS = {
@@ -381,6 +388,242 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
     st.plotly_chart(payload.comparative_kinetics_figure, width="stretch")
 
 
+def _default_recipe_presets(base_request: SimulationRequest) -> list[CleaningRecipeSpec]:
+    return [
+        CleaningRecipeSpec(
+            name="Baseline Recipe",
+            oxidizer_type=base_request.oxidizer_type,
+            oxidizer_concentration=base_request.oxidizer_concentration,
+            acid_type=base_request.acid_type,
+            acid_concentration=base_request.acid_concentration,
+            inhibitor_type=base_request.inhibitor_type,
+            inhibitor_concentration=base_request.inhibitor_concentration,
+            pH=base_request.pH,
+            temperature_C=base_request.temperature_C,
+            immersion_time_s=base_request.immersion_time_s,
+        ),
+        CleaningRecipeSpec(
+            name="Low-Oxidizer Mild Rinse",
+            oxidizer_type=base_request.oxidizer_type,
+            oxidizer_concentration=max(0.1, round(base_request.oxidizer_concentration * 0.4, 2)),
+            acid_type=base_request.acid_type,
+            acid_concentration=base_request.acid_concentration,
+            inhibitor_type="BTA",
+            inhibitor_concentration=1.0,
+            pH=min(12.0, round(base_request.pH + 1.5, 1)),
+            temperature_C=max(15.0, base_request.temperature_C - 5.0),
+            immersion_time_s=max(30.0, round(base_request.immersion_time_s * 0.5, 0)),
+        ),
+        CleaningRecipeSpec(
+            name="High-Temp Aggressive Clean",
+            oxidizer_type=base_request.oxidizer_type,
+            oxidizer_concentration=min(30.0, round(max(base_request.oxidizer_concentration, 0.5) * 2.0, 2)),
+            acid_type=base_request.acid_type,
+            acid_concentration=base_request.acid_concentration,
+            inhibitor_type="None",
+            inhibitor_concentration=0.0,
+            pH=max(1.0, round(base_request.pH - 0.5, 1)),
+            temperature_C=min(85.0, base_request.temperature_C + 20.0),
+            immersion_time_s=round(base_request.immersion_time_s * 1.5, 0),
+        ),
+        CleaningRecipeSpec(
+            name="Neutral Inhibited Clean",
+            oxidizer_type="None",
+            oxidizer_concentration=0.0,
+            acid_type="None",
+            acid_concentration=0.0,
+            inhibitor_type="BTA",
+            inhibitor_concentration=2.0,
+            pH=7.0,
+            temperature_C=25.0,
+            immersion_time_s=120.0,
+        ),
+        CleaningRecipeSpec(
+            name="Short High-pH Rinse",
+            oxidizer_type=base_request.oxidizer_type,
+            oxidizer_concentration=0.5,
+            acid_type="None",
+            acid_concentration=0.0,
+            inhibitor_type="None",
+            inhibitor_concentration=0.0,
+            pH=9.0,
+            temperature_C=25.0,
+            immersion_time_s=60.0,
+        ),
+    ]
+
+
+def _render_recipe_comparison_view(
+    controller: CorrosionPlatformController,
+    base_request: SimulationRequest,
+) -> RecipeComparisonPayload:
+    mode_label = (
+        f"Galvanic Pair ({base_request.primary_metal} / {base_request.secondary_metal}, "
+        f"Area Ratio = {base_request.cathode_to_anode_area_ratio:g})"
+        if base_request.secondary_metal is not None
+        else f"Single Metal ({base_request.primary_metal})"
+    )
+    st.subheader(f"Recipe Comparison — {mode_label}")
+    st.caption(
+        "Define 2 to 5 candidate Cleaning Recipes below to compare corrosion rate, cumulative depth, "
+        "Thickness Loss Risk, Time to Threshold, and (when coupled) Acceleration Factor."
+    )
+
+    options = controller.available_options()
+    presets = _default_recipe_presets(base_request)
+    n_recipes = st.slider("Number of Candidate Cleaning Recipes", min_value=2, max_value=5, value=3)
+
+    recipes: list[CleaningRecipeSpec] = []
+    cols = st.columns(n_recipes)
+    for idx in range(n_recipes):
+        preset = presets[idx]
+        with cols[idx]:
+            st.markdown(f"**Recipe {idx + 1}**")
+            name = st.text_input("Name", value=preset.name, key=f"cmp_name_{idx}")
+            ox_idx = options["oxidizer_types"].index(preset.oxidizer_type) if preset.oxidizer_type in options["oxidizer_types"] else 0
+            ox_type = st.selectbox("Oxidizer", options=options["oxidizer_types"], index=ox_idx, key=f"cmp_ox_{idx}")
+            ox_conc = st.number_input(
+                "Oxidizer Conc.",
+                min_value=0.0,
+                max_value=50.0,
+                value=float(preset.oxidizer_concentration),
+                step=0.2,
+                disabled=(ox_type == "None"),
+                key=f"cmp_oxc_{idx}",
+            )
+            acid_idx = options["acid_types"].index(preset.acid_type) if preset.acid_type in options["acid_types"] else 0
+            acid_type = st.selectbox("Acid / Complexing", options=options["acid_types"], index=acid_idx, key=f"cmp_acid_{idx}")
+            acid_conc = st.number_input(
+                "Acid Conc.",
+                min_value=0.0,
+                max_value=50.0,
+                value=float(preset.acid_concentration),
+                step=0.2,
+                disabled=(acid_type == "None"),
+                key=f"cmp_acidc_{idx}",
+            )
+            inh_idx = options["inhibitor_types"].index(preset.inhibitor_type) if preset.inhibitor_type in options["inhibitor_types"] else 0
+            inh_type = st.selectbox("Inhibitor", options=options["inhibitor_types"], index=inh_idx, key=f"cmp_inh_{idx}")
+            inh_conc = st.number_input(
+                "Inhibitor Conc.",
+                min_value=0.0,
+                max_value=50.0,
+                value=float(preset.inhibitor_concentration),
+                step=0.2,
+                disabled=(inh_type == "None"),
+                key=f"cmp_inhc_{idx}",
+            )
+            ph_val = st.number_input("pH", min_value=0.0, max_value=14.0, value=float(preset.pH), step=0.5, key=f"cmp_ph_{idx}")
+            temp_val = st.number_input("Temp (°C)", min_value=5.0, max_value=95.0, value=float(preset.temperature_C), step=5.0, key=f"cmp_t_{idx}")
+            time_val = st.number_input("Time (s)", min_value=1.0, max_value=86400.0, value=float(preset.immersion_time_s), step=30.0, key=f"cmp_s_{idx}")
+
+            cleaned_name = name.strip() or f"Recipe {idx + 1}"
+            recipes.append(
+                CleaningRecipeSpec(
+                    name=cleaned_name,
+                    oxidizer_type=ox_type,
+                    oxidizer_concentration=0.0 if ox_type == "None" else float(ox_conc),
+                    acid_type=acid_type,
+                    acid_concentration=0.0 if acid_type == "None" else float(acid_conc),
+                    inhibitor_type=inh_type,
+                    inhibitor_concentration=0.0 if inh_type == "None" else float(inh_conc),
+                    pH=float(ph_val),
+                    temperature_C=float(temp_val),
+                    immersion_time_s=float(time_val),
+                )
+            )
+
+    # Ensure unique names if user typed duplicates
+    unique_recipes: list[CleaningRecipeSpec] = []
+    used: set[str] = set()
+    for i, r in enumerate(recipes, start=1):
+        unique_name = r.name if r.name not in used else f"{r.name} ({i})"
+        used.add(unique_name)
+        unique_recipes.append(replace(r, name=unique_name))
+
+    comparison = compare_cleaning_recipes(controller, base_request, unique_recipes)
+
+    st.success(f"**Lowest-Risk Recommendation:** {comparison.recommended_rationale}")
+    st.markdown("#### Side-by-Side Cleaning Recipe Rankings")
+    st.dataframe(comparison.comparison_table, width="stretch", hide_index=True)
+
+    st.plotly_chart(comparison.bar_figure, width="stretch")
+    st.plotly_chart(comparison.radar_figure, width="stretch")
+    return comparison
+
+
+def _render_report_export_view(
+    single_payload: SingleMetalViewPayload,
+    galvanic_payload: GalvanicViewPayload | None,
+    comparison_payload: RecipeComparisonPayload | None,
+) -> None:
+    st.subheader("Multi-Format Technical Report Export")
+    st.caption(
+        "Download complete analysis artifacts containing input conditions, parameter provenance "
+        "(Database vs. ML vs. Manual), Tafel & time-resolved figures, uncertainty intervals, "
+        "Confidence Tiers, Applicability Domain warnings, experimental recommendations, and recipe rankings."
+    )
+
+    exports = generate_all_report_exports(
+        single_payload,
+        galvanic_payload=galvanic_payload,
+        comparison_payload=comparison_payload,
+    )
+    if galvanic_payload is not None:
+        stem = f"corrosion_report_{galvanic_payload.active_metal.lower()}_{galvanic_payload.noble_metal.lower()}"
+    else:
+        stem = f"corrosion_report_{single_payload.request.primary_metal.lower()}"
+
+    c1, c2, c3 = st.columns(3)
+    c1.download_button(
+        "Download HTML Report (.html)",
+        data=exports["html"],
+        file_name=f"{stem}.html",
+        mime="text/html",
+        width="stretch",
+    )
+    c2.download_button(
+        "Download PDF Report (.pdf)",
+        data=exports["pdf"],
+        file_name=f"{stem}.pdf",
+        mime="application/pdf",
+        width="stretch",
+    )
+    c3.download_button(
+        "Download JSON Summary (.json)",
+        data=exports["json"],
+        file_name=f"{stem}.json",
+        mime="application/json",
+        width="stretch",
+    )
+
+    c4, c5, c6 = st.columns(3)
+    c4.download_button(
+        "Download CSV Table (.csv)",
+        data=exports["csv"],
+        file_name=f"{stem}.csv",
+        mime="text/csv",
+        width="stretch",
+    )
+    c5.download_button(
+        "Download Composite Figure (.png)",
+        data=exports["png"],
+        file_name=f"{stem}.png",
+        mime="image/png",
+        width="stretch",
+    )
+    c6.download_button(
+        "Download Vector Figure (.svg)",
+        data=exports["svg"],
+        file_name=f"{stem}.svg",
+        mime="image/svg+xml",
+        width="stretch",
+    )
+
+    with st.expander("Preview Composite Report Figure", expanded=True):
+        st.image(exports["png"], caption="Composite Technical Report Figure")
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Corrosion Simulator",
@@ -389,7 +632,8 @@ def main() -> None:
     )
     st.title("Semiconductor Wet-Cleaning Corrosion Simulator")
     st.caption(
-        "Physics-informed and ML-assisted electrochemical polarization, bimetallic galvanic coupling, and time-resolved thickness loss risk analysis."
+        "Physics-informed and ML-assisted electrochemical polarization, bimetallic galvanic coupling, "
+        "time-resolved thickness loss risk, multi-recipe comparison, and automated report export."
     )
 
     controller = get_controller()
@@ -402,11 +646,17 @@ def main() -> None:
         else None
     )
 
-    tab_single, tab_galvanic = st.tabs(["Single Metal Analysis", "Galvanic Analysis"])
+    tab_single, tab_galvanic, tab_compare, tab_export = st.tabs(
+        ["Single Metal Analysis", "Galvanic Analysis", "Recipe Comparison", "Report Export"]
+    )
     with tab_single:
         _render_single_metal_view(single_payload)
     with tab_galvanic:
         _render_galvanic_view(galvanic_payload)
+    with tab_compare:
+        comparison_payload = _render_recipe_comparison_view(controller, request)
+    with tab_export:
+        _render_report_export_view(single_payload, galvanic_payload, comparison_payload)
 
 
 if __name__ == "__main__":

@@ -310,7 +310,7 @@ class TestStreamlitAppSmoke(unittest.TestCase):
         at = AppTest.from_file(str(app_path), default_timeout=30)
         at.run()
         self.assertEqual(len(at.exception), 0, msg=f"Streamlit app raised exceptions: {at.exception}")
-        self.assertGreaterEqual(len(at.tabs), 2)
+        self.assertEqual(len(at.tabs), 4)
         self.assertGreaterEqual(len(at.metric), 4)
 
 
