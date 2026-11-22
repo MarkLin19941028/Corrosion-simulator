@@ -186,13 +186,17 @@ def _clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     return cleaned
 
 
-def _normalize_oxidizer_label(value: Any) -> str:
-    if value is None or pd.isna(value):
+def normalize_category_label(value: Any) -> str:
+    """Normalize a chemical or categorical label, mapping null/empty/none tokens to 'None'."""
+    if value is None or (isinstance(value, float) and math.isnan(value)) or pd.isna(value):
         return "None"
     s = str(value).strip()
     if not s or s.lower() in ("none", "nan", "null", "n/a", "na"):
         return "None"
     return s
+
+
+_normalize_oxidizer_label = normalize_category_label
 
 
 def _coalesce_column(df: pd.DataFrame, candidates: list[str], default: Any = np.nan) -> pd.Series:
@@ -209,10 +213,20 @@ def _coalesce_column(df: pd.DataFrame, candidates: list[str], default: Any = np.
 
 def _normalize_slope_series(
     df: pd.DataFrame,
-    value_candidates: list[str],
+    normalized_col: str,
+    raw_col: str,
     specific_unit_col: str,
 ) -> list[float]:
-    raw_slopes = pd.to_numeric(_coalesce_column(df, value_candidates), errors="coerce")
+    pre_norm = (
+        pd.to_numeric(df[normalized_col], errors="coerce")
+        if normalized_col in df.columns
+        else pd.Series([np.nan] * len(df), index=df.index)
+    )
+    raw_vals = (
+        pd.to_numeric(df[raw_col], errors="coerce")
+        if raw_col in df.columns
+        else pd.Series([np.nan] * len(df), index=df.index)
+    )
     unit_col = (
         df[specific_unit_col]
         if specific_unit_col in df.columns
@@ -222,13 +236,17 @@ def _normalize_slope_series(
             else pd.Series(["mV/dec"] * len(df), index=df.index)
         )
     )
-    return [
-        normalize_tafel_slope_to_mV_dec(
-            raw_slopes.loc[idx],
-            str(unit_col.loc[idx]) if not pd.isna(unit_col.loc[idx]) else "mV/dec",
-        )
-        for idx in df.index
-    ]
+    results: list[float] = []
+    for idx in df.index:
+        if not pd.isna(pre_norm.loc[idx]):
+            # Value is already explicitly in mV/dec; only enforce strictly positive sign
+            results.append(normalize_tafel_slope_to_mV_dec(float(pre_norm.loc[idx]), "mV/dec"))
+        elif not pd.isna(raw_vals.loc[idx]):
+            unit_str = str(unit_col.loc[idx]) if not pd.isna(unit_col.loc[idx]) else "mV/dec"
+            results.append(normalize_tafel_slope_to_mV_dec(float(raw_vals.loc[idx]), unit_str))
+        else:
+            results.append(float("nan"))
+    return results
 
 
 @dataclass(frozen=True)
@@ -438,7 +456,7 @@ class HarmonizedDatabase:
         )
 
         # 4. Build Galvanic Series ranking per Solution
-        galvanic_series = cls._build_galvanic_series(harmonized_echem, harmonized_solutions)
+        galvanic_series = cls._build_galvanic_series(harmonized_echem)
 
         # 5. Build Data Dictionary
         data_dictionary = cls._build_data_dictionary(
@@ -680,9 +698,21 @@ class HarmonizedDatabase:
                 f"REC_AUTO_{i + 1:05d}" for i in range(int(missing_id.sum()))
             ]
 
-        # Join solution attributes if missing on echem rows
+        # Join all key Solution formulation attributes if missing on echem rows
         sol_lookup = solutions.set_index("solution_id") if not solutions.empty else pd.DataFrame()
-        for col in ("pH", "oxidizer_type", "oxidizer_concentration", "solution_name"):
+        for col in (
+            "pH",
+            "oxidizer_type",
+            "oxidizer_concentration",
+            "acid_type",
+            "acid_concentration",
+            "inhibitor_type",
+            "inhibitor_concentration",
+            "chelating_agent_type",
+            "chelating_agent_concentration",
+            "ORP_mV",
+            "solution_name",
+        ):
             if col not in df.columns:
                 df[col] = np.nan
             if not sol_lookup.empty and col in sol_lookup.columns:
@@ -767,9 +797,14 @@ class HarmonizedDatabase:
 
         df["Ecorr_V_SHE"] = converted_ecorr
 
-        # Normalize icorr to uA/cm2
+        # Normalize icorr to uA/cm2 without double-scaling already-normalized icorr_uA_cm2 values
+        pre_norm_icorr = (
+            pd.to_numeric(df["icorr_uA_cm2"], errors="coerce")
+            if "icorr_uA_cm2" in df.columns
+            else pd.Series([np.nan] * len(df), index=df.index)
+        )
         raw_icorr = pd.to_numeric(
-            _coalesce_column(df, ["icorr_uA_cm2", "icorr", "i_corr"]), errors="coerce"
+            _coalesce_column(df, ["icorr", "i_corr"]), errors="coerce"
         )
         icorr_unit_col = (
             df["icorr_unit"]
@@ -789,11 +824,14 @@ class HarmonizedDatabase:
 
         normalized_icorr: list[float] = []
         for idx in df.index:
-            ic_val = raw_icorr.loc[idx]
+            pre_val = pre_norm_icorr.loc[idx]
+            raw_val = raw_icorr.loc[idx]
             ic_unit = icorr_unit_col.loc[idx]
-            if not pd.isna(ic_val):
+            if not pd.isna(pre_val):
+                norm_val = float(pre_val)
+            elif not pd.isna(raw_val):
                 norm_val = normalize_current_density_to_uA_cm2(
-                    float(ic_val),
+                    float(raw_val),
                     str(ic_unit) if not pd.isna(ic_unit) else "uA/cm2",
                 )
             elif not pd.isna(raw_log_icorr.loc[idx]):
@@ -821,12 +859,12 @@ class HarmonizedDatabase:
 
         df["log10_icorr_uA_cm2"] = np.log10(df["icorr_uA_cm2"])
 
-        # Normalize Tafel slopes to positive mV/dec
+        # Normalize Tafel slopes to positive mV/dec without double-scaling pre-normalized columns
         df["beta_a_mV_dec"] = _normalize_slope_series(
-            df, ["beta_a_mV_dec", "beta_a"], "beta_a_unit"
+            df, "beta_a_mV_dec", "beta_a", "beta_a_unit"
         )
         df["beta_c_mV_dec"] = _normalize_slope_series(
-            df, ["beta_c_mV_dec", "beta_c"], "beta_c_unit"
+            df, "beta_c_mV_dec", "beta_c", "beta_c_unit"
         )
 
         # Deduplicate exact duplicate records before computing group medians
@@ -867,10 +905,7 @@ class HarmonizedDatabase:
         return df.reset_index(drop=True)
 
     @staticmethod
-    def _build_galvanic_series(
-        echem_df: pd.DataFrame,
-        solutions_df: pd.DataFrame,
-    ) -> pd.DataFrame:
+    def _build_galvanic_series(echem_df: pd.DataFrame) -> pd.DataFrame:
         if echem_df.empty:
             return pd.DataFrame(
                 columns=[

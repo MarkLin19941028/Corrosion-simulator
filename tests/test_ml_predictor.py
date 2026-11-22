@@ -170,6 +170,14 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
                 self.assertTrue(np.isfinite(est.std))
                 self.assertGreaterEqual(est.std, 0.0)
 
+            # Raw point estimates must satisfy physical constraints (spec.md:52)
+            self.assertGreaterEqual(pred.Ecorr_V_SHE.mean, -2.5)
+            self.assertLessEqual(pred.Ecorr_V_SHE.mean, 2.5)
+            self.assertGreaterEqual(pred.beta_a_mV_dec.mean, 20.0)
+            self.assertLessEqual(pred.beta_a_mV_dec.mean, 500.0)
+            self.assertGreaterEqual(pred.beta_c_mV_dec.mean, 20.0)
+            self.assertLessEqual(pred.beta_c_mV_dec.mean, 500.0)
+
             # Verify persistence round-trip for Random Forest
             if family == "random_forest":
                 with tempfile.TemporaryDirectory() as tmpdir:

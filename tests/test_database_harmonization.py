@@ -124,7 +124,7 @@ class TestTableHarmonizationFilteringAndImputation(unittest.TestCase):
                     "temperature_C": 25.0,
                     "reference_electrode": "MSE",
                     "Ecorr_V_original": -0.340,  # -> +0.300 V vs. SHE
-                    "icorr_uA_cm2": 0.0012,
+                    "icorr": 0.0012,
                     "icorr_unit": "mA/cm2",  # -> 1.2 uA/cm2
                     "beta_a_mV_dec": None,
                     "beta_c_mV_dec": None,
@@ -492,6 +492,69 @@ class TestDirectoryIngestionSeedFallbackAndExport(unittest.TestCase):
         self.assertGreaterEqual(len(code_cells), 4)
         for cell in code_cells:
             self.assertTrue(cell.get("outputs"), "Every code cell in demonstration notebook must have outputs.")
+
+    def test_solution_attributes_join_and_no_double_unit_scaling(self) -> None:
+        raw_echem = pd.DataFrame(
+            [
+                {
+                    "record_id": "R_PRE_NORM",
+                    "metal": "Cu",
+                    "solution_id": "SOL_REL",
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.285,
+                    "icorr_uA_cm2": 2.3,
+                    "icorr_unit": "mA/cm2",  # must NOT double-scale pre-normalized icorr_uA_cm2
+                    "beta_a_mV_dec": 60.0,
+                    "beta_a_unit": "V/dec",  # must NOT double-scale pre-normalized beta_a_mV_dec
+                    "beta_c_mV_dec": -120.0,
+                    "beta_c_unit": "V/dec",
+                },
+                {
+                    "record_id": "R_RAW",
+                    "metal": "Co",
+                    "solution_id": "SOL_REL",
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": -0.095,
+                    "icorr": 0.0185,
+                    "icorr_unit": "mA/cm2",  # raw icorr -> 18.5 uA/cm2
+                    "beta_a": 0.064,
+                    "beta_a_unit": "V/dec",  # raw beta_a -> 64.0 mV/dec
+                    "beta_c": -0.122,
+                    "beta_c_unit": "V/dec",  # raw beta_c -> 122.0 mV/dec
+                },
+            ]
+        )
+        raw_sol = pd.DataFrame(
+            [
+                {
+                    "solution_id": "SOL_REL",
+                    "solution_name": "Relational Acidic H2O2 + BTA",
+                    "pH": 4.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "acid_type": "citric acid",
+                    "acid_concentration": 50.0,
+                    "inhibitor_type": "BTA",
+                    "inhibitor_concentration": 1.0,
+                    "ORP_mV": 480.0,
+                }
+            ]
+        )
+        db = HarmonizedDatabase.from_raw_tables(raw_echem, solution_df=raw_sol)
+        echem = db.electrochemical_database.set_index("record_id")
+
+        # Verify no double-scaling on pre-normalized row, and proper scaling on raw row
+        self.assertAlmostEqual(float(echem.loc["R_PRE_NORM", "icorr_uA_cm2"]), 2.3, places=6)
+        self.assertAlmostEqual(float(echem.loc["R_PRE_NORM", "beta_a_mV_dec"]), 60.0, places=6)
+        self.assertAlmostEqual(float(echem.loc["R_PRE_NORM", "beta_c_mV_dec"]), 120.0, places=6)
+        self.assertAlmostEqual(float(echem.loc["R_RAW", "icorr_uA_cm2"]), 18.5, places=6)
+        self.assertAlmostEqual(float(echem.loc["R_RAW", "beta_a_mV_dec"]), 64.0, places=6)
+        self.assertAlmostEqual(float(echem.loc["R_RAW", "beta_c_mV_dec"]), 122.0, places=6)
+
+        # Verify relational Solution attributes (acid, inhibitor, ORP_mV) joined onto echem records
+        self.assertEqual(str(echem.loc["R_PRE_NORM", "acid_type"]), "citric acid")
+        self.assertEqual(str(echem.loc["R_PRE_NORM", "inhibitor_type"]), "BTA")
+        self.assertAlmostEqual(float(echem.loc["R_PRE_NORM", "ORP_mV"]), 480.0, places=6)
 
 
 if __name__ == "__main__":

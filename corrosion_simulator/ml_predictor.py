@@ -19,7 +19,11 @@ from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_err
 from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
-from corrosion_simulator.database import ExposureCondition, HarmonizedDatabase
+from corrosion_simulator.database import (
+    ExposureCondition,
+    HarmonizedDatabase,
+    normalize_category_label as _clean_category,
+)
 from corrosion_simulator.physics import (
     PolarizationParameters,
     calculate_faraday_corrosion_rate,
@@ -82,15 +86,6 @@ _APPLICABILITY_CATEGORICAL_COLS: Final[tuple[str, ...]] = (
 _SEED_MATERIAL_MAP: Final[dict[str, dict[str, Any]]] = {
     row["metal"]: row for row in SEED_MATERIAL_PROPERTIES
 }
-
-
-def _clean_category(value: Any) -> str:
-    if value is None or (isinstance(value, float) and math.isnan(value)) or pd.isna(value):
-        return "None"
-    text = str(value).strip()
-    if not text or text.lower() in ("none", "nan", "null", "n/a", "na"):
-        return "None"
-    return text
 
 
 @dataclass(frozen=True)
@@ -754,12 +749,19 @@ class HybridMLPredictor:
         estimates: dict[str, ParameterEstimate] = {}
         for target_name in ML_TARGET_NAMES:
             mean_arr, std_arr = self.models[target_name].predict_mean_std(X_q)
+            raw_mean = float(mean_arr[0])
+            if target_name == "Ecorr_V_SHE":
+                clipped_mean = float(np.clip(raw_mean, ECORR_THERMO_MIN_V_SHE, ECORR_THERMO_MAX_V_SHE))
+            elif target_name in ("beta_a_mV_dec", "beta_c_mV_dec"):
+                clipped_mean = float(np.clip(raw_mean, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
+            else:
+                clipped_mean = float(np.clip(raw_mean, -6.0, 6.0))
             estimates[target_name] = ParameterEstimate(
-                mean=float(mean_arr[0]),
+                mean=clipped_mean,
                 std=float(std_arr[0]),
             )
 
-        log_i_mean = float(np.clip(estimates["log10_icorr_uA_cm2"].mean, -6.0, 6.0))
+        log_i_mean = estimates["log10_icorr_uA_cm2"].mean
         return MLParameterPrediction(
             metal=q.metal.strip(),
             Ecorr_V_SHE=estimates["Ecorr_V_SHE"],
