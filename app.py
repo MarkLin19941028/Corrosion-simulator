@@ -12,6 +12,7 @@ import math
 import pandas as pd
 import streamlit as st
 
+from corrosion_simulator.ml_predictor import MODEL_FAMILY_LABELS
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     GalvanicViewPayload,
@@ -236,6 +237,16 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         index=0,
     )
 
+    ml_model_family = "random_forest"
+    if parameter_source == "ml":
+        ml_model_family = st.sidebar.selectbox(
+            "ML Model Algorithm",
+            options=options["ml_model_families"],
+            format_func=lambda key: MODEL_FAMILY_LABELS.get(key, key),
+            index=0,
+            help="Select the ML regressor used for live parameter prediction and uncertainty propagation. Models are cached after first fit.",
+        )
+
     manual_primary: ManualElectrochemicalInput | None = None
     manual_secondary: ManualElectrochemicalInput | None = None
     if parameter_source == "manual":
@@ -265,6 +276,7 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         d_max_nm=float(d_max_nm),
         power_law_n=float(power_law_n),
         parameter_source=parameter_source,
+        ml_model_family=ml_model_family,
         manual_primary=manual_primary,
         manual_secondary=manual_secondary,
     )
@@ -272,6 +284,11 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
 
 def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
     st.subheader(f"Single Metal Analysis — {payload.request.primary_metal}")
+    if payload.request.parameter_source == "ml":
+        model_label = MODEL_FAMILY_LABELS.get(
+            payload.request.ml_model_family, payload.request.ml_model_family
+        )
+        st.caption(f"Active ML Model: **{model_label}**")
     _render_confidence_and_warnings(
         payload.confidence_tier,
         payload.warnings,
@@ -324,6 +341,11 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
     st.subheader(
         f"Galvanic Analysis — {payload.active_metal} (Active Metal) coupled with {payload.noble_metal} (Noble Metal)"
     )
+    if payload.request.parameter_source == "ml":
+        model_label = MODEL_FAMILY_LABELS.get(
+            payload.request.ml_model_family, payload.request.ml_model_family
+        )
+        st.caption(f"Active ML Model: **{model_label}**")
     _render_confidence_and_warnings(
         payload.confidence_tier,
         payload.warnings,

@@ -300,6 +300,34 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
                 self.assertEqual(payload.confidence_tier, "Low")
                 self.assertTrue(any("different experimental conditions" in w for w in payload.warnings))
 
+    def test_live_ml_model_family_switching_and_caching(self) -> None:
+        options = self.controller.available_options()
+        self.assertIn("extra_trees", options["ml_model_families"])
+        self.assertIn("rf_gp_ensemble", options["ml_model_families"])
+        self.assertIn("hist_gradient_boosting", options["ml_model_families"])
+
+        for family in ("random_forest", "extra_trees", "rf_gp_ensemble"):
+            req = SimulationRequest(
+                primary_metal="Cu",
+                pH=4.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                temperature_C=25.0,
+                parameter_source="ml",
+                ml_model_family=family,
+                mc_draws=80,
+            )
+            payload = self.controller.run_single_metal_analysis(req)
+            self.assertIsNotNone(payload.resolved_parameters.ml_prediction)
+            self.assertEqual(payload.resolved_parameters.ml_prediction.model_family, family)
+            self.assertEqual(payload.to_summary_dict()["ml_model_family"], family)
+
+        # Calling get_predictor again returns the cached instance
+        self.assertIs(
+            self.controller.get_predictor("extra_trees"),
+            self.controller.get_predictor("extra_trees"),
+        )
+
 
 class TestStreamlitAppSmoke(unittest.TestCase):
     def test_streamlit_app_renders_without_exception(self) -> None:

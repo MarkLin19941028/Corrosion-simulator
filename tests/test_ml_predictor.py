@@ -147,7 +147,14 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
         )
 
     def test_all_three_model_families_predict_with_uncertainty_and_serialize(self) -> None:
-        for family in ("random_forest", "gradient_boosting", "gaussian_process"):
+        for family in (
+            "random_forest",
+            "extra_trees",
+            "gaussian_process",
+            "rf_gp_ensemble",
+            "hist_gradient_boosting",
+            "gradient_boosting",
+        ):
             predictor = HybridMLPredictor(
                 model_family=family,
                 random_state=42,
@@ -227,6 +234,72 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
         metrics_loo = predictor.cross_validate(small_db, cv_strategy="loocv")
         self.assertEqual(len(metrics_loo), 4)
         self.assertTrue(all(m.cv_strategy == "loocv" for m in metrics_loo))
+
+    def test_imputed_tafel_exclusion_group_cv_per_metal_and_quality_weights(self) -> None:
+        raw_db = HarmonizedDatabase.from_directory("data/raw")
+        df = raw_db.electrochemical_database
+
+        # 1. Excluding imputed Tafel slopes reduces beta_a/beta_c training & CV counts to measured rows
+        measured_ba = int((~df["beta_a_imputed"]).sum())
+        measured_bc = int((~df["beta_c_imputed"]).sum())
+        self.assertLess(measured_ba, len(df))
+        self.assertLess(measured_bc, len(df))
+
+        predictor_clean = HybridMLPredictor(
+            model_family="random_forest",
+            random_state=42,
+            n_estimators=20,
+            exclude_imputed_tafel=True,
+            use_quality_weights=True,
+        ).fit(raw_db)
+        self.assertEqual(predictor_clean.target_training_counts["Ecorr_V_SHE"], len(df))
+        self.assertEqual(predictor_clean.target_training_counts["log10_icorr_uA_cm2"], len(df))
+        self.assertEqual(predictor_clean.target_training_counts["beta_a_mV_dec"], measured_ba)
+        self.assertEqual(predictor_clean.target_training_counts["beta_c_mV_dec"], measured_bc)
+
+        # 2. GroupKFold by source_reference + per-metal breakdown
+        metrics_group = predictor_clean.cross_validate(raw_db, cv_strategy="group_5fold")
+        by_target = {m.target: m for m in metrics_group}
+        self.assertEqual(by_target["Ecorr_V_SHE"].cv_strategy, "group_5fold")
+        self.assertEqual(by_target["Ecorr_V_SHE"].n_samples, len(df))
+        self.assertEqual(by_target["beta_a_mV_dec"].n_samples, measured_ba)
+        self.assertEqual(by_target["beta_c_mV_dec"].n_samples, measured_bc)
+        self.assertIn("Cu", by_target["Ecorr_V_SHE"].per_metal_metrics)
+        self.assertIn("Ta", by_target["Ecorr_V_SHE"].per_metal_metrics)
+        self.assertEqual(
+            int(sum(v["n_samples"] for v in by_target["Ecorr_V_SHE"].per_metal_metrics.values())),
+            len(df),
+        )
+
+        # 3. Quality weights actively influence tree fitting (use_quality_weights=True vs False)
+        df_weighted = self.db.electrochemical_database.copy()
+        df_weighted["quality_score"] = np.where(
+            np.arange(len(df_weighted)) % 2 == 0, 1.0, 0.05
+        )
+        weighted_db = HarmonizedDatabase(
+            electrochemical_database=df_weighted,
+            material_properties=self.db.material_properties,
+            solution_properties=self.db.solution_properties,
+            galvanic_series=self.db.galvanic_series,
+            data_dictionary=self.db.data_dictionary,
+        )
+        pred_w = HybridMLPredictor(
+            model_family="random_forest",
+            random_state=42,
+            n_estimators=25,
+            use_quality_weights=True,
+        ).fit(weighted_db).predict(self.query)
+        pred_unw = HybridMLPredictor(
+            model_family="random_forest",
+            random_state=42,
+            n_estimators=25,
+            use_quality_weights=False,
+        ).fit(weighted_db).predict(self.query)
+        self.assertNotAlmostEqual(
+            pred_w.log10_icorr_uA_cm2.mean,
+            pred_unw.log10_icorr_uA_cm2.mean,
+            places=6,
+        )
 
 
 class TestMonteCarloUncertaintyPropagation(unittest.TestCase):

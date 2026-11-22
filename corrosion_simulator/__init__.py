@@ -39,6 +39,8 @@ from corrosion_simulator.kinetics import (
 )
 from corrosion_simulator.ml_predictor import (
     ML_TARGET_NAMES,
+    MODEL_FAMILY_LABELS,
+    SUPPORTED_MODEL_FAMILIES,
     ApplicabilityDomainChecker,
     ApplicabilityDomainResult,
     CrossValidationMetrics,
@@ -104,7 +106,9 @@ __all__ = [
     "DEFAULT_POWER_LAW_T_REF_S",
     "FARADAY_CONSTANT_C_MOL",
     "ML_TARGET_NAMES",
+    "MODEL_FAMILY_LABELS",
     "REFERENCE_ELECTRODE_OFFSETS_V_SHE",
+    "SUPPORTED_MODEL_FAMILIES",
     "ApplicabilityDomainChecker",
     "ApplicabilityDomainResult",
     "CleaningRecipeSpec",

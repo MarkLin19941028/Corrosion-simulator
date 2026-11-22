@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
@@ -11,12 +11,17 @@ import warnings
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+from sklearn.ensemble import (
+    ExtraTreesRegressor,
+    GradientBoostingRegressor,
+    HistGradientBoostingRegressor,
+    RandomForestRegressor,
+)
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
 from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
-from sklearn.model_selection import KFold, LeaveOneOut, StratifiedKFold
+from sklearn.model_selection import GroupKFold, KFold, LeaveOneOut, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from corrosion_simulator.database import (
@@ -35,8 +40,33 @@ if TYPE_CHECKING:
     from matplotlib.figure import Figure
 
 ConfidenceTier = Literal["High", "Medium", "Low"]
-ModelFamily = Literal["random_forest", "gradient_boosting", "gaussian_process"]
-CVStrategy = Literal["stratified_5fold", "loocv"]
+ModelFamily = Literal[
+    "random_forest",
+    "extra_trees",
+    "gaussian_process",
+    "rf_gp_ensemble",
+    "hist_gradient_boosting",
+    "gradient_boosting",
+]
+CVStrategy = Literal["stratified_5fold", "group_5fold", "loocv"]
+
+SUPPORTED_MODEL_FAMILIES: Final[tuple[ModelFamily, ...]] = (
+    "random_forest",
+    "extra_trees",
+    "gaussian_process",
+    "rf_gp_ensemble",
+    "hist_gradient_boosting",
+    "gradient_boosting",
+)
+
+MODEL_FAMILY_LABELS: Final[dict[ModelFamily, str]] = {
+    "random_forest": "Random Forest (Default — Balanced & Fast)",
+    "extra_trees": "Extra Trees (Lowest MAE, Fastest)",
+    "gaussian_process": "Gaussian Process (Bayesian Uncertainty, High R²)",
+    "rf_gp_ensemble": "RF + GP Hybrid Ensemble (Tree + Smooth Kernel)",
+    "hist_gradient_boosting": "Hist Gradient Boosting (L2 Regularized GBDT)",
+    "gradient_boosting": "Gradient Boosting (Bootstrap Ensemble)",
+}
 
 ML_TARGET_NAMES: Final[tuple[str, ...]] = (
     "Ecorr_V_SHE",
@@ -574,6 +604,7 @@ class CrossValidationMetrics:
     r2: float
     mape: float
     n_samples: int
+    per_metal_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
 
 
 class _UncertainTargetModel:
@@ -593,17 +624,32 @@ class _UncertainTargetModel:
         self.n_bootstrap = int(n_bootstrap)
         self._scaler: StandardScaler | None = None
         self._model: Any = None
+        self._secondary_model: Any = None
         self._ensemble: list[Any] = []
 
-    def fit(self, X: np.ndarray, y: np.ndarray) -> _UncertainTargetModel:
+    def fit(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        *,
+        sample_weight: np.ndarray | None = None,
+    ) -> _UncertainTargetModel:
         if self.model_family == "random_forest":
             rf = RandomForestRegressor(
                 n_estimators=self.n_estimators,
                 random_state=self.random_state,
                 min_samples_leaf=1,
             )
-            rf.fit(X, y)
+            rf.fit(X, y, sample_weight=sample_weight)
             self._model = rf
+        elif self.model_family == "extra_trees":
+            et = ExtraTreesRegressor(
+                n_estimators=self.n_estimators,
+                random_state=self.random_state,
+                min_samples_leaf=1,
+            )
+            et.fit(X, y, sample_weight=sample_weight)
+            self._model = et
         elif self.model_family == "gradient_boosting":
             rng = np.random.default_rng(self.random_state)
             n_samples = len(y)
@@ -616,8 +662,24 @@ class _UncertainTargetModel:
                     learning_rate=0.08,
                     random_state=self.random_state + b,
                 )
-                gbr.fit(X[idx], y[idx])
+                w_boot = sample_weight[idx] if sample_weight is not None else None
+                gbr.fit(X[idx], y[idx], sample_weight=w_boot)
                 self._ensemble.append(gbr)
+        elif self.model_family == "hist_gradient_boosting":
+            rng = np.random.default_rng(self.random_state)
+            n_samples = len(y)
+            self._ensemble = []
+            for b in range(self.n_bootstrap):
+                idx = rng.integers(0, n_samples, size=n_samples)
+                hgbr = HistGradientBoostingRegressor(
+                    max_iter=max(50, self.n_estimators),
+                    max_depth=5,
+                    l2_regularization=1.0,
+                    random_state=self.random_state + b,
+                )
+                w_boot = sample_weight[idx] if sample_weight is not None else None
+                hgbr.fit(X[idx], y[idx], sample_weight=w_boot)
+                self._ensemble.append(hgbr)
         elif self.model_family == "gaussian_process":
             self._scaler = StandardScaler()
             X_scaled = self._scaler.fit_transform(X)
@@ -636,15 +698,41 @@ class _UncertainTargetModel:
                 warnings.simplefilter("ignore", ConvergenceWarning)
                 gpr.fit(X_scaled, y)
             self._model = gpr
+        elif self.model_family == "rf_gp_ensemble":
+            rf = RandomForestRegressor(
+                n_estimators=self.n_estimators,
+                random_state=self.random_state,
+                min_samples_leaf=1,
+            )
+            rf.fit(X, y, sample_weight=sample_weight)
+            self._model = rf
+
+            self._scaler = StandardScaler()
+            X_scaled = self._scaler.fit_transform(X)
+            kernel = (
+                ConstantKernel(1.0, (1e-3, 1e3))
+                * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e3), nu=2.5)
+                + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-5, 1e1))
+            )
+            gpr = GaussianProcessRegressor(
+                kernel=kernel,
+                normalize_y=True,
+                random_state=self.random_state,
+                n_restarts_optimizer=1,
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                gpr.fit(X_scaled, y)
+            self._secondary_model = gpr
         else:
             raise ValueError(f"Unsupported model_family: {self.model_family!r}")
         return self
 
     def predict_mean_std(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        if self.model_family == "random_forest":
+        if self.model_family in ("random_forest", "extra_trees"):
             tree_preds = np.vstack([tree.predict(X) for tree in self._model.estimators_])
             return np.mean(tree_preds, axis=0), np.std(tree_preds, axis=0)
-        if self.model_family == "gradient_boosting":
+        if self.model_family in ("gradient_boosting", "hist_gradient_boosting"):
             boot_preds = np.vstack([m.predict(X) for m in self._ensemble])
             return np.mean(boot_preds, axis=0), np.std(boot_preds, axis=0)
         if self.model_family == "gaussian_process":
@@ -652,12 +740,24 @@ class _UncertainTargetModel:
             X_scaled = self._scaler.transform(X)
             mean, std = self._model.predict(X_scaled, return_std=True)
             return np.asarray(mean, dtype=float), np.maximum(np.asarray(std, dtype=float), 0.0)
+        if self.model_family == "rf_gp_ensemble":
+            assert self._scaler is not None and self._secondary_model is not None
+            tree_preds = np.vstack([tree.predict(X) for tree in self._model.estimators_])
+            rf_mean = np.mean(tree_preds, axis=0)
+            rf_std = np.std(tree_preds, axis=0)
+            X_scaled = self._scaler.transform(X)
+            gp_mean, gp_std = self._secondary_model.predict(X_scaled, return_std=True)
+            gp_mean = np.asarray(gp_mean, dtype=float)
+            gp_std = np.maximum(np.asarray(gp_std, dtype=float), 0.0)
+            # Equal-weight mixture mean and law-of-total-variance std
+            comb_mean = 0.5 * (rf_mean + gp_mean)
+            comb_var = 0.5 * (rf_std**2 + gp_std**2) + 0.25 * ((rf_mean - gp_mean) ** 2)
+            return comb_mean, np.sqrt(np.maximum(comb_var, 0.0))
         raise ValueError(f"Unsupported model_family: {self.model_family!r}")
-
 
     def feature_importances(self) -> np.ndarray:
         """Return feature importance vector for tree-based model families."""
-        if self.model_family == "random_forest":
+        if self.model_family in ("random_forest", "extra_trees", "rf_gp_ensemble"):
             return np.asarray(self._model.feature_importances_, dtype=float)
         if self.model_family == "gradient_boosting":
             return np.mean([m.feature_importances_ for m in self._ensemble], axis=0)
@@ -685,6 +785,128 @@ def _compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
 
 
+def _target_valid_mask(
+    df: pd.DataFrame,
+    target_name: str,
+    y_vec: np.ndarray,
+    *,
+    exclude_imputed_tafel: bool = True,
+) -> np.ndarray:
+    """Return boolean mask of valid (and non-imputed, when enabled) rows for a target."""
+    finite_mask = np.isfinite(y_vec)
+    if not exclude_imputed_tafel:
+        return finite_mask
+
+    imputed_col: str | None = None
+    if target_name == "beta_a_mV_dec" and "beta_a_imputed" in df.columns:
+        imputed_col = "beta_a_imputed"
+    elif target_name == "beta_c_mV_dec" and "beta_c_imputed" in df.columns:
+        imputed_col = "beta_c_imputed"
+
+    if imputed_col is None:
+        return finite_mask
+
+    measured_mask = finite_mask & ~df[imputed_col].fillna(False).astype(bool).to_numpy()
+    # Fall back to all finite rows only if fewer than 3 measured records exist
+    if int(np.sum(measured_mask)) >= 3:
+        return measured_mask
+    return finite_mask
+
+
+def _extract_sample_weights(
+    df: pd.DataFrame,
+    *,
+    use_quality_weights: bool = True,
+) -> np.ndarray | None:
+    """Extract normalized quality_score sample weights when available."""
+    if not use_quality_weights or "quality_score" not in df.columns:
+        return None
+    weights = pd.to_numeric(df["quality_score"], errors="coerce").fillna(1.0).to_numpy(dtype=float)
+    return np.clip(weights, 0.05, 1.0)
+
+
+def _build_cv_splits(
+    df: pd.DataFrame,
+    *,
+    cv_strategy: CVStrategy,
+    random_state: int,
+    group_col: str = "source_reference",
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Build train/validation index splits for the requested CV strategy."""
+    n_samples = len(df)
+    if n_samples < 3:
+        raise ValueError("At least 3 samples are required for cross-validation.")
+
+    if cv_strategy == "loocv":
+        return list(LeaveOneOut().split(df))
+
+    n_splits = min(5, n_samples)
+    if cv_strategy == "group_5fold":
+        if group_col in df.columns:
+            raw_groups = df[group_col].astype(object).to_numpy()
+            groups = np.array(
+                [
+                    str(v).strip()
+                    if (v is not None and not pd.isna(v) and str(v).strip() and str(v).strip().lower() != "nan")
+                    else f"_ungrouped_{i}"
+                    for i, v in enumerate(raw_groups)
+                ],
+                dtype=object,
+            )
+        else:
+            groups = np.array([f"_ungrouped_{i}" for i in range(n_samples)], dtype=object)
+
+        n_unique_groups = len(set(groups))
+        if n_unique_groups >= 2:
+            gkf = GroupKFold(n_splits=min(n_splits, n_unique_groups))
+            return list(gkf.split(df, groups=groups))
+        return list(KFold(n_splits=n_splits, shuffle=True, random_state=random_state).split(df))
+
+    if cv_strategy == "stratified_5fold":
+        metal_counts = df["metal"].value_counts()
+        strat_labels = df["metal"].where(
+            df["metal"].map(metal_counts) >= n_splits, "_rare_metal"
+        )
+        if strat_labels.value_counts().min() >= n_splits:
+            splitter = StratifiedKFold(
+                n_splits=n_splits, shuffle=True, random_state=random_state
+            )
+            return list(splitter.split(df, strat_labels))
+        splitter_kf = KFold(
+            n_splits=n_splits, shuffle=True, random_state=random_state
+        )
+        return list(splitter_kf.split(df))
+
+    raise ValueError(f"Unsupported cv_strategy: {cv_strategy!r}")
+
+
+def _compute_per_metal_metrics(
+    metals: np.ndarray,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+) -> dict[str, dict[str, float]]:
+    """Compute regression metrics broken down by metal."""
+    breakdown: dict[str, dict[str, float]] = {}
+    for metal in sorted({str(m) for m in metals}):
+        mask = metals == metal
+        n_m = int(np.sum(mask))
+        yt = y_true[mask]
+        yp = y_pred[mask]
+        r2_val = (
+            float(r2_score(yt, yp))
+            if (n_m >= 2 and float(np.var(yt)) > 1e-12)
+            else float("nan")
+        )
+        breakdown[metal] = {
+            "n_samples": float(n_m),
+            "mae": float(mean_absolute_error(yt, yp)),
+            "rmse": float(root_mean_squared_error(yt, yp)),
+            "r2": r2_val,
+            "mape": _compute_mape(yt, yp),
+        }
+    return breakdown
+
+
 class HybridMLPredictor:
     """Trains and serves four electrochemical target regressors with uncertainty and Applicability Domain."""
 
@@ -696,18 +918,25 @@ class HybridMLPredictor:
         n_estimators: int = 100,
         n_bootstrap: int = 10,
         knn_k: int = 3,
+        exclude_imputed_tafel: bool = True,
+        use_quality_weights: bool = True,
     ) -> None:
-        if model_family not in ("random_forest", "gradient_boosting", "gaussian_process"):
-            raise ValueError(f"Unsupported model_family: {model_family!r}")
+        if model_family not in SUPPORTED_MODEL_FAMILIES:
+            raise ValueError(
+                f"Unsupported model_family: {model_family!r}. Supported: {SUPPORTED_MODEL_FAMILIES}"
+            )
         self.model_family: ModelFamily = model_family
         self.random_state = int(random_state)
         self.n_estimators = int(n_estimators)
         self.n_bootstrap = int(n_bootstrap)
         self.knn_k = int(knn_k)
+        self.exclude_imputed_tafel = bool(exclude_imputed_tafel)
+        self.use_quality_weights = bool(use_quality_weights)
 
         self.feature_extractor: ElectrochemicalFeatureExtractor | None = None
         self.applicability_checker: ApplicabilityDomainChecker | None = None
         self.models: dict[str, _UncertainTargetModel] = {}
+        self.target_training_counts: dict[str, int] = {}
         self._material_properties: pd.DataFrame | None = None
         self._is_fitted: bool = False
 
@@ -722,17 +951,28 @@ class HybridMLPredictor:
         )
         X = self.feature_extractor.fit_transform(df)
         targets = _extract_target_vectors(df)
+        sample_weights = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
 
         self.models = {}
+        self.target_training_counts = {}
         for idx, target_name in enumerate(ML_TARGET_NAMES):
+            y_all = targets[target_name]
+            mask = _target_valid_mask(
+                df,
+                target_name,
+                y_all,
+                exclude_imputed_tafel=self.exclude_imputed_tafel,
+            )
+            w_target = sample_weights[mask] if sample_weights is not None else None
             model = _UncertainTargetModel(
                 self.model_family,
                 random_state=self.random_state + idx * 17,
                 n_estimators=self.n_estimators,
                 n_bootstrap=self.n_bootstrap,
             )
-            model.fit(X, targets[target_name])
+            model.fit(X[mask], y_all[mask], sample_weight=w_target)
             self.models[target_name] = model
+            self.target_training_counts[target_name] = int(np.sum(mask))
 
         self.applicability_checker = ApplicabilityDomainChecker(k=self.knn_k).fit(df)
         self._is_fitted = True
@@ -778,75 +1018,77 @@ class HybridMLPredictor:
         database: HarmonizedDatabase,
         *,
         cv_strategy: CVStrategy = "stratified_5fold",
+        group_col: str = "source_reference",
     ) -> list[CrossValidationMetrics]:
-        """Run leak-free cross-validation (fitting feature extractor inside every fold)."""
+        """Run leak-free cross-validation (fitting feature extractor inside every fold).
+
+        When ``exclude_imputed_tafel`` is enabled, ``beta_a_mV_dec`` and ``beta_c_mV_dec``
+        are cross-validated exclusively on experimentally measured (non-imputed) records
+        to prevent group-median imputation leakage across folds.
+        """
         df = database.electrochemical_database.reset_index(drop=True)
-        n_samples = len(df)
-        if n_samples < 3:
+        if len(df) < 3:
             raise ValueError("At least 3 samples are required for cross-validation.")
 
-        targets = _extract_target_vectors(df)
-        oof_preds: dict[str, np.ndarray] = {
-            t: np.zeros(n_samples, dtype=float) for t in ML_TARGET_NAMES
-        }
+        all_targets = _extract_target_vectors(df)
+        all_weights = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
 
-        if cv_strategy == "loocv":
-            splits = list(LeaveOneOut().split(df))
-        elif cv_strategy == "stratified_5fold":
-            n_splits = min(5, n_samples)
-            metal_counts = df["metal"].value_counts()
-            strat_labels = df["metal"].where(
-                df["metal"].map(metal_counts) >= n_splits, "_rare_metal"
+        results: list[CrossValidationMetrics] = []
+        for t_idx, target_name in enumerate(ML_TARGET_NAMES):
+            y_all = all_targets[target_name]
+            mask = _target_valid_mask(
+                df,
+                target_name,
+                y_all,
+                exclude_imputed_tafel=self.exclude_imputed_tafel,
             )
-            if strat_labels.value_counts().min() >= n_splits:
-                splitter = StratifiedKFold(
-                    n_splits=n_splits, shuffle=True, random_state=self.random_state
-                )
-                splits = list(splitter.split(df, strat_labels))
-            else:
-                splitter_kf = KFold(
-                    n_splits=n_splits, shuffle=True, random_state=self.random_state
-                )
-                splits = list(splitter_kf.split(df))
-        else:
-            raise ValueError(f"Unsupported cv_strategy: {cv_strategy!r}")
+            sub_df = df.loc[mask].reset_index(drop=True)
+            y_true = y_all[mask]
+            sub_weights = all_weights[mask] if all_weights is not None else None
+            n_target_samples = len(sub_df)
 
-        for fold_idx, (train_idx, val_idx) in enumerate(splits):
-            train_df = df.iloc[train_idx].reset_index(drop=True)
-            val_df = df.iloc[val_idx].reset_index(drop=True)
-
-            # Strict featurization ordering: fit extractor on train fold only
-            extractor = ElectrochemicalFeatureExtractor(
-                material_properties=database.material_properties
+            splits = _build_cv_splits(
+                sub_df,
+                cv_strategy=cv_strategy,
+                random_state=self.random_state,
+                group_col=group_col,
             )
-            X_train = extractor.fit_transform(train_df)
-            X_val = extractor.transform(val_df)
+            oof_pred = np.zeros(n_target_samples, dtype=float)
 
-            for t_idx, target_name in enumerate(ML_TARGET_NAMES):
+            for fold_idx, (train_idx, val_idx) in enumerate(splits):
+                train_df = sub_df.iloc[train_idx].reset_index(drop=True)
+                val_df = sub_df.iloc[val_idx].reset_index(drop=True)
+
+                # Strict featurization ordering: fit extractor on train fold only
+                extractor = ElectrochemicalFeatureExtractor(
+                    material_properties=database.material_properties
+                )
+                X_train = extractor.fit_transform(train_df)
+                X_val = extractor.transform(val_df)
+
+                w_train = sub_weights[train_idx] if sub_weights is not None else None
                 model = _UncertainTargetModel(
                     self.model_family,
                     random_state=self.random_state + fold_idx * 31 + t_idx * 7,
                     n_estimators=self.n_estimators,
                     n_bootstrap=self.n_bootstrap,
                 )
-                model.fit(X_train, targets[target_name][train_idx])
+                model.fit(X_train, y_true[train_idx], sample_weight=w_train)
                 mean_pred, _ = model.predict_mean_std(X_val)
-                oof_preds[target_name][val_idx] = mean_pred
+                oof_pred[val_idx] = mean_pred
 
-        results: list[CrossValidationMetrics] = []
-        for target_name in ML_TARGET_NAMES:
-            y_true = targets[target_name]
-            y_pred = oof_preds[target_name]
+            metals_arr = sub_df["metal"].astype(str).str.strip().to_numpy()
             results.append(
                 CrossValidationMetrics(
                     target=target_name,
                     model_family=self.model_family,
                     cv_strategy=cv_strategy,
-                    mae=float(mean_absolute_error(y_true, y_pred)),
-                    rmse=float(root_mean_squared_error(y_true, y_pred)),
-                    r2=float(r2_score(y_true, y_pred)),
-                    mape=_compute_mape(y_true, y_pred),
-                    n_samples=n_samples,
+                    mae=float(mean_absolute_error(y_true, oof_pred)),
+                    rmse=float(root_mean_squared_error(y_true, oof_pred)),
+                    r2=float(r2_score(y_true, oof_pred)),
+                    mape=_compute_mape(y_true, oof_pred),
+                    n_samples=n_target_samples,
+                    per_metal_metrics=_compute_per_metal_metrics(metals_arr, y_true, oof_pred),
                 )
             )
         return results

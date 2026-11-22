@@ -36,10 +36,12 @@ from corrosion_simulator.kinetics import (
     simulate_time_resolved_kinetics,
 )
 from corrosion_simulator.ml_predictor import (
+    SUPPORTED_MODEL_FAMILIES,
     ApplicabilityDomainResult,
     HybridMLPredictor,
     MLFeatureQuery,
     MLParameterPrediction,
+    ModelFamily,
     MonteCarloPropagationResult,
     propagate_uncertainty_monte_carlo,
 )
@@ -103,6 +105,7 @@ class SimulationRequest:
     d_max_nm: float = DEFAULT_PASSIVATION_LIMIT_NM
     power_law_n: float = DEFAULT_POWER_LAW_N
     parameter_source: ParameterSource = "ml"
+    ml_model_family: ModelFamily = "random_forest"
     manual_primary: ManualElectrochemicalInput | None = None
     manual_secondary: ManualElectrochemicalInput | None = None
     primary_valence: int | None = None
@@ -127,6 +130,10 @@ class SimulationRequest:
             raise ValueError("d_crit_nm must be strictly positive.")
         if self.parameter_source not in ("database", "ml", "manual"):
             raise ValueError(f"Unsupported parameter_source '{self.parameter_source}'.")
+        if self.ml_model_family not in SUPPORTED_MODEL_FAMILIES:
+            raise ValueError(
+                f"Unsupported ml_model_family '{self.ml_model_family}'. Supported: {SUPPORTED_MODEL_FAMILIES}"
+            )
         if self.kinetics_model not in ("auto", "linear", "passivation", "power_law"):
             raise ValueError(f"Unsupported kinetics_model '{self.kinetics_model}'.")
         if self.mc_draws < 50:
@@ -222,6 +229,9 @@ class SingleMetalViewPayload:
         return {
             "primary_metal": self.request.primary_metal,
             "parameter_source": self.request.parameter_source,
+            "ml_model_family": (
+                self.request.ml_model_family if self.request.parameter_source == "ml" else None
+            ),
             "kinetics_model": self.kinetics_result.model,
             "pH": float(self.request.pH),
             "temperature_C": float(self.request.temperature_C),
@@ -289,6 +299,9 @@ class GalvanicViewPayload:
             "noble_metal": self.noble_metal,
             "cathode_to_anode_area_ratio": float(self.request.cathode_to_anode_area_ratio),
             "parameter_source": self.request.parameter_source,
+            "ml_model_family": (
+                self.request.ml_model_family if self.request.parameter_source == "ml" else None
+            ),
             "kinetics_model": self.coupled_kinetics.model,
             "delta_Ecorr_V": float(self.driving_force.delta_Ecorr_V),
             "galvanic_driving_force_risk": str(self.galvanic_driving_force_risk),
@@ -782,13 +795,31 @@ class CorrosionPlatformController:
             self.predictor.fit(database)
         else:
             self.predictor = predictor
+        self._predictors: dict[ModelFamily, HybridMLPredictor] = {
+            self.predictor.model_family: self.predictor
+        }
+
+    def get_predictor(self, model_family: ModelFamily | None = None) -> HybridMLPredictor:
+        """Return a fitted predictor for ``model_family``, lazily fitting and caching on first use."""
+        target_family = model_family or self.predictor.model_family
+        if target_family not in SUPPORTED_MODEL_FAMILIES:
+            raise ValueError(
+                f"Unsupported model_family '{target_family}'. Supported: {SUPPORTED_MODEL_FAMILIES}"
+            )
+        cached = self._predictors.get(target_family)
+        if cached is not None:
+            return cached
+        predictor = HybridMLPredictor(model_family=target_family, random_state=42)
+        predictor.fit(self.database)
+        self._predictors[target_family] = predictor
+        return predictor
 
     @classmethod
     def from_default_data(
         cls,
         raw_dir: str | Path = "data/raw",
         *,
-        model_family: Literal["random_forest", "gradient_boosting", "gaussian_process"] = "random_forest",
+        model_family: ModelFamily = "random_forest",
     ) -> CorrosionPlatformController:
         """Load the default harmonized database (raw CSVs if present, else seed) and fit ML models."""
         raw_path = Path(raw_dir)
@@ -823,6 +854,7 @@ class CorrosionPlatformController:
             "inhibitor_types": _extract_categories("inhibitor_type", ["None", "BTA"]),
             "kinetics_models": ["auto", "linear", "passivation", "power_law"],
             "parameter_sources": ["ml", "database", "manual"],
+            "ml_model_families": list(SUPPORTED_MODEL_FAMILIES),
         }
 
     def _build_ml_query(self, request: SimulationRequest, metal: str) -> MLFeatureQuery:
@@ -971,7 +1003,8 @@ class CorrosionPlatformController:
 
         # ML prediction mode
         query = self._build_ml_query(request, metal)
-        pred = self.predictor.predict(query)
+        predictor = self.get_predictor(request.ml_model_family)
+        pred = predictor.predict(query)
         params = pred.to_polarization_parameters()
         # Approximate linear-space 1-sigma for i_corr from log10-normal distribution:
         # sd(10^X) ≈ median * ln(10) * sigma_log10
