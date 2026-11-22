@@ -347,8 +347,8 @@ def build_single_metal_polarization_figure(
         band = mc_result.polarization_band
         fig.add_trace(
             go.Scatter(
-                x=band.log10_abs_net_p95,
-                y=band.potential_V_SHE,
+                x=band.potential_V_SHE,
+                y=band.log10_abs_net_p95,
                 mode="lines",
                 line={"width": 0},
                 showlegend=False,
@@ -358,51 +358,51 @@ def build_single_metal_polarization_figure(
         )
         fig.add_trace(
             go.Scatter(
-                x=band.log10_abs_net_p05,
-                y=band.potential_V_SHE,
+                x=band.potential_V_SHE,
+                y=band.log10_abs_net_p05,
                 mode="lines",
                 line={"width": 0},
-                fill="tonextx",
+                fill="tonexty",
                 fillcolor="rgba(31, 119, 180, 0.22)",
                 name="90% Uncertainty Band (p05–p95)",
-                hovertemplate="log10|i|: %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i|: %{y:.2f}<extra></extra>",
             )
         )
 
     fig.add_trace(
         go.Scatter(
-            x=curve.log10_anodic_uA_cm2,
-            y=curve.potential_V_SHE,
+            x=curve.potential_V_SHE,
+            y=curve.log10_anodic_uA_cm2,
             mode="lines",
             line={"color": "#d62728", "dash": "dash", "width": 1.6},
             name="Anodic Branch (i_a)",
-            hovertemplate="log10(i_a): %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10(i_a): %{y:.2f}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=curve.log10_cathodic_uA_cm2,
-            y=curve.potential_V_SHE,
+            x=curve.potential_V_SHE,
+            y=curve.log10_cathodic_uA_cm2,
             mode="lines",
             line={"color": "#2ca02c", "dash": "dot", "width": 1.6},
             name="Cathodic Branch (i_c)",
-            hovertemplate="log10(i_c): %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10(i_c): %{y:.2f}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=curve.log10_abs_net_uA_cm2,
-            y=curve.potential_V_SHE,
+            x=curve.potential_V_SHE,
+            y=curve.log10_abs_net_uA_cm2,
             mode="lines",
             line={"color": "#1f77b4", "width": 2.6},
             name=f"{metal} Net |i_net|",
-            hovertemplate="log10|i_net|: %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i_net|: %{y:.2f}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=[math.log10(curve.parameters.icorr_uA_cm2)],
-            y=[curve.parameters.Ecorr_V_SHE],
+            x=[curve.parameters.Ecorr_V_SHE],
+            y=[math.log10(curve.parameters.icorr_uA_cm2)],
             mode="markers",
             marker={"color": "#111111", "size": 9, "symbol": "diamond"},
             name=f"(E_corr, i_corr) = ({curve.parameters.Ecorr_V_SHE:.3f} V, {curve.parameters.icorr_uA_cm2:.2g} µA/cm²)",
@@ -411,8 +411,8 @@ def build_single_metal_polarization_figure(
 
     fig.update_layout(
         title=title or f"{metal} Polarization Curve (Tafel Plot)",
-        xaxis_title="log10(|i| / µA·cm⁻²)",
-        yaxis_title="Potential E (V vs. SHE)",
+        xaxis_title="Potential E (V vs. SHE)",
+        yaxis_title="log10(|i| / µA·cm⁻²)",
         template="plotly_white",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
         margin={"l": 60, "r": 25, "t": 70, "b": 55},
@@ -547,9 +547,9 @@ def build_galvanic_polarization_figure(
     if mc_galvanic is not None:
         e_p05 = float(mc_galvanic.mixed_potential_summary["p05"])
         e_p95 = float(mc_galvanic.mixed_potential_summary["p95"])
-        fig.add_hrect(
-            y0=e_p05,
-            y1=e_p95,
+        fig.add_vrect(
+            x0=e_p05,
+            x1=e_p95,
             fillcolor="rgba(148, 103, 189, 0.14)",
             line_width=0,
             annotation_text="E_galv 90% CI",
@@ -558,49 +558,49 @@ def build_galvanic_polarization_figure(
 
     fig.add_trace(
         go.Scatter(
-            x=active_curve.log10_abs_net_uA_cm2,
-            y=potentials,
+            x=potentials,
+            y=active_curve.log10_abs_net_uA_cm2,
             mode="lines",
             line={"color": "#d62728", "width": 2.6},
             name=f"Active Metal: {coupling.active_metal} |i_net|",
-            hovertemplate="log10|i|: %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i|: %{y:.2f}<extra></extra>",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=noble_scaled_log10,
-            y=potentials,
+            x=potentials,
+            y=noble_scaled_log10,
             mode="lines",
             line={"color": "#1f77b4", "width": 2.6},
             name=f"Noble Metal: {coupling.noble_metal} ({area_ratio:g}× |i_net|)",
-            hovertemplate="log10(A_ratio·|i|): %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10(A_ratio·|i|): %{y:.2f}<extra></extra>",
         )
     )
     if not math.isclose(area_ratio, 1.0, rel_tol=1e-6):
         fig.add_trace(
             go.Scatter(
-                x=noble_curve.log10_abs_net_uA_cm2,
-                y=potentials,
+                x=potentials,
+                y=noble_curve.log10_abs_net_uA_cm2,
                 mode="lines",
                 line={"color": "#1f77b4", "dash": "dot", "width": 1.5},
                 name=f"Noble Metal: {coupling.noble_metal} (1× unscaled)",
-                hovertemplate="log10|i|: %{x:.2f}<br>E: %{y:.3f} V vs. SHE<extra></extra>",
+                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i|: %{y:.2f}<extra></extra>",
             )
         )
 
-    fig.add_hline(
-        y=coupling.mixed_potential_V_SHE,
+    fig.add_vline(
+        x=coupling.mixed_potential_V_SHE,
         line_dash="dash",
         line_color="#9467bd",
         line_width=2.0,
         annotation_text=f"E_galv = {coupling.mixed_potential_V_SHE:.3f} V vs. SHE",
-        annotation_position="bottom right",
+        annotation_position="top left",
     )
 
     fig.add_trace(
         go.Scatter(
-            x=[math.log10(max(coupling.galvanic_current_density_uA_cm2, 1e-12))],
-            y=[coupling.mixed_potential_V_SHE],
+            x=[coupling.mixed_potential_V_SHE],
+            y=[math.log10(max(coupling.galvanic_current_density_uA_cm2, 1e-12))],
             mode="markers",
             marker={"color": "#9467bd", "size": 11, "symbol": "star"},
             name=(
@@ -613,8 +613,8 @@ def build_galvanic_polarization_figure(
     fig.update_layout(
         title=title
         or f"Galvanic Polarization Overlay: {coupling.active_metal} (Active) vs. {coupling.noble_metal} (Noble)",
-        xaxis_title="log10(|i| / µA·cm⁻²)",
-        yaxis_title="Potential E (V vs. SHE)",
+        xaxis_title="Potential E (V vs. SHE)",
+        yaxis_title="log10(|i| / µA·cm⁻²)",
         template="plotly_white",
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
         margin={"l": 60, "r": 25, "t": 75, "b": 55},

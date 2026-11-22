@@ -75,9 +75,11 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertIsNotNone(payload.mc_propagation)
         self.assertIsNotNone(payload.mc_kinetics)
 
-        # Plotly figures are valid and contain traces
+        # Plotly figures are valid and contain traces (Tafel plot has Potential on X, log10|i| on Y)
         self.assertIsInstance(payload.polarization_figure, go.Figure)
         self.assertGreaterEqual(len(payload.polarization_figure.data), 3)
+        self.assertIn("Potential", payload.polarization_figure.layout.xaxis.title.text)
+        self.assertIn("log10", payload.polarization_figure.layout.yaxis.title.text)
         self.assertIsInstance(payload.kinetics_risk_figure, go.Figure)
         self.assertGreaterEqual(len(payload.kinetics_risk_figure.data), 2)
 
@@ -203,10 +205,12 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertIsNotNone(payload.mc_galvanic)
         self.assertIsNotNone(payload.mc_coupled_kinetics)
 
-        # Plotly figures are valid and include E_galv horizontal line + comparative traces
+        # Plotly figures are valid and include E_galv vertical line + comparative traces
         self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
         self.assertGreaterEqual(len(payload.galvanic_polarization_figure.data), 3)
         self.assertGreaterEqual(len(payload.galvanic_polarization_figure.layout.shapes), 1)
+        self.assertIn("Potential", payload.galvanic_polarization_figure.layout.xaxis.title.text)
+        self.assertIn("log10", payload.galvanic_polarization_figure.layout.yaxis.title.text)
 
         self.assertIsInstance(payload.comparative_kinetics_figure, go.Figure)
         self.assertGreaterEqual(len(payload.comparative_kinetics_figure.data), 4)
