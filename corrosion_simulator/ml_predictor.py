@@ -93,16 +93,6 @@ def _clean_category(value: Any) -> str:
     return text
 
 
-def _safe_float(value: Any, default: float) -> float:
-    if value is None or pd.isna(value):
-        return default
-    try:
-        val = float(value)
-        return val if math.isfinite(val) else default
-    except (TypeError, ValueError):
-        return default
-
-
 @dataclass(frozen=True)
 class MLFeatureQuery:
     """Complete Exposure Condition descriptor input for ML parameter prediction and Applicability Domain checks."""
@@ -189,22 +179,18 @@ class ElectrochemicalFeatureExtractor:
             else:
                 work[col] = "None"
 
-        for col, default in (
-            ("pH", 7.0),
-            ("temperature_C", 25.0),
-            ("oxidizer_concentration", 0.0),
-            ("acid_concentration", 0.0),
-            ("inhibitor_concentration", 0.0),
+        for col in (
+            "pH",
+            "temperature_C",
+            "oxidizer_concentration",
+            "acid_concentration",
+            "inhibitor_concentration",
+            "ORP_mV",
         ):
             if col in work.columns:
-                work[col] = pd.to_numeric(work[col], errors="coerce").fillna(default)
+                work[col] = pd.to_numeric(work[col], errors="coerce")
             else:
-                work[col] = default
-
-        if "ORP_mV" in work.columns:
-            work["ORP_mV"] = pd.to_numeric(work["ORP_mV"], errors="coerce")
-        else:
-            work["ORP_mV"] = np.nan
+                work[col] = np.nan
 
         # Populate material descriptors from lookup whenever missing
         for col in _MATERIAL_DESCRIPTOR_COLS:
@@ -221,7 +207,8 @@ class ElectrochemicalFeatureExtractor:
     def fit(self, df: pd.DataFrame) -> ElectrochemicalFeatureExtractor:
         work = self._enrich_dataframe(df)
 
-        # Learn training-only medians for numeric columns (notably ORP_mV)
+        # Learn training-only medians for numeric columns (falling back to physical defaults only if all NaN)
+        fallback_defaults = {"pH": 7.0, "temperature_C": 25.0}
         self._numeric_medians = {}
         for col in (
             *_MATERIAL_DESCRIPTOR_COLS,
@@ -232,8 +219,9 @@ class ElectrochemicalFeatureExtractor:
             "inhibitor_concentration",
             "ORP_mV",
         ):
-            med = float(work[col].median()) if work[col].notna().any() else 0.0
-            self._numeric_medians[col] = med if math.isfinite(med) else 0.0
+            default_val = fallback_defaults.get(col, 0.0)
+            med = float(work[col].median()) if work[col].notna().any() else default_val
+            self._numeric_medians[col] = med if math.isfinite(med) else default_val
 
         # Learn deterministic sorted category vocabularies from training fold only
         self._category_vocab = {}
@@ -412,12 +400,16 @@ class ApplicabilityDomainChecker:
             points = np.column_stack(
                 [grp[col].to_numpy(dtype=float) for col in _APPLICABILITY_NUMERIC_COLS]
             )
+            cat_matrix = np.column_stack(
+                [grp[col].astype(str).to_numpy() for col in _APPLICABILITY_CATEGORICAL_COLS]
+            )
             self._metal_stats[str(metal)] = {
                 "n_samples": len(grp),
                 "bounds": bounds,
                 "scales": scales,
                 "categories": cats,
                 "points": points,
+                "cat_matrix": cat_matrix,
             }
 
         self._is_fitted = True
@@ -474,7 +466,7 @@ class ApplicabilityDomainChecker:
         unseen_cats: list[str] = []
         for col in _APPLICABILITY_CATEGORICAL_COLS:
             val = str(rec[col])
-            if val != "None" and val not in cats[col]:
+            if val not in cats[col]:
                 unseen_cats.append(f"{col}={val}")
                 warnings.append(
                     f"{col}={val!r} was never observed in the {metal} training set "
@@ -488,7 +480,13 @@ class ApplicabilityDomainChecker:
         q_vec = np.array([float(rec[col]) for col in _APPLICABILITY_NUMERIC_COLS], dtype=float)
         scale_vec = np.array([scales[col] for col in _APPLICABILITY_NUMERIC_COLS], dtype=float)
         diffs = (points - q_vec) / scale_vec
-        dists = np.sqrt(np.sum(diffs**2, axis=1))
+        num_sq_dists = np.sum(diffs**2, axis=1)
+
+        cat_matrix: np.ndarray = stats["cat_matrix"]
+        q_cats = np.array([str(rec[col]) for col in _APPLICABILITY_CATEGORICAL_COLS], dtype=object)
+        cat_mismatch_sq = 0.25 * np.sum(cat_matrix != q_cats[None, :], axis=1, dtype=float)
+
+        dists = np.sqrt(num_sq_dists + cat_mismatch_sq)
         eff_k = min(self.k, len(dists))
         nearest_dists = np.sort(dists)[:eff_k]
         knn_mean_dist = float(np.mean(nearest_dists))
@@ -660,6 +658,17 @@ class _UncertainTargetModel:
             mean, std = self._model.predict(X_scaled, return_std=True)
             return np.asarray(mean, dtype=float), np.maximum(np.asarray(std, dtype=float), 0.0)
         raise ValueError(f"Unsupported model_family: {self.model_family!r}")
+
+
+    def feature_importances(self) -> np.ndarray:
+        """Return feature importance vector for tree-based model families."""
+        if self.model_family == "random_forest":
+            return np.asarray(self._model.feature_importances_, dtype=float)
+        if self.model_family == "gradient_boosting":
+            return np.mean([m.feature_importances_ for m in self._ensemble], axis=0)
+        raise ValueError(
+            f"Feature importances are only available for tree models, not {self.model_family!r}."
+        )
 
 
 def _extract_target_vectors(df: pd.DataFrame) -> dict[str, np.ndarray]:
@@ -847,16 +856,7 @@ class HybridMLPredictor:
         if target not in self.models:
             raise ValueError(f"Unknown target: {target!r}")
         wrapper = self.models[target]
-        if self.model_family == "random_forest":
-            importances = np.asarray(wrapper._model.feature_importances_, dtype=float)
-        elif self.model_family == "gradient_boosting":
-            importances = np.mean(
-                [m.feature_importances_ for m in wrapper._ensemble], axis=0
-            )
-        else:
-            raise ValueError(
-                f"Feature importances are only available for tree models, not {self.model_family!r}."
-            )
+        importances = wrapper.feature_importances()
         return (
             pd.DataFrame(
                 {
@@ -1006,11 +1006,11 @@ def propagate_uncertainty_monte_carlo(
     eta = potentials[None, :] - ecorr_draws[:, None]
     ba_v = (beta_a_draws / 1000.0)[:, None]
     bc_v = (beta_c_draws / 1000.0)[:, None]
-    i0 = icorr_draws[:, None]
+    icorr = icorr_draws[:, None]
 
     # Cap exponents to prevent floating-point overflow under wide E_corr variance
-    i_anodic = i0 * np.power(10.0, np.clip(eta / ba_v, -30.0, 30.0))
-    i_cathodic = i0 * np.power(10.0, np.clip(-eta / bc_v, -30.0, 30.0))
+    i_anodic = icorr * np.power(10.0, np.clip(eta / ba_v, -30.0, 30.0))
+    i_cathodic = icorr * np.power(10.0, np.clip(-eta / bc_v, -30.0, 30.0))
     abs_net = np.maximum(np.abs(i_anodic - i_cathodic), 1e-12)
     log_abs_net = np.log10(abs_net)
 

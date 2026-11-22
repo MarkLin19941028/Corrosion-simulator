@@ -4,11 +4,11 @@
 
 **Blocked by:** 01: Multi-Metal Database Harmonization, Normalization & Nearest-Neighbor Lookup, 02: Phase 1 Polarization Curve, Faraday Corrosion Rate & Galvanic Driving Force Screening
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Feature extraction combines material properties, encoded solution formulations, and engineered interaction terms into a deterministic feature vector for any **Exposure Condition**.
-- [ ] Regressors for $E_{\text{corr}}$, $\log_{10}(i_{\text{corr}})$, $\beta_a$, and $\beta_c$ support Random Forest, gradient boosted trees, and Gaussian Processes, report cross-validated MAE, RMSE, $R^2$, and MAPE metrics (via LOOCV or metal-stratified 5-fold CV), and serialize cleanly for inference.
-- [ ] Every predicted parameter includes a mean and $\pm 1\sigma$ uncertainty derived from ensemble tree variance, Gaussian Process posterior variance, or bootstrap ensembles.
-- [ ] Monte Carlo uncertainty propagation samples $\log_{10}(i_{\text{corr}})$ in logarithmic space before exponentiating ($i_{\text{corr}} = 10^x > 0$) and clips sampled $\beta_a, \beta_c$ to $[20, 500]\text{ mV/dec}$ and $E_{\text{corr}}$ to thermodynamically reasonable bounds, producing valid uncertainty bands on **Polarization Curves** and **Corrosion Rate** where $\text{CR} \ge 0$ for every draw.
-- [ ] The **Applicability Domain** checker evaluates per-metal feature bounding boxes and normalized $k$-NN ($k=3$) distances, assigning `High`, `Medium`, or `Low` **Confidence Tiers** and generating specific experimental gap guidance when confidence is `Medium` or `Low`.
-- [ ] Automated behavioral tests and the ML training and uncertainty demonstration notebook validate feature engineering, cross-validation metrics, physical constraints under Monte Carlo sampling, and applicability domain warnings.
+- [x] Feature extraction combines material properties, encoded solution formulations, and engineered interaction terms into a deterministic feature vector for any **Exposure Condition**.
+- [x] Regressors for $E_{\text{corr}}$, $\log_{10}(i_{\text{corr}})$, $\beta_a$, and $\beta_c$ support Random Forest, gradient boosted trees, and Gaussian Processes, report cross-validated MAE, RMSE, $R^2$, and MAPE metrics (via LOOCV or metal-stratified 5-fold CV), and serialize cleanly for inference.
+- [x] Every predicted parameter includes a mean and $\pm 1\sigma$ uncertainty derived from ensemble tree variance, Gaussian Process posterior variance, or bootstrap ensembles.
+- [x] Monte Carlo uncertainty propagation samples $\log_{10}(i_{\text{corr}})$ in logarithmic space before exponentiating ($i_{\text{corr}} = 10^x > 0$) and clips sampled $\beta_a, \beta_c$ to $[20, 500]\text{ mV/dec}$ and $E_{\text{corr}}$ to thermodynamically reasonable bounds, producing valid uncertainty bands on **Polarization Curves** and **Corrosion Rate** where $\text{CR} \ge 0$ for every draw.
+- [x] The **Applicability Domain** checker evaluates per-metal feature bounding boxes and normalized $k$-NN ($k=3$) distances, assigning `High`, `Medium`, or `Low` **Confidence Tiers** and generating specific experimental gap guidance when confidence is `Medium` or `Low`.
+- [x] Automated behavioral tests and the ML training and uncertainty demonstration notebook validate feature engineering, cross-validation metrics, physical constraints under Monte Carlo sampling, and applicability domain warnings.

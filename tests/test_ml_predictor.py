@@ -21,6 +21,7 @@ from corrosion_simulator.ml_predictor import (
     ApplicabilityDomainResult,
     ElectrochemicalFeatureExtractor,
     HybridMLPredictor,
+    MLFeatureQuery,
     MLParameterPrediction,
     ParameterEstimate,
     plot_tafel_uncertainty_band,
@@ -72,21 +73,42 @@ class TestFeatureExtractionAndApplicabilityDomain(unittest.TestCase):
     def test_applicability_domain_distinguishes_inliers_from_extrapolation(self) -> None:
         checker = ApplicabilityDomainChecker(k=3).fit(self.db.electrochemical_database)
 
-        # Inlier: take an actual Co training row (Co has 54 training samples)
+        # Inlier: take a dense Co training row (Co has 54 training samples)
         co_row = self.db.electrochemical_database[
             self.db.electrochemical_database["metal"] == "Co"
-        ].iloc[0]
-        inlier_query = ExposureCondition(
+        ].iloc[4]
+        inlier_query = MLFeatureQuery(
             metal="Co",
             pH=float(co_row["pH"]),
+            temperature_C=float(co_row["temperature_C"]),
             oxidizer_type=str(co_row["oxidizer_type"]),
             oxidizer_concentration=float(co_row["oxidizer_concentration"]),
-            temperature_C=float(co_row["temperature_C"]),
+            acid_type=str(co_row["acid_type"]),
+            acid_concentration=float(co_row["acid_concentration"]) if co_row["acid_concentration"] == co_row["acid_concentration"] else 0.0,
+            inhibitor_type=str(co_row["inhibitor_type"]),
+            inhibitor_concentration=float(co_row["inhibitor_concentration"]) if co_row["inhibitor_concentration"] == co_row["inhibitor_concentration"] else 0.0,
         )
         inlier_res = checker.evaluate(inlier_query)
         self.assertTrue(inlier_res.in_bounding_box)
         self.assertEqual(inlier_res.confidence_tier, "High")
         self.assertEqual(len(inlier_res.out_of_box_features), 0)
+
+        # Medium confidence: in-box query in a sparser acidic H2O2 high-temperature region of Co
+        med_query = MLFeatureQuery(
+            metal="Co",
+            pH=1.0,
+            temperature_C=65.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            acid_type="None",
+            acid_concentration=0.0,
+            inhibitor_type="None",
+            inhibitor_concentration=0.0,
+        )
+        med_res = checker.evaluate(med_query)
+        self.assertTrue(med_res.in_bounding_box)
+        self.assertEqual(med_res.confidence_tier, "Medium")
+        self.assertGreater(len(med_res.experimental_recommendations), 0)
 
         # Out-of-domain query: extreme temperature (150 C) and unseen oxidizer ("O3_plasma")
         ood_query = ExposureCondition(
@@ -103,6 +125,12 @@ class TestFeatureExtractionAndApplicabilityDomain(unittest.TestCase):
         self.assertGreater(len(ood_res.unseen_categories), 0)
         self.assertGreater(len(ood_res.warnings), 0)
         self.assertGreater(len(ood_res.experimental_recommendations), 0)
+
+        # Unseen metal also receives Low confidence and actionable guidance
+        unseen_metal_res = checker.evaluate(ExposureCondition(metal="Ni", pH=4.0, temperature_C=25.0))
+        self.assertEqual(unseen_metal_res.confidence_tier, "Low")
+        self.assertFalse(unseen_metal_res.in_bounding_box)
+        self.assertGreater(len(unseen_metal_res.experimental_recommendations), 0)
 
 
 class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
