@@ -85,6 +85,16 @@ def _coerce_polarization_params(
     )
 
 
+def _safe_wagner_traud_anodic(
+    E_V: float,
+    ecorr_V: float,
+    icorr_uA_cm2: float,
+    beta_a_V_dec: float,
+) -> float:
+    exp_a = max(-250.0, min(250.0, (E_V - ecorr_V) / beta_a_V_dec))
+    return icorr_uA_cm2 * (10.0**exp_a)
+
+
 def _safe_wagner_traud_net(
     E_V: float,
     ecorr_V: float,
@@ -92,10 +102,10 @@ def _safe_wagner_traud_net(
     beta_a_V_dec: float,
     beta_c_V_dec: float,
 ) -> float:
-    eta = E_V - ecorr_V
-    exp_a = max(-250.0, min(250.0, eta / beta_a_V_dec))
-    exp_c = max(-250.0, min(250.0, -eta / beta_c_V_dec))
-    return icorr_uA_cm2 * (10.0**exp_a - 10.0**exp_c)
+    exp_c = max(-250.0, min(250.0, -(E_V - ecorr_V) / beta_c_V_dec))
+    return _safe_wagner_traud_anodic(E_V, ecorr_V, icorr_uA_cm2, beta_a_V_dec) - icorr_uA_cm2 * (
+        10.0**exp_c
+    )
 
 
 def _solve_mixed_potential_scalar(
@@ -405,37 +415,45 @@ def propagate_galvanic_uncertainty_monte_carlo(
     e_act, i_act, ba_act, bc_act = _sample_parameter_draws(active_src, n_draws, rng)
     e_nob, i_nob, ba_nob, bc_nob = _sample_parameter_draws(noble_src, n_draws, rng)
 
-    area_ratio = float(cathode_to_anode_area_ratio)
-    e_galv_draws = np.empty(n_draws, dtype=float)
-    i_galv_draws = np.empty(n_draws, dtype=float)
-    af_draws = np.empty(n_draws, dtype=float)
-
-    for k in range(n_draws):
-        eg = _solve_mixed_potential_scalar(
-            float(e_act[k]),
-            float(i_act[k]),
-            float(ba_act[k]),
-            float(bc_act[k]),
-            float(e_nob[k]),
-            float(i_nob[k]),
-            float(ba_nob[k]),
-            float(bc_nob[k]),
-            area_ratio,
-        )
-        e_galv_draws[k] = eg
-        exp_a = max(-250.0, min(250.0, (eg - float(e_act[k])) / float(ba_act[k])))
-        ig = float(i_act[k]) * (10.0**exp_a)
-        i_galv_draws[k] = ig
-        af_draws[k] = ig / float(i_act[k])
-
-    unit_faraday = calculate_faraday_corrosion_rate(
+    unit_faraday_act = calculate_faraday_corrosion_rate(
         nominal.active_metal,
         1.0,
         valence=active_valence,
         material_properties=material_properties,
     )
-    cr_nm_min_draws = i_galv_draws * unit_faraday.corrosion_rate_nm_min
-    cr_mm_yr_draws = i_galv_draws * unit_faraday.corrosion_rate_mm_yr
+    unit_faraday_nob = calculate_faraday_corrosion_rate(
+        nominal.noble_metal,
+        1.0,
+        material_properties=material_properties,
+    )
+
+    area_ratio = float(cathode_to_anode_area_ratio)
+    e_galv_draws = np.empty(n_draws, dtype=float)
+    i_galv_draws = np.empty(n_draws, dtype=float)
+    af_draws = np.empty(n_draws, dtype=float)
+    cr_nm_min_draws = np.empty(n_draws, dtype=float)
+    cr_mm_yr_draws = np.empty(n_draws, dtype=float)
+
+    for k in range(n_draws):
+        ea_k, ia_k, baa_k, bca_k = float(e_act[k]), float(i_act[k]), float(ba_act[k]), float(bc_act[k])
+        en_k, in_k, ban_k, bcn_k = float(e_nob[k]), float(i_nob[k]), float(ba_nob[k]), float(bc_nob[k])
+        eg = _solve_mixed_potential_scalar(
+            ea_k, ia_k, baa_k, bca_k, en_k, in_k, ban_k, bcn_k, area_ratio
+        )
+        e_galv_draws[k] = eg
+        # Evaluate galvanic dissolution on whichever metal is Active in this draw so AF >= 1.0 always holds
+        if ea_k <= en_k:
+            ig = _safe_wagner_traud_anodic(eg, ea_k, ia_k, baa_k)
+            i_galv_draws[k] = ig
+            af_draws[k] = ig / ia_k
+            cr_nm_min_draws[k] = ig * unit_faraday_act.corrosion_rate_nm_min
+            cr_mm_yr_draws[k] = ig * unit_faraday_act.corrosion_rate_mm_yr
+        else:
+            ig = _safe_wagner_traud_anodic(eg, en_k, in_k, ban_k)
+            i_galv_draws[k] = ig
+            af_draws[k] = ig / in_k
+            cr_nm_min_draws[k] = ig * unit_faraday_nob.corrosion_rate_nm_min
+            cr_mm_yr_draws[k] = ig * unit_faraday_nob.corrosion_rate_mm_yr
 
     return MonteCarloGalvanicResult(
         active_metal=nominal.active_metal,

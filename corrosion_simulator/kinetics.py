@@ -230,6 +230,97 @@ def compute_corrosion_depth(
 ) -> np.ndarray: ...
 
 
+def _validate_times_1d(immersion_times_s: np.ndarray | Sequence[float]) -> np.ndarray:
+    times = np.asarray(immersion_times_s, dtype=float)
+    if times.ndim != 1 or len(times) == 0:
+        raise ValueError("immersion_times_s must be a non-empty 1D sequence of times.")
+    if np.any(~np.isfinite(times)) or np.any(times < 0.0):
+        raise ValueError("immersion_times_s must contain only finite, non-negative values.")
+    return times
+
+
+def _resolve_kinetic_model(
+    model: KineticModelName | None,
+    *,
+    pourbaix_regime: str | None,
+    metal: str | None,
+    pH: float | None,
+    inhibitor_present: bool,
+    material_properties: pd.DataFrame | None,
+) -> tuple[KineticModelName, PourbaixRegimeSelection | None]:
+    if model is not None:
+        return model, None
+    selection = select_kinetic_model_from_pourbaix(
+        regime=pourbaix_regime,
+        metal=metal,
+        pH=pH,
+        inhibitor_present=inhibitor_present,
+        material_properties=material_properties,
+    )
+    return selection.model, selection
+
+
+def _evaluate_depth_kernel(
+    v0_nm_s: np.ndarray,
+    t_arr: np.ndarray,
+    *,
+    model: KineticModelName,
+    d_max_nm: float,
+    power_law_n: float,
+    t_ref_s: float,
+) -> np.ndarray:
+    """Shared vectorized depth formula for both scalar and Monte Carlo array evaluations."""
+    if model == "linear":
+        depth = v0_nm_s * t_arr
+    elif model == "passivation":
+        d_max = _validate_positive_finite("d_max_nm", d_max_nm)
+        depth = d_max * (-np.expm1(-(v0_nm_s / d_max) * t_arr))
+    elif model == "power_law":
+        n_val = _validate_power_law_n(power_law_n)
+        t_ref = _validate_positive_finite("t_ref_s", t_ref_s)
+        depth = (v0_nm_s * t_ref) * np.power(t_arr / t_ref, n_val)
+    else:
+        raise ValueError(
+            f"Unknown kinetic model {model!r}. Expected 'linear', 'passivation', or 'power_law'."
+        )
+    return np.maximum(depth, 0.0)
+
+
+def _evaluate_time_to_threshold_kernel(
+    v0_nm_s: np.ndarray,
+    *,
+    d_crit_nm: float,
+    model: KineticModelName,
+    d_max_nm: float,
+    power_law_n: float,
+    t_ref_s: float,
+) -> np.ndarray:
+    """Shared vectorized Time to Threshold formula for scalar and Monte Carlo evaluations."""
+    d_crit = _validate_positive_finite("d_crit_nm", d_crit_nm)
+    if model == "linear":
+        with np.errstate(divide="ignore"):
+            return np.where(v0_nm_s > 0.0, d_crit / v0_nm_s, np.inf)
+    if model == "passivation":
+        d_max = _validate_positive_finite("d_max_nm", d_max_nm)
+        if d_max <= d_crit:
+            return np.full_like(v0_nm_s, np.inf, dtype=float)
+        factor = -d_max * math.log1p(-d_crit / d_max)
+        with np.errstate(divide="ignore"):
+            return np.where(v0_nm_s > 0.0, factor / v0_nm_s, np.inf)
+    if model == "power_law":
+        n_val = _validate_power_law_n(power_law_n)
+        t_ref = _validate_positive_finite("t_ref_s", t_ref_s)
+        with np.errstate(divide="ignore"):
+            return np.where(
+                v0_nm_s > 0.0,
+                t_ref * np.power(d_crit / (v0_nm_s * t_ref), 1.0 / n_val),
+                np.inf,
+            )
+    raise ValueError(
+        f"Unknown kinetic model {model!r}. Expected 'linear', 'passivation', or 'power_law'."
+    )
+
+
 def compute_corrosion_depth(
     cr0_nm_min: float | FaradayCorrosionResult | GalvanicCouplingResult,
     immersion_time_s: float | np.ndarray | Sequence[float],
@@ -241,32 +332,21 @@ def compute_corrosion_depth(
 ) -> float | np.ndarray:
     """Compute cumulative Corrosion Depth d(t) in nm anchored to Initial Corrosion Rate CR_0 (per ADR-0002)."""
     cr0 = _extract_cr0_nm_min(cr0_nm_min)
-    v0_nm_s = cr0 / SECONDS_PER_MINUTE
+    v0_nm_s = np.asarray(cr0 / SECONDS_PER_MINUTE, dtype=float)
 
     is_scalar = np.ndim(immersion_time_s) == 0
     t_arr = np.asarray(immersion_time_s, dtype=float)
     if np.any(~np.isfinite(t_arr)) or np.any(t_arr < 0.0):
         raise ValueError("immersion_time_s must contain only finite, non-negative values.")
 
-    if model == "linear":
-        depth = v0_nm_s * t_arr
-    elif model == "passivation":
-        d_max = _validate_positive_finite("d_max_nm", d_max_nm)
-        if v0_nm_s == 0.0:
-            depth = np.zeros_like(t_arr, dtype=float)
-        else:
-            # -expm1(-x) avoids catastrophic cancellation near t = 0
-            depth = d_max * (-np.expm1(-(v0_nm_s / d_max) * t_arr))
-    elif model == "power_law":
-        n_val = _validate_power_law_n(power_law_n)
-        t_ref = _validate_positive_finite("t_ref_s", t_ref_s)
-        depth = (v0_nm_s * t_ref) * np.power(t_arr / t_ref, n_val)
-    else:
-        raise ValueError(
-            f"Unknown kinetic model {model!r}. Expected 'linear', 'passivation', or 'power_law'."
-        )
-
-    depth = np.maximum(depth, 0.0)
+    depth = _evaluate_depth_kernel(
+        v0_nm_s,
+        t_arr,
+        model=model,
+        d_max_nm=d_max_nm,
+        power_law_n=power_law_n,
+        t_ref_s=t_ref_s,
+    )
     if is_scalar:
         return float(depth)
     return depth
@@ -283,27 +363,16 @@ def compute_time_to_threshold(
 ) -> float:
     """Compute Immersion Time (in seconds) when d(t) reaches d_crit_nm, or +inf if unreached."""
     cr0 = _extract_cr0_nm_min(cr0_nm_min)
-    d_crit = _validate_positive_finite("d_crit_nm", d_crit_nm)
-    v0_nm_s = cr0 / SECONDS_PER_MINUTE
-
-    if model == "linear":
-        if v0_nm_s == 0.0:
-            return math.inf
-        return d_crit / v0_nm_s
-    if model == "passivation":
-        d_max = _validate_positive_finite("d_max_nm", d_max_nm)
-        if v0_nm_s == 0.0 or d_max <= d_crit:
-            return math.inf
-        return -(d_max / v0_nm_s) * math.log1p(-d_crit / d_max)
-    if model == "power_law":
-        n_val = _validate_power_law_n(power_law_n)
-        t_ref = _validate_positive_finite("t_ref_s", t_ref_s)
-        if v0_nm_s == 0.0:
-            return math.inf
-        return t_ref * ((d_crit / (v0_nm_s * t_ref)) ** (1.0 / n_val))
-    raise ValueError(
-        f"Unknown kinetic model {model!r}. Expected 'linear', 'passivation', or 'power_law'."
+    v0_arr = np.asarray(cr0 / SECONDS_PER_MINUTE, dtype=float)
+    res = _evaluate_time_to_threshold_kernel(
+        v0_arr,
+        d_crit_nm=d_crit_nm,
+        model=model,
+        d_max_nm=d_max_nm,
+        power_law_n=power_law_n,
+        t_ref_s=t_ref_s,
     )
+    return float(res)
 
 
 @overload
@@ -424,22 +493,15 @@ def simulate_time_resolved_kinetics(
         elif isinstance(cr0_source, FaradayCorrosionResult):
             resolved_metal = cr0_source.metal
 
-    selection: PourbaixRegimeSelection | None = None
-    if model is None:
-        selection = select_kinetic_model_from_pourbaix(
-            regime=pourbaix_regime,
-            metal=resolved_metal,
-            pH=pH,
-            inhibitor_present=inhibitor_present,
-            material_properties=material_properties,
-        )
-        chosen_model: KineticModelName = selection.model
-    else:
-        chosen_model = model
-
-    times = np.asarray(immersion_times_s, dtype=float)
-    if times.ndim != 1 or len(times) == 0:
-        raise ValueError("immersion_times_s must be a non-empty 1D sequence of times.")
+    chosen_model, selection = _resolve_kinetic_model(
+        model,
+        pourbaix_regime=pourbaix_regime,
+        metal=resolved_metal,
+        pH=pH,
+        inhibitor_present=inhibitor_present,
+        material_properties=material_properties,
+    )
+    times = _validate_times_1d(immersion_times_s)
 
     depths = compute_corrosion_depth(
         cr0,
@@ -513,10 +575,12 @@ class MonteCarloKineticsResult:
     d_crit_nm: float
     times_s: np.ndarray
     depth_mean_nm: np.ndarray
+    depth_std_nm: np.ndarray
     depth_p05_nm: np.ndarray
     depth_p50_nm: np.ndarray
     depth_p95_nm: np.ndarray
     risk_mean: np.ndarray
+    risk_std: np.ndarray
     risk_p05: np.ndarray
     risk_p50: np.ndarray
     risk_p95: np.ndarray
@@ -606,59 +670,34 @@ def propagate_kinetics_uncertainty_monte_carlo(
     cr0_arr, resolved_metal = _extract_cr0_samples(cr0_samples_source, metal=metal)
     d_crit = _validate_positive_finite("d_crit_nm", d_crit_nm)
 
-    if model is None:
-        selection = select_kinetic_model_from_pourbaix(
-            regime=pourbaix_regime,
-            metal=resolved_metal,
-            pH=pH,
-            inhibitor_present=inhibitor_present,
-            material_properties=material_properties,
-        )
-        chosen_model: KineticModelName = selection.model
-    else:
-        chosen_model = model
+    chosen_model, _ = _resolve_kinetic_model(
+        model,
+        pourbaix_regime=pourbaix_regime,
+        metal=resolved_metal,
+        pH=pH,
+        inhibitor_present=inhibitor_present,
+        material_properties=material_properties,
+    )
+    times = _validate_times_1d(immersion_times_s)
 
-    times = np.asarray(immersion_times_s, dtype=float)
-    if times.ndim != 1 or len(times) == 0:
-        raise ValueError("immersion_times_s must be a non-empty 1D sequence of times.")
-    if np.any(~np.isfinite(times)) or np.any(times < 0.0):
-        raise ValueError("immersion_times_s must contain only finite, non-negative values.")
-
-    v0 = (cr0_arr / SECONDS_PER_MINUTE)[:, None]  # (n_draws, 1)
-    t_row = times[None, :]  # (1, n_times)
-
-    if chosen_model == "linear":
-        depth_matrix = v0 * t_row
-        with np.errstate(divide="ignore"):
-            t_crit_samples = np.where(cr0_arr > 0.0, d_crit / (cr0_arr / SECONDS_PER_MINUTE), np.inf)
-    elif chosen_model == "passivation":
-        d_max = _validate_positive_finite("d_max_nm", d_max_nm)
-        depth_matrix = d_max * (-np.expm1(-(v0 / d_max) * t_row))
-        if d_max <= d_crit:
-            t_crit_samples = np.full(len(cr0_arr), np.inf, dtype=float)
-        else:
-            factor = -d_max * math.log1p(-d_crit / d_max)
-            with np.errstate(divide="ignore"):
-                t_crit_samples = np.where(
-                    cr0_arr > 0.0, factor / (cr0_arr / SECONDS_PER_MINUTE), np.inf
-                )
-    elif chosen_model == "power_law":
-        n_val = _validate_power_law_n(power_law_n)
-        t_ref = _validate_positive_finite("t_ref_s", t_ref_s)
-        depth_matrix = (v0 * t_ref) * np.power(t_row / t_ref, n_val)
-        with np.errstate(divide="ignore"):
-            t_crit_samples = np.where(
-                cr0_arr > 0.0,
-                t_ref * np.power(d_crit / ((cr0_arr / SECONDS_PER_MINUTE) * t_ref), 1.0 / n_val),
-                np.inf,
-            )
-    else:
-        raise ValueError(
-            f"Unknown kinetic model {chosen_model!r}. Expected 'linear', 'passivation', or 'power_law'."
-        )
-
-    depth_matrix = np.maximum(depth_matrix, 0.0)
-    risk_matrix = np.clip(-np.expm1(-math.log(2.0) * (depth_matrix / d_crit)), 0.0, 1.0)
+    v0_1d = cr0_arr / SECONDS_PER_MINUTE
+    depth_matrix = _evaluate_depth_kernel(
+        v0_1d[:, None],
+        times[None, :],
+        model=chosen_model,
+        d_max_nm=d_max_nm,
+        power_law_n=power_law_n,
+        t_ref_s=t_ref_s,
+    )
+    t_crit_samples = _evaluate_time_to_threshold_kernel(
+        v0_1d,
+        d_crit_nm=d_crit,
+        model=chosen_model,
+        d_max_nm=d_max_nm,
+        power_law_n=power_law_n,
+        t_ref_s=t_ref_s,
+    )
+    risk_matrix = compute_thickness_loss_risk_score(depth_matrix, d_crit_nm=d_crit)
 
     depth_p50 = np.percentile(depth_matrix, 50.0, axis=0)
     median_tiers = tuple(classify_thickness_loss_risk_tier(float(d), d_crit) for d in depth_p50)
@@ -670,10 +709,12 @@ def propagate_kinetics_uncertainty_monte_carlo(
         d_crit_nm=d_crit,
         times_s=times,
         depth_mean_nm=np.mean(depth_matrix, axis=0),
+        depth_std_nm=np.std(depth_matrix, axis=0),
         depth_p05_nm=np.percentile(depth_matrix, 5.0, axis=0),
         depth_p50_nm=depth_p50,
         depth_p95_nm=np.percentile(depth_matrix, 95.0, axis=0),
         risk_mean=np.mean(risk_matrix, axis=0),
+        risk_std=np.std(risk_matrix, axis=0),
         risk_p05=np.percentile(risk_matrix, 5.0, axis=0),
         risk_p50=np.percentile(risk_matrix, 50.0, axis=0),
         risk_p95=np.percentile(risk_matrix, 95.0, axis=0),

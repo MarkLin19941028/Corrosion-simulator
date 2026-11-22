@@ -212,7 +212,12 @@ class TestKineticsMonteCarloAndPlotting(unittest.TestCase):
         self.assertIsInstance(mc, MonteCarloKineticsResult)
         self.assertEqual(mc.n_draws, 250)
         self.assertEqual(mc.depth_p50_nm.shape, times.shape)
+        self.assertEqual(mc.depth_std_nm.shape, times.shape)
         self.assertEqual(mc.risk_p50.shape, times.shape)
+        self.assertEqual(mc.risk_std.shape, times.shape)
+        self.assertAlmostEqual(float(mc.depth_std_nm[0]), 0.0, places=12)
+        self.assertGreater(float(mc.depth_std_nm[-1]), 0.0)
+        self.assertGreater(float(mc.risk_std[-1]), 0.0)
 
         # Physical invariants across all time points
         self.assertAlmostEqual(float(mc.depth_p50_nm[0]), 0.0, places=12)

@@ -228,6 +228,30 @@ class TestGalvanicDatabaseAndMonteCarlo(unittest.TestCase):
             self.assertLessEqual(summary["p50"], summary["p95"])
             self.assertGreater(summary["std"], 0.0)
 
+        # Overlapping E_corr distributions must still guarantee Acceleration Factor >= 1.0 on every draw
+        close_a = MLParameterPrediction(
+            metal="Co",
+            Ecorr_V_SHE=ParameterEstimate(mean=0.10, std=0.08),
+            log10_icorr_uA_cm2=ParameterEstimate(mean=math.log10(5.0), std=0.1),
+            icorr_uA_cm2_median=5.0,
+            beta_a_mV_dec=ParameterEstimate(mean=60.0, std=5.0),
+            beta_c_mV_dec=ParameterEstimate(mean=120.0, std=5.0),
+            model_family="random_forest",
+            applicability=ad_dummy,
+        )
+        close_b = MLParameterPrediction(
+            metal="Cu",
+            Ecorr_V_SHE=ParameterEstimate(mean=0.12, std=0.08),
+            log10_icorr_uA_cm2=ParameterEstimate(mean=math.log10(5.0), std=0.1),
+            icorr_uA_cm2_median=5.0,
+            beta_a_mV_dec=ParameterEstimate(mean=60.0, std=5.0),
+            beta_c_mV_dec=ParameterEstimate(mean=120.0, std=5.0),
+            model_family="random_forest",
+            applicability=ad_dummy,
+        )
+        mc_overlap = propagate_galvanic_uncertainty_monte_carlo(close_a, close_b, n_draws=200, seed=99)
+        self.assertTrue(np.all(mc_overlap.acceleration_factor_samples >= 1.0))
+
 
 class TestGalvanicTafelOverlayPlot(unittest.TestCase):
     """Seam 2: Overlaid bimetallic Tafel plot rendering with E_galv operating line and shift."""
