@@ -4,10 +4,10 @@
 
 **Blocked by:** 01: Multi-Metal Database Harmonization, Normalization & Nearest-Neighbor Lookup
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Given $(E_{\text{corr}}, i_{\text{corr}}, \beta_a, \beta_c)$ from either database lookup or manual input, the Wagner-Traud polarization solver produces anodic, cathodic, and net current density curves where $i_{\text{anodic}}(E_{\text{corr}}) = i_{\text{cathodic}}(E_{\text{corr}}) = i_{\text{corr}}$, $i_{\text{net}}(E_{\text{corr}}) = 0$, and shifting $E$ by $+\beta_a$ scales $i_{\text{anodic}}$ by $10\times$.
-- [ ] Tafel plot generation produces clear $E$ vs. $\log_{10}|i|$ visualizations annotating $E_{\text{corr}}$, $i_{\text{corr}}$, and anodic/cathodic branches.
-- [ ] Faraday's law accurately converts $i_{\text{corr}}$ ($\mu\text{A/cm}^2$) into **Corrosion Rate** in both $\text{nm/min}$ and $\text{mm/yr}$ using built-in **Dissolution Valence ($z$)** defaults (`Cu: 2, Co: 2, W: 6, Ru: 4, Ti: 4, Ta: 5, Al: 3, Mo: 6`) or an explicit valence override (matching benchmark values such as Cu at $2.3\text{ }\mu\text{A/cm}^2 \to \approx 0.45\text{ nm/min}$ and $27\text{ nm}$ depth at $60\text{ s}$).
-- [ ] Bimetallic screening computes $|\Delta E_{\text{corr}}|$ for any two metals in the same **Solution** and temperature, classifies **Galvanic Driving Force Risk** (`< 0.1 V` as `Low`, `0.1–0.3 V` as `Medium`, `> 0.3 V` as `High`), and identifies the metal with the more negative $E_{\text{corr}}$ as the **Active Metal**.
-- [ ] Automated behavioral tests and the Phase 1 Tafel demonstration notebook verify the full lookup-to-plot and risk-screening pipeline.
+- [x] Given $(E_{\text{corr}}, i_{\text{corr}}, \beta_a, \beta_c)$ from either database lookup or manual input, the Wagner-Traud polarization solver produces anodic, cathodic, and net current density curves where $i_{\text{anodic}}(E_{\text{corr}}) = i_{\text{cathodic}}(E_{\text{corr}}) = i_{\text{corr}}$, $i_{\text{net}}(E_{\text{corr}}) = 0$, and shifting $E$ by $+\beta_a$ scales $i_{\text{anodic}}$ by $10\times$.
+- [x] Tafel plot generation produces clear $E$ vs. $\log_{10}|i|$ visualizations annotating $E_{\text{corr}}$, $i_{\text{corr}}$, and anodic/cathodic branches.
+- [x] Faraday's law accurately converts $i_{\text{corr}}$ ($\mu\text{A/cm}^2$) into **Corrosion Rate** in both $\text{nm/min}$ and $\text{mm/yr}$ using built-in **Dissolution Valence ($z$)** defaults (`Cu: 2, Co: 2, W: 6, Ru: 4, Ti: 4, Ta: 5, Al: 3, Mo: 6`) or an explicit valence override (verified via ASTM G102 first principles: Cu at $2.3\text{ }\mu\text{A/cm}^2, z=2 \to 0.05072\text{ nm/min}, 0.02666\text{ mm/yr}$, and $0.05072\text{ nm}$ depth at $60\text{ s}$).
+- [x] Bimetallic screening computes $|\Delta E_{\text{corr}}|$ for any two metals in the same **Solution** and temperature, classifies **Galvanic Driving Force Risk** (`< 0.1 V` as `Low`, `0.1–0.3 V` as `Medium`, `> 0.3 V` as `High`), and identifies the metal with the more negative $E_{\text{corr}}$ as the **Active Metal**.
+- [x] Automated behavioral tests and the Phase 1 Tafel demonstration notebook verify the full lookup-to-plot and risk-screening pipeline.

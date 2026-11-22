@@ -380,6 +380,16 @@ class GalvanicDrivingForceResult:
     temperature_C: float | None = None
 
 
+def _validate_distinct_metals(metal_a: str, metal_b: str) -> tuple[str, str]:
+    name_a = str(metal_a).strip()
+    name_b = str(metal_b).strip()
+    if not name_a or not name_b:
+        raise ValueError("Both metal names must be non-empty.")
+    if name_a == name_b:
+        raise ValueError(f"Bimetallic screening requires two distinct metals, got {name_a!r} twice.")
+    return name_a, name_b
+
+
 def screen_galvanic_driving_force(
     metal_a: str,
     Ecorr_a_V_SHE: float,
@@ -390,12 +400,7 @@ def screen_galvanic_driving_force(
     temperature_C: float | None = None,
 ) -> GalvanicDrivingForceResult:
     """Classify Galvanic Driving Force Risk from |Delta E_corr| and identify Active Metal vs. Noble Metal."""
-    name_a = str(metal_a).strip()
-    name_b = str(metal_b).strip()
-    if not name_a or not name_b:
-        raise ValueError("Both metal names must be non-empty.")
-    if name_a == name_b:
-        raise ValueError(f"Bimetallic screening requires two distinct metals, got {name_a!r} twice.")
+    name_a, name_b = _validate_distinct_metals(metal_a, metal_b)
     if not math.isfinite(Ecorr_a_V_SHE) or not math.isfinite(Ecorr_b_V_SHE):
         raise ValueError("Both Corrosion Potentials must be finite values in V vs. SHE.")
 
@@ -440,61 +445,52 @@ def screen_galvanic_pair_from_database(
     solution_id: str | None = None,
 ) -> GalvanicDrivingForceResult:
     """Look up two metals under the same Solution and Temperature and screen their Galvanic Driving Force Risk."""
-    name_a = str(metal_a).strip()
-    name_b = str(metal_b).strip()
-    if name_a == name_b:
-        raise ValueError(f"Bimetallic screening requires two distinct metals, got {name_a!r} twice.")
+    name_a, name_b = _validate_distinct_metals(metal_a, metal_b)
 
-    # When solution_id is explicitly provided, resolve its formulation attributes from solution_properties
     eff_pH = pH
     eff_ox_type = oxidizer_type
     eff_ox_conc = oxidizer_concentration
-    if solution_id is not None and not database.solution_properties.empty:
-        sol_match = database.solution_properties[
-            database.solution_properties["solution_id"].astype(str).str.strip() == solution_id.strip()
-        ]
-        if not sol_match.empty:
-            sol_row = sol_match.iloc[0]
-            if not pd.isna(sol_row.get("pH")):
-                eff_pH = float(sol_row["pH"])
-            if not pd.isna(sol_row.get("oxidizer_type")):
-                eff_ox_type = str(sol_row["oxidizer_type"])
-            if not pd.isna(sol_row.get("oxidizer_concentration")):
-                eff_ox_conc = float(sol_row["oxidizer_concentration"])
+    if solution_id is not None:
+        sol_attrs = database.get_solution_attributes(solution_id)
+        eff_pH = float(sol_attrs["pH"])
+        eff_ox_type = str(sol_attrs["oxidizer_type"])
+        eff_ox_conc = float(sol_attrs["oxidizer_concentration"])
 
-    lookup_a = database.lookup_exposure_condition(
-        ExposureCondition(
-            metal=name_a,
-            pH=eff_pH,
-            oxidizer_type=eff_ox_type,
-            oxidizer_concentration=eff_ox_conc,
-            temperature_C=temperature_C,
-            solution_id=solution_id,
+    def _lookup_for(metal_name: str) -> ExposureLookupResult:
+        return database.lookup_exposure_condition(
+            ExposureCondition(
+                metal=metal_name,
+                pH=eff_pH,
+                oxidizer_type=eff_ox_type,
+                oxidizer_concentration=eff_ox_conc,
+                temperature_C=temperature_C,
+                solution_id=solution_id,
+            )
         )
-    )
-    lookup_b = database.lookup_exposure_condition(
-        ExposureCondition(
-            metal=name_b,
-            pH=eff_pH,
-            oxidizer_type=eff_ox_type,
-            oxidizer_concentration=eff_ox_conc,
-            temperature_C=temperature_C,
-            solution_id=solution_id,
-        )
-    )
 
-    resolved_solution_id = (
-        solution_id
-        if solution_id is not None
-        else (lookup_a.solution_id if lookup_a.solution_id == lookup_b.solution_id else None)
-    )
+    lookup_a = _lookup_for(name_a)
+    lookup_b = _lookup_for(name_b)
+
+    if lookup_a.solution_id != lookup_b.solution_id:
+        raise ValueError(
+            f"Cannot screen {name_a} and {name_b}: matched different Solutions "
+            f"({lookup_a.solution_id!r} vs {lookup_b.solution_id!r})."
+        )
+    temp_a = float(lookup_a.matched_condition.temperature_C)
+    temp_b = float(lookup_b.matched_condition.temperature_C)
+    if not math.isclose(temp_a, temp_b, abs_tol=1e-6):
+        raise ValueError(
+            f"Cannot screen {name_a} and {name_b} in Solution {lookup_a.solution_id!r}: "
+            f"matched different temperatures ({temp_a:.2f} °C vs {temp_b:.2f} °C)."
+        )
+
     return screen_galvanic_driving_force(
         lookup_a.metal,
         lookup_a.Ecorr_V_SHE,
         lookup_b.metal,
         lookup_b.Ecorr_V_SHE,
-        solution_id=resolved_solution_id,
-        temperature_C=temperature_C,
+        solution_id=lookup_a.solution_id,
+        temperature_C=temp_a,
     )
 
 

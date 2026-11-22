@@ -1142,12 +1142,14 @@ class HarmonizedDatabase:
             ox_conc = 0.0 if ox_norm == "None" else float(metal.oxidizer_concentration)
             ph_query = float(metal.pH)
             temp_query = float(metal.temperature_C)
+            sol_id_filter = metal.solution_id.strip() if metal.solution_id else None
         else:
             metal_norm = str(metal).strip()
             ox_norm = _normalize_oxidizer_label(oxidizer_type)
             ox_conc = 0.0 if ox_norm == "None" else float(oxidizer_concentration)
             ph_query = float(pH)
             temp_query = float(temperature_C)
+            sol_id_filter = None
 
         query_cond = ExposureCondition(
             metal=metal_norm,
@@ -1155,6 +1157,7 @@ class HarmonizedDatabase:
             oxidizer_type=ox_norm,
             oxidizer_concentration=ox_conc,
             temperature_C=temp_query,
+            solution_id=sol_id_filter,
         )
 
         df = self.electrochemical_database
@@ -1162,13 +1165,22 @@ class HarmonizedDatabase:
         if metal_subset.empty:
             raise ValueError(f"No records found for Metal {metal_norm!r}.")
 
-        candidates = metal_subset[
-            metal_subset["oxidizer_type"].str.lower() == ox_norm.lower()
-        ].copy()
-        if candidates.empty:
-            raise ValueError(
-                f"No records found for Metal {metal_norm!r} with oxidizer_type {ox_norm!r}."
-            )
+        if sol_id_filter is not None:
+            candidates = metal_subset[
+                metal_subset["solution_id"].astype(str).str.strip() == sol_id_filter
+            ].copy()
+            if candidates.empty:
+                raise ValueError(
+                    f"No records found for Metal {metal_norm!r} in Solution {sol_id_filter!r}."
+                )
+        else:
+            candidates = metal_subset[
+                metal_subset["oxidizer_type"].str.lower() == ox_norm.lower()
+            ].copy()
+            if candidates.empty:
+                raise ValueError(
+                    f"No records found for Metal {metal_norm!r} with oxidizer_type {ox_norm!r}."
+                )
 
         num_features = [
             ("pH", ph_query),
@@ -1271,6 +1283,27 @@ class HarmonizedDatabase:
             mismatch_summary=summary,
             candidates=candidates.head(max(1, int(top_k))).copy(),
         )
+
+    def get_solution_attributes(self, solution_id: str) -> dict[str, Any]:
+        """Return normalized formulation attributes (pH, oxidizer_type, oxidizer_concentration) for a Solution ID."""
+        sid = str(solution_id).strip()
+        if not self.solution_properties.empty:
+            match = self.solution_properties[
+                self.solution_properties["solution_id"].astype(str).str.strip() == sid
+            ]
+            if not match.empty:
+                row = match.iloc[0]
+                return {
+                    "solution_id": sid,
+                    "pH": float(row["pH"]) if not pd.isna(row.get("pH")) else 7.0,
+                    "oxidizer_type": _normalize_oxidizer_label(row.get("oxidizer_type")),
+                    "oxidizer_concentration": (
+                        float(row["oxidizer_concentration"])
+                        if not pd.isna(row.get("oxidizer_concentration"))
+                        else 0.0
+                    ),
+                }
+        raise ValueError(f"Unknown solution_id: {solution_id!r}")
 
     def export_to_directory(self, output_dir: str | Path = "data/processed") -> dict[str, Path]:
         """Save all harmonized tables and the data dictionary to ``output_dir``."""

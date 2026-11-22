@@ -213,6 +213,24 @@ class TestGalvanicDrivingForceScreening(unittest.TestCase):
         with self.assertRaises(ValueError):
             screen_galvanic_driving_force("Cu", 0.285, "Cu", 0.285)
 
+        # Screening by explicit solution_id succeeds when both metals exist at the same temperature
+        res_by_id = screen_galvanic_pair_from_database(
+            db, "Cu", "Co", solution_id="SOL_SEED_H2O2_CITRIC_PH4", temperature_C=25.0
+        )
+        self.assertEqual(res_by_id.solution_id, "SOL_SEED_H2O2_CITRIC_PH4")
+        self.assertAlmostEqual(res_by_id.temperature_C, 25.0, places=6)
+
+        # In seed DB, Cu has a 45 C record in SOL_SEED_H2O2_CITRIC_PH4 while Co only has 25 C:
+        # screening must reject silently comparing mismatched temperatures
+        with self.assertRaises(ValueError):
+            screen_galvanic_pair_from_database(
+                db,
+                "Cu",
+                "Co",
+                solution_id="SOL_SEED_H2O2_CITRIC_PH4",
+                temperature_C=45.0,
+            )
+
 
 class TestTafelPlotGeneration(unittest.TestCase):
     """Seam 2 slice 4: Tafel plot E vs. log10|i| visualization and annotations."""
