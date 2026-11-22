@@ -105,11 +105,12 @@ class TestRecipeComparison(unittest.TestCase):
         self.assertEqual(result.recommended_recipe, result.entries[0].recipe.name)
         self.assertIn(result.recommended_recipe, result.recommended_rationale)
 
-        # Table and Plotly bar + radar figures
+        # Table and Plotly bar (includes Time to Threshold) + radar figures
         self.assertEqual(len(result.comparison_table), 3)
         self.assertIn("Thickness Loss Risk Score", result.comparison_table.columns)
         self.assertIsInstance(result.bar_figure, go.Figure)
-        self.assertGreaterEqual(len(result.bar_figure.data), 2)
+        self.assertGreaterEqual(len(result.bar_figure.data), 4)
+        self.assertIn("Time to Threshold (s)", [t.name for t in result.bar_figure.data])
         self.assertIsInstance(result.radar_figure, go.Figure)
         self.assertEqual(len(result.radar_figure.data), 3)
 
@@ -174,10 +175,12 @@ class TestMultiFormatReportExport(unittest.TestCase):
         )
         self.assertEqual(set(exports.keys()), {"html", "pdf", "csv", "json", "png", "svg"})
 
-        # HTML: self-contained with provenance, warnings/confidence, embedded image, comparison
+        # HTML: self-contained with provenance, warnings/confidence, MC uncertainty intervals, galvanic confidence, embedded image, comparison
         html_str = exports["html"].decode("utf-8")
         self.assertIn("<!DOCTYPE html>", html_str)
         self.assertIn("Confidence Tier", html_str)
+        self.assertIn("Galvanic Confidence Tier", html_str)
+        self.assertIn("Monte Carlo Uncertainty Intervals", html_str)
         self.assertIn("data:image/png;base64,", html_str)
         self.assertIn("Recipe Comparison", html_str)
         self.assertIn("ML", html_str)
@@ -195,7 +198,7 @@ class TestMultiFormatReportExport(unittest.TestCase):
         self.assertIn("warnings", json_obj)
         self.assertIn("recommended_recipe", json_obj["recipe_comparison"])
 
-        # CSV: parseable CSV with inputs, uncertainty intervals, and provenance
+        # CSV: parseable CSV with inputs, uncertainty intervals, structured recipe comparison metrics, and provenance
         csv_text = exports["csv"].decode("utf-8")
         rows = list(csv.DictReader(io.StringIO(csv_text)))
         self.assertGreaterEqual(len(rows), 2)
@@ -204,6 +207,10 @@ class TestMultiFormatReportExport(unittest.TestCase):
         self.assertIn("Single Metal", sections)
         self.assertIn("Uncertainty (90% CI)", sections)
         self.assertIn("Recipe Comparison", sections)
+        cmp_metrics = {r["metric"] for r in rows if r["section"] == "Recipe Comparison"}
+        self.assertIn("Time to Threshold", cmp_metrics)
+        self.assertIn("Acceleration Factor", cmp_metrics)
+        self.assertIn("Confidence Tier", cmp_metrics)
 
         # PDF: valid PDF header and non-trivial size
         pdf_bytes = exports["pdf"]

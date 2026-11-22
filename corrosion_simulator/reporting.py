@@ -22,6 +22,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from corrosion_simulator.physics import generate_polarization_curve
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     GalvanicViewPayload,
@@ -152,17 +153,29 @@ def build_recipe_comparison_bar_figure(
     cr0_vals = [e.cr0_nm_min for e in entries]
     depth_vals = [e.corrosion_depth_nm for e in entries]
     risk_vals = [e.risk_score for e in entries]
+    finite_ttts = [e.time_to_threshold_s for e in entries if math.isfinite(e.time_to_threshold_s)]
+    cap_ttt = max(finite_ttts) * 1.2 if finite_ttts else 600.0
+    ttt_vals = [e.time_to_threshold_s if math.isfinite(e.time_to_threshold_s) else cap_ttt for e in entries]
+    ttt_labels = [_format_ttt_short(e.time_to_threshold_s) for e in entries]
 
-    cols = 4 if mode == "galvanic" else 3
+    cols = 3 if mode == "galvanic" else 2
     titles = [
         "Initial Corrosion Rate CR₀ (nm/min)",
         "Final Corrosion Depth (nm)",
         "Thickness Loss Risk Score R(t)",
+        "Time to Threshold (s)",
     ]
     if mode == "galvanic":
         titles.append("Acceleration Factor (×)")
+        titles.append("")
 
-    fig = make_subplots(rows=1, cols=cols, subplot_titles=titles, horizontal_spacing=0.09)
+    fig = make_subplots(
+        rows=2,
+        cols=cols,
+        subplot_titles=titles,
+        horizontal_spacing=0.10,
+        vertical_spacing=0.22,
+    )
     colors = ["#2ca02c" if e.rank == 1 else "#1f77b4" for e in entries]
 
     fig.add_trace(
@@ -175,26 +188,44 @@ def build_recipe_comparison_bar_figure(
         row=1,
         col=2,
     )
+    risk_pos = (1, 3) if mode == "galvanic" else (2, 1)
+    ttt_pos = (2, 1) if mode == "galvanic" else (2, 2)
     fig.add_trace(
         go.Bar(x=names, y=risk_vals, marker_color=colors, name="Risk Score", showlegend=False),
-        row=1,
-        col=3,
+        row=risk_pos[0],
+        col=risk_pos[1],
     )
-    fig.update_yaxes(range=[0.0, 1.05], row=1, col=3)
+    fig.update_yaxes(range=[0.0, 1.05], row=risk_pos[0], col=risk_pos[1])
+
+    fig.add_trace(
+        go.Bar(
+            x=names,
+            y=ttt_vals,
+            text=ttt_labels,
+            textposition="auto",
+            marker_color=colors,
+            name="Time to Threshold (s)",
+            showlegend=False,
+        ),
+        row=ttt_pos[0],
+        col=ttt_pos[1],
+    )
 
     if mode == "galvanic":
         af_vals = [e.acceleration_factor or 1.0 for e in entries]
         fig.add_trace(
             go.Bar(x=names, y=af_vals, marker_color=colors, name="Acceleration Factor", showlegend=False),
-            row=1,
-            col=4,
+            row=2,
+            col=2,
         )
+        fig.update_xaxes(visible=False, row=2, col=3)
+        fig.update_yaxes(visible=False, row=2, col=3)
 
     fig.update_layout(
         title="Cleaning Recipe Comparison — Key Metrics (Recommended Lowest-Risk in Green)",
         template="plotly_white",
-        margin={"l": 45, "r": 25, "t": 75, "b": 70},
-        height=400,
+        margin={"l": 45, "r": 25, "t": 75, "b": 60},
+        height=560,
     )
     return fig
 
@@ -394,9 +425,9 @@ def _render_composite_figure(
     galvanic_payload: GalvanicViewPayload | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
 ) -> Figure:
-    """Render a publication-ready composite Matplotlib figure (Tafel + Depth/Risk + optional Galvanic/Comparison)."""
-    n_rows = 2 if (galvanic_payload is not None or comparison_payload is not None) else 1
-    fig = Figure(figsize=(11.5, 4.6 * n_rows), dpi=150)
+    """Render a publication-ready composite Matplotlib figure (Single Tafel + Depth/Risk + optional Galvanic Tafel/Depth + Comparison)."""
+    n_rows = 1 + int(galvanic_payload is not None) + int(comparison_payload is not None)
+    fig = Figure(figsize=(11.5, 4.4 * n_rows), dpi=150)
     FigureCanvasAgg(fig)
 
     # Row 1: Single Metal Tafel (Potential on X, log10|i| on Y) + Depth/Risk trajectory
@@ -458,30 +489,66 @@ def _render_composite_figure(
     ax_risk.set_ylim(0.0, 1.05)
     ax_kin.legend(fontsize=8, loc="upper left")
 
-    if n_rows == 2:
-        if galvanic_payload is not None:
-            ax_galv = fig.add_subplot(n_rows, 2, 3)
-            g = galvanic_payload
-            ax_galv.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#1f77b4", label=f"{g.active_metal} Uncoupled")
-            ax_galv.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#d62728", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
-            ax_galv.axhline(g.request.d_crit_nm, color="#555555", linestyle=":", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
-            ax_galv.set_title(f"Galvanic Coupling: {g.active_metal} (Active) vs. {g.noble_metal} (Noble)")
-            ax_galv.set_xlabel("Immersion Time (s)")
-            ax_galv.set_ylabel("Corrosion Depth (nm)")
-            ax_galv.set_ylim(bottom=0.0)
-            ax_galv.grid(True, alpha=0.3)
-            ax_galv.legend(fontsize=8, loc="upper left")
+    next_row = 2
+    if galvanic_payload is not None:
+        g = galvanic_payload
+        coupling = g.coupling_result
+        e_min = min(coupling.active_parameters.Ecorr_V_SHE, coupling.noble_parameters.Ecorr_V_SHE) - 0.15
+        e_max = max(coupling.active_parameters.Ecorr_V_SHE, coupling.noble_parameters.Ecorr_V_SHE) + 0.15
+        potentials = np.linspace(e_min, e_max, 241)
+        active_c = generate_polarization_curve(coupling.active_parameters, potentials_V_SHE=potentials)
+        noble_c = generate_polarization_curve(coupling.noble_parameters, potentials_V_SHE=potentials)
+        noble_scaled = np.log10(np.maximum(noble_c.abs_net_current_uA_cm2 * coupling.cathode_to_anode_area_ratio, 1e-12))
 
-        if comparison_payload is not None:
-            ax_cmp = fig.add_subplot(n_rows, 2, 4 if galvanic_payload is not None else 3)
-            names = [e.recipe.name for e in comparison_payload.entries]
-            risks = [e.risk_score for e in comparison_payload.entries]
-            bar_colors = ["#2ca02c" if e.rank == 1 else "#1f77b4" for e in comparison_payload.entries]
-            ax_cmp.barh(names[::-1], risks[::-1], color=bar_colors[::-1])
-            ax_cmp.set_xlim(0.0, 1.05)
-            ax_cmp.set_xlabel("Thickness Loss Risk Score R(t)")
-            ax_cmp.set_title("Cleaning Recipe Comparison (Lowest Risk First)")
-            ax_cmp.grid(True, axis="x", alpha=0.3)
+        ax_gt = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 1)
+        ax_gt.plot(potentials, active_c.log10_abs_net_uA_cm2, color="#d62728", linewidth=2.0, label=f"Active: {g.active_metal}")
+        ax_gt.plot(potentials, noble_scaled, color="#1f77b4", linewidth=2.0, label=f"Noble: {g.noble_metal} ({coupling.cathode_to_anode_area_ratio:g}×)")
+        ax_gt.axvline(g.mixed_potential_V_SHE, color="#9467bd", linestyle="--", linewidth=1.5, label=f"E_galv={g.mixed_potential_V_SHE:.3f} V")
+        ax_gt.scatter(
+            [g.mixed_potential_V_SHE],
+            [math.log10(max(g.galvanic_current_density_uA_cm2, 1e-12))],
+            color="#9467bd",
+            marker="*",
+            s=90,
+            zorder=5,
+        )
+        ax_gt.set_title(f"Galvanic Tafel Overlay: {g.active_metal} vs. {g.noble_metal}")
+        ax_gt.set_xlabel("Potential E (V vs. SHE)")
+        ax_gt.set_ylabel("log10(|i| / µA·cm⁻²)")
+        ax_gt.set_xlim(e_min, e_max)
+        ax_gt.grid(True, alpha=0.3)
+        ax_gt.legend(fontsize=8, loc="best")
+
+        ax_gd = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 2)
+        ax_gd.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#1f77b4", label=f"{g.active_metal} Uncoupled")
+        ax_gd.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#d62728", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
+        ax_gd.axhline(g.request.d_crit_nm, color="#555555", linestyle=":", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
+        ax_gd.set_title(f"Galvanic Depth: Uncoupled vs. Coupled ({g.active_metal})")
+        ax_gd.set_xlabel("Immersion Time (s)")
+        ax_gd.set_ylabel("Corrosion Depth (nm)")
+        ax_gd.set_ylim(bottom=0.0)
+        ax_gd.grid(True, alpha=0.3)
+        ax_gd.legend(fontsize=8, loc="upper left")
+        next_row += 1
+
+    if comparison_payload is not None:
+        names = [e.recipe.name for e in comparison_payload.entries]
+        risks = [e.risk_score for e in comparison_payload.entries]
+        depths = [e.corrosion_depth_nm for e in comparison_payload.entries]
+        bar_colors = ["#2ca02c" if e.rank == 1 else "#1f77b4" for e in comparison_payload.entries]
+
+        ax_cmp1 = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 1)
+        ax_cmp1.barh(names[::-1], risks[::-1], color=bar_colors[::-1])
+        ax_cmp1.set_xlim(0.0, 1.05)
+        ax_cmp1.set_xlabel("Thickness Loss Risk Score R(t)")
+        ax_cmp1.set_title("Recipe Comparison — Risk Score (Lowest First)")
+        ax_cmp1.grid(True, axis="x", alpha=0.3)
+
+        ax_cmp2 = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 2)
+        ax_cmp2.barh(names[::-1], depths[::-1], color=bar_colors[::-1])
+        ax_cmp2.set_xlabel("Final Corrosion Depth (nm)")
+        ax_cmp2.set_title("Recipe Comparison — Final Corrosion Depth")
+        ax_cmp2.grid(True, axis="x", alpha=0.3)
 
     fig.tight_layout(pad=2.0)
     return fig
@@ -696,16 +763,22 @@ def export_report_csv(
 
     if comparison_payload is not None:
         for e in comparison_payload.entries:
-            writer.writerow(
-                {
-                    "section": "Recipe Comparison",
-                    "recipe": e.recipe.name,
-                    "metric": f"Rank #{e.rank} | Risk={e.risk_score:.3f} ({e.risk_tier}) | Depth={e.corrosion_depth_nm:.3f} nm | CR0={e.cr0_nm_min:.3g} nm/min",
-                    "value": e.risk_score,
-                    "unit": "score",
-                    "provenance": e.parameter_source.upper(),
-                }
-            )
+            prov = e.parameter_source.upper()
+            cmp_rows = [
+                ("Recipe Comparison", e.recipe.name, "Rank", e.rank, "", prov),
+                ("Recipe Comparison", e.recipe.name, "Initial Corrosion Rate (CR_0)", e.cr0_nm_min, "nm/min", prov),
+                ("Recipe Comparison", e.recipe.name, "Corrosion Depth", e.corrosion_depth_nm, "nm", prov),
+                ("Recipe Comparison", e.recipe.name, "Time to Threshold", _format_ttt_short(e.time_to_threshold_s), "", prov),
+                ("Recipe Comparison", e.recipe.name, "Thickness Loss Risk Score", e.risk_score, "", prov),
+                ("Recipe Comparison", e.recipe.name, "Thickness Loss Risk Tier", e.risk_tier, "", prov),
+                ("Recipe Comparison", e.recipe.name, "Confidence Tier", e.confidence_tier, "", prov),
+            ]
+            if e.acceleration_factor is not None:
+                cmp_rows.append(
+                    ("Recipe Comparison", e.recipe.name, "Acceleration Factor", e.acceleration_factor, "×", prov)
+                )
+            for sec, rec, met, val, unit, pr in cmp_rows:
+                writer.writerow({"section": sec, "recipe": rec, "metric": met, "value": val, "unit": unit, "provenance": pr})
 
     return buf.getvalue().encode("utf-8")
 
@@ -848,9 +921,34 @@ def export_report_html(
             <div class="kpi"><span>Acceleration Factor</span><strong>{g.acceleration_factor:.2f}×</strong></div>
             <div class="kpi"><span>Coupled Depth</span><strong>{g.coupled_depth_nm:.3f} nm</strong></div>
             <div class="kpi"><span>Coupled Risk Tier</span><strong>{html.escape(g.coupled_risk_tier)} ({g.coupled_risk_score:.3f})</strong></div>
+            <div class="kpi"><span>Galvanic Confidence Tier</span><strong>{html.escape(g.confidence_tier)}</strong></div>
           </div>
         </section>
         """
+
+    intervals = _build_uncertainty_intervals(single_payload, galvanic_payload)
+    ci_section = ""
+    if intervals:
+        ci_rows = []
+        for metric_key, stats in intervals.items():
+            if "p05" in stats and "p95" in stats:
+                p50 = stats.get("p50", float("nan"))
+                ci_rows.append(
+                    {
+                        "Metric": metric_key,
+                        "5th Percentile (p05)": f"{stats['p05']:.4g}",
+                        "Median (p50)": f"{p50:.4g}" if math.isfinite(p50) else "—",
+                        "95th Percentile (p95)": f"{stats['p95']:.4g}",
+                    }
+                )
+        if ci_rows:
+            ci_table_html = pd.DataFrame(ci_rows).to_html(index=False, classes="data-table", border=0)
+            ci_section = f"""
+            <section>
+              <h2>Monte Carlo Uncertainty Intervals (90% CI)</h2>
+              {ci_table_html}
+            </section>
+            """
 
     cmp_section = ""
     if comparison_payload is not None:
@@ -923,6 +1021,7 @@ def export_report_html(
   </section>
 
   {galv_section}
+  {ci_section}
   {cmp_section}
 
   <section>
