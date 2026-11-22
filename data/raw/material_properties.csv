@@ -3,9 +3,9 @@ Al,Aluminum,Al,metal,2.7,26.98,3,8.99,-1.66,660,1.61,4.28,Al2O3,high,0.95,4.0,9.
 Co,Cobalt,Co,metal,8.9,58.93,2,29.47,-0.28,1495,1.88,5.0,"CoO, Co3O4",medium,0.5,9.0,13.0,HCP,100.0,6.24e-06,"CoCl2, Co(OH)2",,Co
 Cu,Copper,Cu,metal,8.96,63.55,2,31.77,0.342,1085,1.9,4.65,"CuO, Cu2O",low,0.4,7.0,12.0,FCC,401.0,1.68e-06,"CuCl2, Cu(OH)2, CuO",,Co
 Mn,Manganese,Mn,metal,7.21,54.94,2,27.47,-1.185,1246,1.55,4.1,"MnO2, Mn3O4",medium,0.5,7.0,14.0,BCC,7.81,0.000144,"MnO2, Mn(OH)2",,Co
+Mo,Molybdenum,Mo,metal,10.28,95.95,6,15.99,-0.2,2623,2.16,4.36,"MoO3, MoO2",medium,0.6,2.0,6.0,BCC,138.0,5.17e-06,"MoO3, MoO4^2-, H2MoO4",,Co
 Ru,Ruthenium,Ru,metal,12.37,101.07,3,33.69,0.455,2334,2.2,4.71,RuO2,high,0.8,0.0,14.0,HCP,117.0,7.1e-06,RuO4,,Co
 Ta,Tantalum,Ta,barrier,16.69,180.95,5,36.19,-0.6,3017,1.5,4.25,Ta2O5,high,0.9,2.0,12.0,BCC,57.5,1.31e-05,Ta2O5,,Co
 Ti,Titanium,Ti,metal,4.51,47.87,4,11.97,-1.63,1668,1.54,4.33,TiO2,high,0.9,4.0,12.0,HCP,21.9,4.2e-05,"TiO2, Ti(OH)4",,Co
 TiN,Titanium Nitride,TiN,barrier,5.22,61.87,3,20.62,-0.75,2930,1.54,4.2,TiO2,high,0.85,3.0,11.0,NaCl-type,19.2,2.5e-05,TiO2,,Co
 W,Tungsten,W,metal,19.25,183.84,6,30.64,-0.09,3422,2.36,4.55,WO3,high,0.7,2.0,4.0,BCC,173.0,5.28e-06,"WO3, WO4^2-",,Co
-Mo,Molybdenum,Mo,metal,10.28,95.95,6,15.99,-0.2,2623,2.16,4.36,"MoO3, MoO2",medium,0.6,2.0,6.0,BCC,138.0,5.17e-06,"MoO3, MoO4^2-, H2MoO4",,Mo
