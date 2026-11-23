@@ -1,35 +1,35 @@
 {
   "schema_version": 1,
-  "built_at_utc": "2026-11-23T19:08:22.447357+00:00",
+  "built_at_utc": "2026-11-23T19:25:58.079776+00:00",
   "raw_fingerprint": {
     "raw_dir": "data/raw",
-    "combined_sha256": "c4985c18aff9509fc6e2dcb0b4966769e261abc8481a3feef2cf6d206907ace9",
+    "combined_sha256": "73256858ff329c5c29de50ef9694d4375c5edbf1b2538613c8e1ed6fd20263e9",
     "file_count": 3,
     "files": {
       "material_properties.csv": {
-        "sha256": "a38250c8e615fad83abb38c2081ff167617f2aa48b719f00b10d5195d6f26b10",
-        "size_bytes": 1991
+        "sha256": "71eee991eaf20a86274e9d085f8b0b99cefeac3a37e7a4679815e7e9c9fbdd57",
+        "size_bytes": 2003
       },
       "ml_training_dataset.csv": {
-        "sha256": "fc4c8667d228d8ad1c01b8c7d5748ccf142d1600858e16330b95e29ba2b86ca0",
-        "size_bytes": 4026508
+        "sha256": "52c29df8e12b201071c7248ecfb9486691d46d506fead14735b94c8ec6f30129",
+        "size_bytes": 5076653
       },
       "solution_properties.csv": {
-        "sha256": "8630ff690f395b57e35c62c9bb6ac69758afa6df83b573fe01ce02287c0131f3",
-        "size_bytes": 290983
+        "sha256": "0832bc856783a912d694eaaf2bcb4a3db9b5d9abd47949b8119e519bdd9913e6",
+        "size_bytes": 331210
       }
     }
   },
   "filter_to_core_metals": false,
   "supplement_missing_core_metals": false,
-  "n_records": 1415,
-  "n_complete_pairs": 1415,
-  "n_partial_records": 1144,
-  "n_derived_icorr_cr": 84,
-  "n_derived_icorr_rp": 53,
-  "n_rejected": 111,
-  "n_solutions": 548,
-  "n_materials": 9,
+  "n_records": 1741,
+  "n_complete_pairs": 1741,
+  "n_partial_records": 1433,
+  "n_derived_icorr_cr": 115,
+  "n_derived_icorr_rp": 60,
+  "n_rejected": 146,
+  "n_solutions": 640,
+  "n_materials": 19,
   "available_metals": [
     "Cu",
     "Co",
@@ -39,7 +39,17 @@
     "Ta",
     "Al",
     "Mo",
-    "TiN"
+    "Fe",
+    "TiN",
+    "Ni",
+    "Cr",
+    "Sn",
+    "Mg",
+    "Zn",
+    "Au",
+    "Pd",
+    "Pt",
+    "Ag"
   ],
   "core_metals_present": [
     "Cu",
@@ -52,18 +62,38 @@
     "Mo"
   ],
   "extended_metals_present": [
-    "TiN"
+    "Fe",
+    "TiN",
+    "Ni",
+    "Cr",
+    "Sn",
+    "Mg",
+    "Zn",
+    "Au",
+    "Pd",
+    "Pt",
+    "Ag"
   ],
   "metal_sample_counts": {
-    "Ti": 574,
+    "Ti": 644,
     "Cu": 476,
-    "Co": 148,
-    "Al": 77,
-    "Mo": 62,
-    "TiN": 37,
+    "Co": 143,
+    "Fe": 114,
+    "Al": 95,
+    "Mo": 60,
+    "TiN": 40,
+    "Ni": 39,
+    "Cr": 35,
+    "W": 28,
     "Ta": 16,
     "Ru": 14,
-    "W": 11
+    "Sn": 11,
+    "Mg": 10,
+    "Zn": 6,
+    "Pd": 3,
+    "Au": 3,
+    "Pt": 3,
+    "Ag": 1
   },
   "missing_faraday_materials": [],
   "tables": {
@@ -78,35 +108,67 @@
     "random_forest": {
       "path": "models/random_forest.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 2011,
-        "log10_icorr_uA_cm2": 1963,
-        "beta_a_mV_dec": 627,
-        "beta_c_mV_dec": 549
+        "Ecorr_V_SHE": 2533,
+        "log10_icorr_uA_cm2": 2382,
+        "beta_a_mV_dec": 728,
+        "beta_c_mV_dec": 660
       },
       "gp_subsampled": false
     },
     "extra_trees": {
       "path": "models/extra_trees.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 2011,
-        "log10_icorr_uA_cm2": 1963,
-        "beta_a_mV_dec": 627,
-        "beta_c_mV_dec": 549
+        "Ecorr_V_SHE": 2533,
+        "log10_icorr_uA_cm2": 2382,
+        "beta_a_mV_dec": 728,
+        "beta_c_mV_dec": 660
       },
       "gp_subsampled": false
+    },
+    "gaussian_process": {
+      "path": "models/gaussian_process.joblib",
+      "target_training_counts": {
+        "Ecorr_V_SHE": 2533,
+        "log10_icorr_uA_cm2": 2382,
+        "beta_a_mV_dec": 728,
+        "beta_c_mV_dec": 660
+      },
+      "gp_subsampled": true
+    },
+    "rf_gp_ensemble": {
+      "path": "models/rf_gp_ensemble.joblib",
+      "target_training_counts": {
+        "Ecorr_V_SHE": 2533,
+        "log10_icorr_uA_cm2": 2382,
+        "beta_a_mV_dec": 728,
+        "beta_c_mV_dec": 660
+      },
+      "gp_subsampled": true
     },
     "hist_gradient_boosting": {
       "path": "models/hist_gradient_boosting.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 2011,
-        "log10_icorr_uA_cm2": 1963,
-        "beta_a_mV_dec": 627,
-        "beta_c_mV_dec": 549
+        "Ecorr_V_SHE": 2533,
+        "log10_icorr_uA_cm2": 2382,
+        "beta_a_mV_dec": 728,
+        "beta_c_mV_dec": 660
+      },
+      "gp_subsampled": false
+    },
+    "gradient_boosting": {
+      "path": "models/gradient_boosting.joblib",
+      "target_training_counts": {
+        "Ecorr_V_SHE": 2533,
+        "log10_icorr_uA_cm2": 2382,
+        "beta_a_mV_dec": 728,
+        "beta_c_mV_dec": 660
       },
       "gp_subsampled": false
     }
   },
   "warnings": [
-    "Quarantined 111 invalid/incomplete raw record(s) to rejected_rows.csv."
+    "Quarantined 146 invalid/incomplete raw record(s) to rejected_rows.csv.",
+    "Model 'gaussian_process' subsampled GP training set to 2500 samples for scalability.",
+    "Model 'rf_gp_ensemble' subsampled GP training set to 2500 samples for scalability."
   ]
 }
