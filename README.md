@@ -12,14 +12,14 @@
    - `corrosion_simulator/database.py` 會讀取 `data/raw/` 下的電化學、材料物理性質與溶液性質 CSV 檔，自動將不同參考電極（SHE、Ag/AgCl、SCE、MSE）統一換算為 `V vs. SHE`，並標準化腐蝕電流密度（`µA/cm²`）與 Tafel 斜率（正值 `mV/dec`）。
    - `corrosion_simulator/build_artifacts.py` 會將整理後的資料匯出為高速讀取的 Parquet 表與預訓練機器學習模型（`.joblib`），並寫入 `manifest.json` 記錄原始檔案指紋。若 `data/raw/` 為空，系統會自動回退至內建種子資料（`seed_data.py`），確保開箱即用。
 2. **電化學參數來源（三擇一）**
-   - **ML Prediction（預設）**：透過 `HybridMLPredictor` 預測 $(E_{\text{corr}}, \log_{10} i_{\text{corr}}, \beta_a, \beta_c)$，並以對數空間 Monte Carlo 傳播不確定性，同時判定適用域信心等級（`High / Medium / Low`）。
+   - **ML Prediction（預設）**：透過 `HybridMLPredictor` 預測 (<i>E</i><sub>corr</sub>, log<sub>10</sub> <i>i</i><sub>corr</sub>, <i>β</i><sub>a</sub>, <i>β</i><sub>c</sub>)，並以對數空間 Monte Carlo 傳播不確定性，同時判定適用域信心等級（`High / Medium / Low`）。
    - **Database Lookup**：在整理後的資料庫中進行最近鄰暴露條件查詢。
    - **Manual Override**：由使用者直接輸入自訂電化學參數。
 3. **物理與伽凡尼耦合引擎**
-   - 單一金屬透過 Wagner–Traud 四參數極化模型與 Faraday 定律計算初始腐蝕速率 $\text{CR}_0$（`nm/min` 與 `mm/yr`）。
-   - 雙金屬耦合使用 Brent 數值求根法（`scipy.optimize.brentq`）解面積加權電流守恆方程式，求得混合電位 $E_{\text{galv}}$、伽凡尼電流密度 $i_{\text{galv}}$ 與加速倍率。
+   - 單一金屬透過 Wagner–Traud 四參數極化模型與 Faraday 定律計算初始腐蝕速率 CR<sub>0</sub>（`nm/min` 與 `mm/yr`）。
+   - 雙金屬耦合使用 Brent 數值求根法（`scipy.optimize.brentq`）解面積加權電流守恆方程式，求得混合電位 <i>E</i><sub>galv</sub>、伽凡尼電流密度 <i>i</i><sub>galv</sub> 與加速倍率。
 4. **時間動力學、風險評估與報告匯出**
-   - 以 Linear、Passivation（自限鈍化）或 Power-Law（擴散/緩蝕）模型模擬腐蝕深度 $d(t)$，計算達到臨界厚度門檻 $d_{\text{crit}}$ 所需時間（Time to Threshold）與厚度損失風險分級，並支援 2–5 組清洗配方並排比較及六種格式報告下載。
+   - 以 Linear、Passivation（自限鈍化）或 Power-Law（擴散/緩蝕）模型模擬腐蝕深度 <i>d</i>(<i>t</i>)，計算達到臨界厚度門檻 <i>d</i><sub>crit</sub> 所需時間（Time to Threshold）與厚度損失風險分級，並支援 2–5 組清洗配方並排比較及六種格式報告下載。
 
 ---
 
@@ -111,19 +111,19 @@
 完成套件安裝後，執行啟動指令，瀏覽器會自動開啟 `http://localhost:8501`。
 
 ### 步驟 2：在左側邊欄（Simulation Parameters）設定模擬條件
-1. **Metal / Material Selection**：選擇主材料（Primary Material），標籤會顯示該材料在資料庫中的樣本數 `n=...`；若要分析雙金屬腐蝕，請選擇副材料（Secondary Material）與陰陽極面積比（$A_{\text{noble}} / A_{\text{active}}$）。
+1. **Metal / Material Selection**：選擇主材料（Primary Material），標籤會顯示該材料在資料庫中的樣本數 `n=...`；若要分析雙金屬腐蝕，請選擇副材料（Secondary Material）與陰陽極面積比（<i>A</i><sub>noble</sub> / <i>A</i><sub>active</sub>）。
 2. **Solution & Operating Conditions**：選擇氧化劑（如 `H2O2`）、酸/錯合劑、緩蝕劑（如 `BTA`）的種類與濃度，並調整 `pH` 與操作溫度（`°C`）。
-3. **Immersion Time & Kinetics**：設定浸泡時間（秒）、臨界厚度門檻 $d_{\text{crit}}$（`nm`），以及動力學模型（預設 `Auto` 會依 Pourbaix 穩定區自動挑選，也可手動切換 Linear / Passivation / Power-Law）。
+3. **Immersion Time & Kinetics**：設定浸泡時間（秒）、臨界厚度門檻 <i>d</i><sub>crit</sub>（`nm`），以及動力學模型（預設 `Auto` 會依 Pourbaix 穩定區自動挑選，也可手動切換 Linear / Passivation / Power-Law）。
 4. **Parameter Source**：預設為 `ML Prediction`（可自由切換 6 種演算法）；若要直接查表可選 `Database Lookup`，若已有實驗數據則可選 `Manual Override` 手動輸入。
 
 ### 步驟 3：檢視右側四個分析分頁
-- **Single Metal Analysis**：檢視單一金屬的初始腐蝕速率 $\text{CR}_0$、目標時間腐蝕深度、達門檻時間（含 90% 信賴區間）、風險分級、電化學參數表、Tafel 極化曲線與隨時間變化的腐蝕深度圖。
-- **Galvanic Analysis**：當有選取副材料時，顯示主動金屬／貴金屬判定、混合電位 $E_{\text{galv}}$、加速倍率、耦合前後對照表與疊加極化圖；底部可展開 **Galvanic Series Overview** 比較多個材料的電位排序。
+- **Single Metal Analysis**：檢視單一金屬的初始腐蝕速率 CR<sub>0</sub>、目標時間腐蝕深度、達門檻時間（含 90% 信賴區間）、風險分級、電化學參數表、Tafel 極化曲線與隨時間變化的腐蝕深度圖。
+- **Galvanic Analysis**：當有選取副材料時，顯示主動金屬／貴金屬判定、混合電位 <i>E</i><sub>galv</sub>、加速倍率、耦合前後對照表與疊加極化圖；底部可展開 **Galvanic Series Overview** 比較多個材料的電位排序。
 - **Recipe Comparison**：自由設定 2–5 組候選濕式清洗配方，系統會自動計算並推薦風險最低的配方，搭配並排評比表、長條圖與雷達圖。
 - **Report Export**：一鍵匯出完整技術報告，支援 **HTML、PDF、JSON、CSV、PNG、SVG** 六種格式，報告內含輸入條件、參數來源、不確定性區間、信心等級與實驗建議。
 
 ### 步驟 4：匯入自己的實驗資料（選用）
-將新的電化學、材料或溶液 CSV 檔案放進 `data/raw/`（可依金屬分子資料夾存放），再執行一次 `build_artifacts` 指令重建 `data/processed/`，重新整理網頁即可載入新資料與新模型。
+將新的電化學、材料或溶液 CSV 檔案放進 `data/raw/`（可依金屬分資料夾存放），再執行一次 `build_artifacts` 指令重建 `data/processed/`，重新整理網頁即可載入新資料與新模型。
 
 ---
 
@@ -136,7 +136,7 @@
 | 啟動時出現 `TypeError: ... got an unexpected keyword argument 'width'` | 安裝的 `streamlit` 版本低於 `1.50.0`。 | 升級套件：`pip install --upgrade -r requirements.txt`（確認 `streamlit >= 1.50.0`）。 |
 | 報錯 `ImportError: Unable to find a usable engine` 或 Parquet 讀取失敗 | 缺少 `pyarrow` 套件。 | 執行 `pip install "pyarrow>=16.0.0"` 或重新安裝 `requirements.txt`。 |
 | 啟動時出現 `Address already in use` 或 `Port 8501 is already in use` | 已有另一個 Streamlit 實例或程式佔用 `8501` 埠。 | 關閉舊的終端機視窗，或改用 `--server.port 8502` 指定新埠號啟動。 |
-| 材料下拉選單標示 `no Faraday props` 或 $\text{CR}_0$ 顯示 `N/A` | 該材料缺少密度（density）或當量重（equivalent weight），無法進行 Faraday 速率換算。 | 在 `data/raw/material_properties.csv` 補齊該材料的物理性質，然後重新執行 `build_artifacts`。 |
+| 材料下拉選單標示 `no Faraday props` 或 CR<sub>0</sub> 顯示 `N/A` | 該材料缺少密度（density）或當量重（equivalent weight），無法進行 Faraday 速率換算。 | 在 `data/raw/material_properties.csv` 補齊該材料的物理性質，然後重新執行 `build_artifacts`。 |
 | 首次切換至 `Gaussian Process` 或 `RF + GP Hybrid` 時等待較久 | 預設離線預建僅包含 3 個樹模型，其餘模型會在首次選取時即時訓練並快取。 | 若常使用這些模型，可先執行 `build_artifacts --models all` 離線預建。 |
 | 畫面上方出現紅色 `Confidence Tier: Low` 警告 | 查詢條件超出訓練資料的適用域（Applicability Domain），或該材料樣本數過少（`n < 10`）。 | 展開 **Applicability Domain Warnings** 與 **Suggested Follow-Up Experiments** 查看建議補強的實驗條件，或切換至 `Manual Override` 輸入實測數據。 |
 | Windows 執行 `python` 跳出 Microsoft Store | 系統未安裝 Python 或未加入 PATH。 | 至 [python.org](https://www.python.org/downloads/) 安裝 Python 3.11+（安裝時務必勾選 **Add python.exe to PATH**），並改用 `py -3` 執行。 |
