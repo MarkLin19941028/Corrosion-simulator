@@ -2,6 +2,24 @@
 
 本應用程式是一個結合物理電化學模型與機器學習（Physics-Informed & ML-Assisted）的腐蝕模擬平台，用於評估半導體製程中互連層、阻障層、襯墊層與閘極材料（核心金屬 `Cu, Co, W, Ru, Ti, Ta, Al, Mo` 及擴充材料如 `TiN, Fe, Cr, Ni, Pt, Pd, Au` 等）在濕式清洗液中的單一金屬腐蝕、雙金屬伽凡尼耦合（Galvanic Coupling）加速效應、隨時間演變的厚度損失風險，以及多組清洗配方的綜合評比。
 
+## 目錄
+
+- [一、系統運作原理簡述](#一系統運作原理簡述)
+- [二、系統需求與相依套件](#二系統需求與相依套件)
+- [三、完整指令速查表（macOS 與 Windows）](#三完整指令速查表macos-與-windows)
+  - [1. 環境建立與套件安裝](#1-環境建立與套件安裝)
+  - [2. 啟動與操作網頁應用程式（Streamlit App）](#2-啟動與操作網頁應用程式streamlit-app)
+  - [3. 資料整合與離線模型預建](#3-資料整合與離線模型預建)
+  - [4. 自動化測試與驗證](#4-自動化測試與驗證)
+  - [5. 示範與分析用 Jupyter Notebook](#5-示範與分析用-jupyter-notebook)
+- [四、新手快速上手操作指南](#四新手快速上手操作指南)
+  - [步驟 1：啟動應用程式](#步驟-1啟動應用程式)
+  - [步驟 2：在左側邊欄設定模擬條件](#步驟-2在左側邊欄設定模擬條件)
+  - [步驟 3：檢視右側四個分析分頁（指標、表格、圖表與名詞說明）](#步驟-3檢視右側四個分析分頁指標表格圖表與名詞說明)
+  - [步驟 4：匯入自己的實驗資料（選用）](#步驟-4匯入自己的實驗資料選用)
+- [五、常見問題與排錯指南](#五常見問題與排錯指南)
+- [六、示範 Notebook 與進階文件](#六示範-notebook-與進階文件)
+
 ---
 
 ## 一、系統運作原理簡述
@@ -44,7 +62,7 @@
 
 ---
 
-## 三、完整指令速查表（macOS / Windows）
+## 三、完整指令速查表（macOS 與 Windows）
 
 > 以下所有指令皆預設在**專案根目錄**（包含 `app.py` 的資料夾）執行。Windows 指令適用於 **PowerShell**（建議）；若使用傳統 `cmd.exe`，可直接沿用 `.venv\Scripts\...` 路徑。
 
@@ -71,7 +89,7 @@
 | 啟動但不自動彈出瀏覽器（Headless） | `.venv/bin/streamlit run app.py --server.headless true` | `.venv\Scripts\streamlit.exe run app.py --server.headless true` |
 | 停止運行中的應用程式 | 在終端機按 `Ctrl + C` | 在終端機按 `Ctrl + C` |
 
-### 3. 資料整合與離線模型預建（`build_artifacts`）
+### 3. 資料整合與離線模型預建
 
 > 每當您新增或修改 `data/raw/` 內的 CSV 檔案時，請執行此類指令以更新 `data/processed/` 中的 Parquet 資料表與 `.joblib` 模型檔。
 
@@ -110,24 +128,89 @@
 ### 步驟 1：啟動應用程式
 完成套件安裝後，執行啟動指令，瀏覽器會自動開啟 `http://localhost:8501`。
 
-### 步驟 2：在左側邊欄（Simulation Parameters）設定模擬條件
+### 步驟 2：在左側邊欄設定模擬條件
 1. **Metal / Material Selection**：選擇主材料（Primary Material），標籤會顯示該材料在資料庫中的樣本數 `n=...`；若要分析雙金屬腐蝕，請選擇副材料（Secondary Material）與陰陽極面積比（<i>A</i><sub>noble</sub> / <i>A</i><sub>active</sub>）。
 2. **Solution & Operating Conditions**：選擇氧化劑（如 `H2O2`）、酸/錯合劑、緩蝕劑（如 `BTA`）的種類與濃度，並調整 `pH` 與操作溫度（`°C`）。
 3. **Immersion Time & Kinetics**：設定浸泡時間（秒）、臨界厚度門檻 <i>d</i><sub>crit</sub>（`nm`），以及動力學模型（預設 `Auto` 會依 Pourbaix 穩定區自動挑選，也可手動切換 Linear / Passivation / Power-Law）。
 4. **Parameter Source**：預設為 `ML Prediction`（可自由切換 6 種演算法）；若要直接查表可選 `Database Lookup`，若已有實驗數據則可選 `Manual Override` 手動輸入。
 
-### 步驟 3：檢視右側四個分析分頁
-- **Single Metal Analysis**：檢視單一金屬的初始腐蝕速率 CR<sub>0</sub>、目標時間腐蝕深度、達門檻時間（含 90% 信賴區間）、風險分級、電化學參數表、Tafel 極化曲線與隨時間變化的腐蝕深度圖。
-- **Galvanic Analysis**：當有選取副材料時，顯示主動金屬／貴金屬判定、混合電位 <i>E</i><sub>galv</sub>、加速倍率、耦合前後對照表與疊加極化圖；底部可展開 **Galvanic Series Overview** 比較多個材料的電位排序。
-- **Recipe Comparison**：自由設定 2–5 組候選濕式清洗配方，系統會自動計算並推薦風險最低的配方，搭配並排評比表、長條圖與雷達圖。
-- **Report Export**：一鍵匯出完整技術報告，支援 **HTML、PDF、JSON、CSV、PNG、SVG** 六種格式，報告內含輸入條件、參數來源、不確定性區間、信心等級與實驗建議。
+### 步驟 3：檢視右側四個分析分頁（指標、表格、圖表與名詞說明）
+
+#### 分頁 1：`Single Metal Analysis`（單一金屬分析）
+評估單一材料在指定清洗液下的電化學行為、腐蝕速率與時間風險。頁面頂部會顯示 **Confidence Tier** 適用域信心橫幅，可展開查看警告與實驗建議。
+
+- **頂部關鍵指標卡（4 項 KPI）**：
+  - `Initial Corrosion Rate (CR₀)`：依 Faraday 定律換算的初始腐蝕速率（`nm/min` 與 `mm/yr`）。
+  - `Corrosion Depth @ t`：在設定浸泡時間結束時的累積腐蝕深度（`nm`），下方對照門檻 `Threshold: d_crit`。
+  - `Time to Threshold`：腐蝕深度達到臨界厚度 `d_crit` 所需的時間（含 90% Monte Carlo 信賴區間）；若在模擬範圍內不會達到則顯示 `∞ (Not reached)`。
+  - `Thickness Loss Risk`：綜合腐蝕深度與時間的風險分級（`Low / Moderate / High / Critical`）與連續風險分數 `R(t)`。
+- **表格：`Electrochemical Parameters & Uncertainty (±1σ)`**
+  - 列出 4 個核心電化學參數（`E_corr`、`i_corr`、`beta_a`、`beta_c`）的預測／查詢／手動輸入數值、單位、±1σ 不確定性與參數來源。
+- **互動圖表**：
+  1. **極化曲線（`Polarization Curve (Tafel Plot)`）**：橫軸為電位 <i>E</i>（V vs. SHE），縱軸為電流密度對數 log<sub>10</sub>(|<i>i</i>|)。可同時觀察陽極氧化分支、陰極還原分支與總淨電流曲線，曲線尖點即為腐蝕電位 <i>E</i><sub>corr</sub> 與腐蝕電流密度 <i>i</i><sub>corr</sub>。
+  2. **時間動力學與風險曲線（`Time-Resolved Kinetics & Thickness Loss Risk`）**：呈現腐蝕深度 <i>d</i>(<i>t</i>) 隨時間的變化軌跡、90% 不確定性陰影區間，以及水平虛線標示的臨界厚度門檻 <i>d</i><sub>crit</sub>。可藉此判斷該配方在製程時間內是否會超過安全上限。
+
+#### 分頁 2：`Galvanic Analysis`（雙金屬伽凡尼耦合分析）
+當左側邊欄有選取「副材料（Secondary Material）」時啟用，用來評估兩種不同材料接觸同一清洗液時，電位較低的主動金屬（陽極）被加速腐蝕的程度。
+
+- **頂部關鍵指標卡（4 項 KPI）**：
+  - `Active / Noble Metal`：自動判定哪一個是**主動金屬（Active，陽極、被腐蝕端）**、哪一個是**貴金屬（Noble，陰極、受保護端）**，並顯示電位差驅動力風險（`|ΔE|`）。
+  - `Mixed Potential (E_galv)`：耦合後的混合電位，以及流經耦合界面的伽凡尼電流密度 `i_galv`（`µA/cm²`）。
+  - `Acceleration Factor`：耦合後的腐蝕加速倍率（`i_galv / i_corr,active`）與加速後的初始腐蝕速率 `CR₀`。
+  - `Coupled Time to Threshold`：耦合加速後達到 `d_crit` 的時間，下方對照未耦合（Uncoupled）時的達標時間，可一眼看出壽命縮短幅度。
+- **表格 1：`Uncoupled vs. Galvanically Coupled Summary`**
+  - 將主動金屬「未耦合」與「耦合後」的 CR<sub>0</sub>、累積腐蝕深度、達門檻時間、風險分數與風險等級並排對照。
+- **互動圖表**：
+  1. **雙金屬疊加極化圖（`Galvanic Polarization Curve`）**：將主動金屬的陽極曲線與經面積比（<i>A</i><sub>noble</sub> / <i>A</i><sub>active</sub>）加權後的貴金屬陰極曲線畫在同一張圖上，兩曲線交點即為混合電位 <i>E</i><sub>galv</sub> 與伽凡尼電流密度 <i>i</i><sub>galv</sub>。陰極面積越大，交點越往高電流方向移動、加速越顯著。
+  2. **耦合前後動力學比較圖（`Uncoupled vs. Galvanically Coupled Kinetics`）**：比較同一材料在「單獨存在」與「與貴金屬耦合」兩種情況下的腐蝕深度成長曲線，直觀呈現耦合效應造成的額外厚度損失。
+- **可展開表格：`Galvanic Series Overview (Select Material Subset)`**
+  - 可勾選多種材料，檢視它們在當前資料庫中的 <i>E</i><sub>corr</sub> 中位數排序（由貴到賤），協助在設計階段避開電位差過大的材料組合。
+
+#### 分頁 3：`Recipe Comparison`（多組清洗配方比較）
+可透過滑桿設定 **2 至 5 組**候選清洗配方（預設提供 5 種常見情境作為範本，皆可自由修改藥液濃度、pH、溫度與時間），系統會自動計算並於上方綠色橫幅顯示 **Lowest-Risk Recommendation**（風險最低的推薦配方）。
+
+- **表格：`Side-by-Side Cleaning Recipe Rankings`**
+  - 依綜合風險由低到高自動排名（`Rank 1` 為最佳），並排呈現每個配方的化學組成、初始腐蝕速率、累積深度、達門檻時間、風險分數／等級，以及（若為雙金屬模式）耦合加速倍率。
+- **互動圖表**：
+  1. **關鍵指標長條圖（`Cleaning Recipe Comparison — Key Metrics`）**：以分組長條圖並排比較各配方的腐蝕深度與風險分數，系統推薦的最佳配方會以綠色醒目標示。
+  2. **正規化安全雷達圖（`Normalized Safety Radar`）**：將多項指標正規化到同一尺度後繪成雷達圖；**圖形涵蓋面積越大、越靠外側的配方，代表綜合安全性越高／腐蝕風險越低**。
+
+#### 分頁 4：`Report Export`（多格式技術報告匯出）
+將目前所有模擬結果（含輸入條件、參數來源、表格、圖表、不確定性區間、信心等級與配方排名）打包匯出為 6 種格式：
+
+| 匯出格式 | 檔名副檔名 | 適用場景 |
+| :--- | :--- | :--- |
+| HTML 完整報告 | `.html` | 瀏覽器開啟檢視完整排版、互動圖表與摘要表格 |
+| PDF 技術報告 | `.pdf` | 適合正式文件存檔、實驗室列印或團隊傳閱 |
+| JSON 結構化資料 | `.json` | 供程式化後處理、自動化管線或資料庫串接 |
+| CSV 彙整表 | `.csv` | 使用 Excel 或 pandas 快速開啟進行二次統計 |
+| PNG 高解析複合圖 | `.png` | 直接嵌入簡報（PPT）或報告文件的點陣圖 |
+| SVG 向量圖表 | `.svg` | 適合論文發表或高倍率放大不失真的向量圖 |
+
+頁面下方同步提供 **Preview Composite Report Figure**，可直接預覽匯出的複合圖表內容。
+
+#### 常見介面專有名詞速查
+
+| 名詞 / 符號 | 中文說明 | 判讀重點 |
+| :--- | :--- | :--- |
+| <i>E</i><sub>corr</sub> | 自腐蝕電位（V vs. SHE） | 數值越低（越負）代表熱力學上越活潑、越容易在雙金屬耦合中成為陽極 |
+| <i>i</i><sub>corr</sub> | 自腐蝕電流密度（µA/cm²） | 正比於瞬時腐蝕速率，數值越大代表腐蝕越快 |
+| <i>β</i><sub>a</sub>, <i>β</i><sub>c</sub> | 陽極 / 陰極 Tafel 斜率（mV/dec） | 描述電位每改變一個數量級電流所需之電壓變化，影響極化曲線斜率 |
+| CR<sub>0</sub> | 初始腐蝕速率（nm/min、mm/yr） | 由 <i>i</i><sub>corr</sub> 透過 Faraday 定律換算的薄膜厚度損失速率 |
+| <i>E</i><sub>galv</sub>, <i>i</i><sub>galv</sub> | 伽凡尼混合電位與耦合電流密度 | 雙金屬接觸後達成電流守恆的新平衡點 |
+| Acceleration Factor | 伽凡尼加速倍率 | `i_galv / i_corr,active`；大於 `1.0×` 表示耦合加劇了主動金屬腐蝕 |
+| <i>A</i><sub>noble</sub> / <i>A</i><sub>active</sub> | 陰陽極面積比 | 貴金屬（陰極）面積相對越大，對主動金屬（陽極）的加速效應越強烈 |
+| <i>d</i><sub>crit</sub> | 臨界厚度門檻（nm） | 製程可容許的最大腐蝕厚度損失上限 |
+| <i>d</i><sub>max</sub> | 鈍化極限深度（nm） | Passivation 動力學模型中，表面生成鈍化膜後腐蝕深度趨近的飽和上限 |
+| Time to Threshold | 達門檻時間 | 腐蝕深度達到 <i>d</i><sub>crit</sub> 所需的浸泡秒數，越長越安全 |
+| Confidence Tier | 適用域信心等級（High / Medium / Low） | 評估查詢條件是否落在 ML 訓練資料覆蓋範圍內；`Low` 代表外推風險高，建議補做實驗 |
 
 ### 步驟 4：匯入自己的實驗資料（選用）
 將新的電化學、材料或溶液 CSV 檔案放進 `data/raw/`（可依金屬分資料夾存放），再執行一次 `build_artifacts` 指令重建 `data/processed/`，重新整理網頁即可載入新資料與新模型。
 
 ---
 
-## 五、常見問題與排錯指南（Troubleshooting）
+## 五、常見問題與排錯指南
 
 | 常見現象 / 錯誤訊息 | 原因說明 | 解決方法 |
 | :--- | :--- | :--- |
