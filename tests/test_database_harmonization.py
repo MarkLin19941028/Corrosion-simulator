@@ -12,6 +12,8 @@ from corrosion_simulator.database import (
     ExposureLookupResult,
     HarmonizedDatabase,
     convert_potential_to_she,
+    derive_icorr_from_cr,
+    derive_icorr_from_rp,
     normalize_current_density_to_uA_cm2,
     normalize_tafel_slope_to_mV_dec,
 )
@@ -560,6 +562,167 @@ class TestDirectoryIngestionSeedFallbackAndExport(unittest.TestCase):
         self.assertEqual(str(echem.loc["R_PRE_NORM", "acid_type"]), "citric acid")
         self.assertEqual(str(echem.loc["R_PRE_NORM", "inhibitor_type"]), "BTA")
         self.assertAlmostEqual(float(echem.loc["R_PRE_NORM", "ORP_mV"]), 480.0, places=6)
+
+
+class TestFilteringOptimizationAndPhysicalDerivation(unittest.TestCase):
+    """Verify CR/Rp physical derivation, content dedup, physical bounds, and partial-target retention."""
+
+    def test_derive_icorr_from_cr_and_rp_analytical(self) -> None:
+        # Cu (M=63.546, rho=8.96, z=2): CR_nm_min = i_uA * 63.546 * 600 / (2 * 96485.33212 * 8.96)
+        # For i_corr = 10 uA/cm2 -> CR = 0.220513... nm/min
+        i_from_nm = derive_icorr_from_cr(
+            0.2205130268,
+            "nm/min",
+            molar_mass_g_mol=63.546,
+            density_g_cm3=8.96,
+            valence=2.0,
+        )
+        self.assertAlmostEqual(i_from_nm, 10.0, places=3)
+
+        # Stern-Geary with beta_a=60, beta_c=120 -> B = 40 / ln(10) = 17.37178 mV
+        # At Rp = 1 kOhm*cm2 = 1000 Ohm*cm2 -> i_corr = 17.37178 uA/cm2
+        i_from_rp = derive_icorr_from_rp(1.0, "kΩ·cm2", beta_a_mV_dec=60.0, beta_c_mV_dec=120.0)
+        self.assertAlmostEqual(i_from_rp, 17.37178, places=3)
+        self.assertTrue(math.isnan(derive_icorr_from_cr(1.0, "unsupported_unit", molar_mass_g_mol=63.546, density_g_cm3=8.96, valence=2.0)))
+
+    def test_content_dedup_tafel_bounds_physical_quarantine_and_partial_targets(self) -> None:
+        raw_echem = pd.DataFrame(
+            [
+                # Two duplicates with different record_ids (higher quality_score must be kept)
+                {
+                    "record_id": "DUP_LOW",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.250,
+                    "icorr_uA_cm2": 5.0,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.70,
+                },
+                {
+                    "record_id": "DUP_HIGH",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.250,
+                    "icorr_uA_cm2": 5.0,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.95,
+                },
+                # Out-of-bounds Tafel slope (> 500 mV/dec) -> converted to imputed, kept as complete pair
+                {
+                    "record_id": "OOB_TAFEL",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.260,
+                    "icorr_uA_cm2": 6.0,
+                    "beta_a_mV_dec": 850.0,
+                    "beta_c_mV_dec": 120.0,
+                    "pH_source": "inferred_neutral",
+                    "data_quality_score": 0.90,
+                },
+                # Missing icorr but has CR_reported_value -> rescued into complete pair via Faraday
+                {
+                    "record_id": "RESCUE_CR",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.270,
+                    "icorr_uA_cm2": None,
+                    "CR_reported_value": 0.220513,
+                    "CR_reported_unit": "nm/min",
+                    "beta_a_mV_dec": 65.0,
+                    "beta_c_mV_dec": 125.0,
+                    "data_quality_score": 0.90,
+                },
+                # Missing icorr but has Rp_ohm_cm2 -> rescued into complete pair via Stern-Geary
+                {
+                    "record_id": "RESCUE_RP",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.275,
+                    "icorr_uA_cm2": None,
+                    "Rp_ohm_cm2": 2.0,
+                    "Rp_unit": "kohm*cm2",
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # Partial-target: Ecorr only -> routed to partial_target_records, NOT complete or rejected
+                {
+                    "record_id": "PARTIAL_ECORR",
+                    "metal": "Ru",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.500,
+                    "icorr_uA_cm2": None,
+                    "beta_a_mV_dec": 75.0,
+                    "beta_c_mV_dec": 115.0,
+                },
+                # Extreme icorr (> 1e5 uA/cm2) -> quarantined to rejected_records
+                {
+                    "record_id": "EXTREME_ICORR",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.200,
+                    "icorr_uA_cm2": 500000.0,
+                },
+                # Missing both Ecorr and icorr -> quarantined to rejected_records
+                {
+                    "record_id": "MISSING_BOTH",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": None,
+                    "icorr_uA_cm2": None,
+                },
+            ]
+        )
+
+        db = HarmonizedDatabase.from_raw_tables(raw_echem, supplement_missing_core_metals=False)
+        echem = db.electrochemical_database.set_index("record_id")
+        partial = db.partial_target_records.set_index("record_id")
+        rej = db.rejected_records.set_index("record_id")
+
+        # Deduplication kept DUP_HIGH and dropped DUP_LOW
+        self.assertIn("DUP_HIGH", echem.index)
+        self.assertNotIn("DUP_LOW", echem.index)
+
+        # Out-of-bounds Tafel was flagged as imputed and replaced within [20, 500], and inferred_neutral discounted quality_score
+        self.assertTrue(bool(echem.loc["OOB_TAFEL", "beta_a_imputed"]))
+        self.assertLessEqual(float(echem.loc["OOB_TAFEL", "beta_a_mV_dec"]), 500.0)
+        # (0.90 - 0.15) * 0.75 = 0.5625
+        self.assertAlmostEqual(float(echem.loc["OOB_TAFEL", "quality_score"]), 0.5625, places=4)
+
+        # CR and Rp rescued records entered complete pairs with provenance and quality discount
+        self.assertEqual(str(echem.loc["RESCUE_CR", "icorr_source"]), "derived_from_CR")
+        self.assertAlmostEqual(float(echem.loc["RESCUE_CR", "icorr_uA_cm2"]), 10.0, places=2)
+        self.assertEqual(str(echem.loc["RESCUE_RP", "icorr_source"]), "derived_from_Rp")
+        self.assertAlmostEqual(float(echem.loc["RESCUE_RP", "icorr_uA_cm2"]), 8.6859, places=2)
+
+        # Partial-target record is in partial_target_records and ml_training_dataframe, not in galvanic_series
+        self.assertIn("PARTIAL_ECORR", partial.index)
+        self.assertNotIn("PARTIAL_ECORR", echem.index)
+        self.assertNotIn("Ru", set(db.galvanic_series["metal"]))
+        self.assertIn("PARTIAL_ECORR", set(db.ml_training_dataframe["record_id"]))
+
+        # Rejected records contain EXTREME_ICORR and MISSING_BOTH with explicit reasons
+        self.assertIn("EXTREME_ICORR", rej.index)
+        self.assertIn("icorr_out_of_physical_bounds", str(rej.loc["EXTREME_ICORR", "rejection_reason"]))
+        self.assertIn("MISSING_BOTH", rej.index)
 
 
 if __name__ == "__main__":

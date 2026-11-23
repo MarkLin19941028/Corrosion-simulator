@@ -32,7 +32,42 @@ DEFAULT_DISSOLUTION_VALENCE: Final[dict[str, int]] = {
 
 DEFAULT_BETA_A_MV_DEC: Final[float] = 60.0
 DEFAULT_BETA_C_MV_DEC: Final[float] = 120.0
+TAFEL_SLOPE_MIN_MV_DEC: Final[float] = 20.0
+TAFEL_SLOPE_MAX_MV_DEC: Final[float] = 500.0
+ECORR_MIN_V_SHE: Final[float] = -2.5
+ECORR_MAX_V_SHE: Final[float] = 2.5
+ICORR_MIN_UA_CM2: Final[float] = 1e-4
+ICORR_MAX_UA_CM2: Final[float] = 1e5
 IMPUTATION_QUALITY_PENALTY: Final[float] = 0.15
+CR_DERIVED_QUALITY_PENALTY: Final[float] = 0.15
+RP_DERIVED_QUALITY_PENALTY: Final[float] = 0.25
+INFERRED_NEUTRAL_PH_WEIGHT_FACTOR: Final[float] = 0.75
+_FARADAY_CONSTANT_C_MOL: Final[float] = 96485.33212
+
+_CR_TO_NM_MIN: Final[dict[str, float]] = {
+    "nm/min": 1.0,
+    "nm min-1": 1.0,
+    "a/min": 0.1,
+    "å/min": 0.1,
+    "mm/yr": 1e6 / 525600.0,
+    "mm/year": 1e6 / 525600.0,
+    "mm/y": 1e6 / 525600.0,
+    "mmpy": 1e6 / 525600.0,
+    "mm a": 1e6 / 525600.0,
+    "mm y": 1e6 / 525600.0,
+    "mm yr": 1e6 / 525600.0,
+    "mm year-1": 1e6 / 525600.0,
+    "mm/a": 1e6 / 525600.0,
+    "mm/year x 10-3": 1e3 / 525600.0,
+    "um/y": 1e3 / 525600.0,
+    "um/yr": 1e3 / 525600.0,
+    "um/year": 1e3 / 525600.0,
+    "μm/y": 1e3 / 525600.0,
+    "μm/yr": 1e3 / 525600.0,
+    "µm/y": 1e3 / 525600.0,
+    "µm/yr": 1e3 / 525600.0,
+    "mpy": 25400.0 / 525600.0,
+}
 
 # Standard reference electrode potentials (V vs. SHE at 25 °C)
 REFERENCE_ELECTRODE_OFFSETS_V_SHE: Final[dict[str, float]] = {
@@ -180,6 +215,86 @@ def normalize_tafel_slope_to_mV_dec(
     return val
 
 
+def derive_icorr_from_cr(
+    cr_value: float,
+    cr_unit: str = "nm/min",
+    *,
+    molar_mass_g_mol: float,
+    density_g_cm3: float,
+    valence: float,
+) -> float:
+    """Invert Faraday's law to estimate i_corr (µA/cm²) from a reported Corrosion Rate.
+
+    Returns ``nan`` if any physical property is missing/non-positive or the CR unit is unsupported.
+    """
+    if (
+        cr_value is None
+        or pd.isna(cr_value)
+        or molar_mass_g_mol is None
+        or pd.isna(molar_mass_g_mol)
+        or density_g_cm3 is None
+        or pd.isna(density_g_cm3)
+        or valence is None
+        or pd.isna(valence)
+    ):
+        return float("nan")
+    cr_f = float(cr_value)
+    m_f = float(molar_mass_g_mol)
+    rho_f = float(density_g_cm3)
+    z_f = float(valence)
+    if cr_f <= 0.0 or m_f <= 0.0 or rho_f <= 0.0 or z_f <= 0.0:
+        return float("nan")
+    if cr_unit is None or pd.isna(cr_unit) or not str(cr_unit).strip():
+        return float("nan")
+    unit_key = " ".join(str(cr_unit).strip().lower().split())
+    factor = _CR_TO_NM_MIN.get(unit_key)
+    if factor is None:
+        return float("nan")
+    cr_nm_min = cr_f * factor
+    # CR (nm/min) = i_corr (uA/cm2) * M * 600 / (z * F * rho)
+    icorr_uA_cm2 = (cr_nm_min * z_f * _FARADAY_CONSTANT_C_MOL * rho_f) / (600.0 * m_f)
+    return float(icorr_uA_cm2) if (math.isfinite(icorr_uA_cm2) and icorr_uA_cm2 > 0.0) else float("nan")
+
+
+def derive_icorr_from_rp(
+    rp_value: float,
+    rp_unit: str = "ohm·cm2",
+    *,
+    beta_a_mV_dec: float = DEFAULT_BETA_A_MV_DEC,
+    beta_c_mV_dec: float = DEFAULT_BETA_C_MV_DEC,
+) -> float:
+    """Apply the Stern-Geary relation to estimate i_corr (µA/cm²) from polarization resistance R_p.
+
+    Returns ``nan`` if ``rp_value`` is non-positive or ``rp_unit`` cannot be parsed to Ω·cm².
+    """
+    if rp_value is None or pd.isna(rp_value):
+        return float("nan")
+    rp_f = float(rp_value)
+    if not math.isfinite(rp_f) or rp_f <= 0.0:
+        return float("nan")
+
+    unit_raw = "ohm·cm2" if (rp_unit is None or pd.isna(rp_unit) or not str(rp_unit).strip()) else str(rp_unit).strip()
+    unit_compact = "".join(unit_raw.split())
+    unit_lower = unit_compact.lower()
+
+    if unit_compact.startswith("MΩ") or unit_compact.startswith("Mohm") or unit_compact.startswith("MOhm") or unit_compact.startswith("Mῼ"):
+        rp_ohm_cm2 = rp_f * 1e6
+    elif unit_lower.startswith("kω") or unit_lower.startswith("kohm") or unit_lower.startswith("kῼ"):
+        rp_ohm_cm2 = rp_f * 1e3
+    elif any(tok in unit_lower for tok in ("ohm", "ω", "ῼ")):
+        rp_ohm_cm2 = rp_f
+    else:
+        return float("nan")
+
+    ba = float(beta_a_mV_dec) if (beta_a_mV_dec is not None and not pd.isna(beta_a_mV_dec) and TAFEL_SLOPE_MIN_MV_DEC <= float(beta_a_mV_dec) <= TAFEL_SLOPE_MAX_MV_DEC) else DEFAULT_BETA_A_MV_DEC
+    bc = float(beta_c_mV_dec) if (beta_c_mV_dec is not None and not pd.isna(beta_c_mV_dec) and TAFEL_SLOPE_MIN_MV_DEC <= float(beta_c_mV_dec) <= TAFEL_SLOPE_MAX_MV_DEC) else DEFAULT_BETA_C_MV_DEC
+    # Stern-Geary constant B in mV: B = (ba * bc) / (ln(10) * (ba + bc))
+    B_mV = (ba * bc) / (math.log(10.0) * (ba + bc))
+    # i_corr (uA/cm2) = (B_mV * 1e-3 V / R_p) * 1e6 = B_mV * 1000 / R_p
+    icorr_uA_cm2 = (B_mV * 1000.0) / rp_ohm_cm2
+    return float(icorr_uA_cm2) if (math.isfinite(icorr_uA_cm2) and icorr_uA_cm2 > 0.0) else float("nan")
+
+
 def _clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
     cleaned = df.copy()
     cleaned.columns = [str(c).lstrip("\ufeff").strip() for c in cleaned.columns]
@@ -244,10 +359,14 @@ def _normalize_slope_series(
     for idx in df.index:
         if not pd.isna(pre_norm.loc[idx]):
             # Value is already explicitly in mV/dec; only enforce strictly positive sign
-            results.append(normalize_tafel_slope_to_mV_dec(float(pre_norm.loc[idx]), "mV/dec"))
+            val = normalize_tafel_slope_to_mV_dec(float(pre_norm.loc[idx]), "mV/dec")
         elif not pd.isna(raw_vals.loc[idx]):
             unit_str = str(unit_col.loc[idx]) if not pd.isna(unit_col.loc[idx]) else "mV/dec"
-            results.append(normalize_tafel_slope_to_mV_dec(float(raw_vals.loc[idx]), unit_str))
+            val = normalize_tafel_slope_to_mV_dec(float(raw_vals.loc[idx]), unit_str)
+        else:
+            val = float("nan")
+        if math.isfinite(val) and (TAFEL_SLOPE_MIN_MV_DEC <= val <= TAFEL_SLOPE_MAX_MV_DEC):
+            results.append(val)
         else:
             results.append(float("nan"))
     return results
@@ -321,6 +440,19 @@ class HarmonizedDatabase:
     galvanic_series: pd.DataFrame = field(default_factory=pd.DataFrame)
     data_dictionary: pd.DataFrame = field(default_factory=pd.DataFrame)
     rejected_records: pd.DataFrame = field(default_factory=pd.DataFrame)
+    partial_target_records: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+    @property
+    def ml_training_dataframe(self) -> pd.DataFrame:
+        """Combined DataFrame of complete pairs plus partial-target rows for per-target ML training."""
+        if self.partial_target_records.empty:
+            return self.electrochemical_database
+        if self.electrochemical_database.empty:
+            return self.partial_target_records
+        return pd.concat(
+            [self.electrochemical_database, self.partial_target_records],
+            ignore_index=True,
+        )
 
     @property
     def available_metals(self) -> list[str]:
@@ -511,7 +643,7 @@ class HarmonizedDatabase:
             # Determine which of the 8 core metals lack valid (Ecorr, icorr) records in echem_raw
             prelim_mat = cls._harmonize_materials(mat_raw, echem_raw, filter_to_core_metals=filter_to_core_metals)
             prelim_sol, prelim_echem_sol = cls._harmonize_solutions(sol_raw, echem_raw)
-            prelim_valid, _ = cls._harmonize_electrochemical_records(
+            prelim_valid, _, _ = cls._harmonize_electrochemical_records(
                 prelim_echem_sol,
                 prelim_mat,
                 prelim_sol,
@@ -538,7 +670,7 @@ class HarmonizedDatabase:
         harmonized_solutions, echem_with_sol = cls._harmonize_solutions(sol_raw, echem_raw)
 
         # 3. Harmonize Electrochemical Records (potentials -> V vs. SHE, currents -> uA/cm2, slopes -> +mV/dec)
-        harmonized_echem, rejected_records = cls._harmonize_electrochemical_records(
+        harmonized_echem, partial_records, rejected_records = cls._harmonize_electrochemical_records(
             echem_with_sol,
             harmonized_materials,
             harmonized_solutions,
@@ -563,6 +695,7 @@ class HarmonizedDatabase:
             galvanic_series=galvanic_series,
             data_dictionary=data_dictionary,
             rejected_records=rejected_records,
+            partial_target_records=partial_records,
         )
 
     @staticmethod
@@ -842,9 +975,9 @@ class HarmonizedDatabase:
         solutions: pd.DataFrame,
         *,
         filter_to_core_metals: bool,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         if echem.empty:
-            return pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
         df = echem.copy()
         rejected_frames: list[pd.DataFrame] = []
@@ -867,7 +1000,7 @@ class HarmonizedDatabase:
 
         if df.empty:
             rejected_all = pd.concat(rejected_frames, ignore_index=True) if rejected_frames else pd.DataFrame()
-            return pd.DataFrame(), rejected_all
+            return pd.DataFrame(), pd.DataFrame(), rejected_all
 
         if "record_id" not in df.columns:
             df["record_id"] = [f"REC_{i + 1:05d}" for i in range(len(df))]
@@ -1029,35 +1162,7 @@ class HarmonizedDatabase:
 
         df["icorr_uA_cm2"] = normalized_icorr
 
-        # Filter out records missing Ecorr or icorr, quarantining them with explicit reasons
-        missing_ecorr = df["Ecorr_V_SHE"].isna()
-        missing_icorr = df["icorr_uA_cm2"].isna() | (df["icorr_uA_cm2"] <= 0.0)
-        invalid_mask = missing_ecorr | missing_icorr
-        if invalid_mask.any():
-            rej = df.loc[invalid_mask].copy()
-            reasons: list[str] = []
-            for idx in rej.index:
-                parts: list[str] = []
-                if bool(missing_ecorr.loc[idx]):
-                    parts.append("missing_or_unconvertible_Ecorr")
-                if bool(missing_icorr.loc[idx]):
-                    parts.append("missing_or_nonpositive_icorr")
-                reasons.append(";".join(parts))
-            rej["rejection_reason"] = reasons
-            rejected_frames.append(rej)
-            df = df.loc[~invalid_mask].copy()
-
-        rejected_all = (
-            pd.concat(rejected_frames, ignore_index=True)
-            if rejected_frames
-            else pd.DataFrame(columns=["record_id", "metal", "solution_id", "rejection_reason"])
-        )
-        if df.empty:
-            return df, rejected_all
-
-        df["log10_icorr_uA_cm2"] = np.log10(df["icorr_uA_cm2"])
-
-        # Normalize Tafel slopes to positive mV/dec without double-scaling pre-normalized columns
+        # Normalize Tafel slopes to positive mV/dec within physical bounds [20, 500] before Stern-Geary derivation
         df["beta_a_mV_dec"] = _normalize_slope_series(
             df, "beta_a_mV_dec", "beta_a", "beta_a_unit"
         )
@@ -1065,42 +1170,233 @@ class HarmonizedDatabase:
             df, "beta_c_mV_dec", "beta_c", "beta_c_unit"
         )
 
-        # Deduplicate exact duplicate records before computing group medians
-        df = df.drop_duplicates(
-            subset=["record_id", "metal", "solution_id", "Ecorr_V_SHE", "icorr_uA_cm2"],
-            keep="first",
-        ).copy()
+        # Track provenance of icorr and physically derive missing icorr via Faraday (CR) or Stern-Geary (Rp)
+        icorr_sources: list[str] = [
+            "measured" if (not pd.isna(v) and v > 0.0) else "missing"
+            for v in df["icorr_uA_cm2"]
+        ]
+        cr_rep_vals = (
+            pd.to_numeric(df["CR_reported_value"], errors="coerce")
+            if "CR_reported_value" in df.columns
+            else pd.Series([np.nan] * len(df), index=df.index)
+        )
+        cr_rep_units = (
+            df["CR_reported_unit"]
+            if "CR_reported_unit" in df.columns
+            else pd.Series([np.nan] * len(df), index=df.index)
+        )
+        cr_calc_vals = (
+            pd.to_numeric(df["CR_calculated_nm_min"], errors="coerce")
+            if "CR_calculated_nm_min" in df.columns
+            else pd.Series([np.nan] * len(df), index=df.index)
+        )
+        rp_vals = (
+            pd.to_numeric(df["Rp_ohm_cm2"], errors="coerce")
+            if "Rp_ohm_cm2" in df.columns
+            else pd.Series([np.nan] * len(df), index=df.index)
+        )
+        rp_units = (
+            df["Rp_unit"]
+            if "Rp_unit" in df.columns
+            else pd.Series(["ohm·cm2"] * len(df), index=df.index)
+        )
 
-        # Impute missing beta_a and beta_c using same-metal, same-oxidizer medians (or 60 / 120 mV/dec defaults)
+        derived_icorr = list(df["icorr_uA_cm2"])
+        for pos, idx in enumerate(df.index):
+            if icorr_sources[pos] == "measured":
+                continue
+            m_val = df.loc[idx, "molar_mass_g_mol"] if "molar_mass_g_mol" in df.columns else np.nan
+            rho_val = df.loc[idx, "density_g_cm3"] if "density_g_cm3" in df.columns else np.nan
+            z_val = df.loc[idx, "valence"] if "valence" in df.columns else np.nan
+
+            est_cr = float("nan")
+            if not pd.isna(cr_rep_vals.loc[idx]) and not pd.isna(cr_rep_units.loc[idx]):
+                est_cr = derive_icorr_from_cr(
+                    float(cr_rep_vals.loc[idx]),
+                    str(cr_rep_units.loc[idx]),
+                    molar_mass_g_mol=m_val,
+                    density_g_cm3=rho_val,
+                    valence=z_val,
+                )
+            elif not pd.isna(cr_calc_vals.loc[idx]):
+                est_cr = derive_icorr_from_cr(
+                    float(cr_calc_vals.loc[idx]),
+                    "nm/min",
+                    molar_mass_g_mol=m_val,
+                    density_g_cm3=rho_val,
+                    valence=z_val,
+                )
+            if math.isfinite(est_cr) and (ICORR_MIN_UA_CM2 <= est_cr <= ICORR_MAX_UA_CM2):
+                derived_icorr[pos] = est_cr
+                icorr_sources[pos] = "derived_from_CR"
+                continue
+
+            if not pd.isna(rp_vals.loc[idx]):
+                est_rp = derive_icorr_from_rp(
+                    float(rp_vals.loc[idx]),
+                    str(rp_units.loc[idx]) if not pd.isna(rp_units.loc[idx]) else "ohm·cm2",
+                    beta_a_mV_dec=df.loc[idx, "beta_a_mV_dec"],
+                    beta_c_mV_dec=df.loc[idx, "beta_c_mV_dec"],
+                )
+                if math.isfinite(est_rp) and (ICORR_MIN_UA_CM2 <= est_rp <= ICORR_MAX_UA_CM2):
+                    derived_icorr[pos] = est_rp
+                    icorr_sources[pos] = "derived_from_Rp"
+
+        df["icorr_uA_cm2"] = derived_icorr
+        df["icorr_source"] = icorr_sources
+
+        # Physical bounds screening on Ecorr and icorr
+        ecorr_present = df["Ecorr_V_SHE"].notna()
+        ecorr_oob = ecorr_present & (
+            (df["Ecorr_V_SHE"] < ECORR_MIN_V_SHE) | (df["Ecorr_V_SHE"] > ECORR_MAX_V_SHE)
+        )
+        icorr_present = df["icorr_uA_cm2"].notna() & (df["icorr_uA_cm2"] > 0.0)
+        icorr_oob = icorr_present & (
+            (df["icorr_uA_cm2"] < ICORR_MIN_UA_CM2) | (df["icorr_uA_cm2"] > ICORR_MAX_UA_CM2)
+        )
+        neither_valid = (~ecorr_present) & (~icorr_present)
+        reject_mask = ecorr_oob | icorr_oob | neither_valid
+        if reject_mask.any():
+            rej = df.loc[reject_mask].copy()
+            reasons: list[str] = []
+            for idx in rej.index:
+                parts: list[str] = []
+                if bool(ecorr_oob.loc[idx]):
+                    parts.append("Ecorr_out_of_physical_bounds")
+                elif not bool(ecorr_present.loc[idx]):
+                    parts.append("missing_or_unconvertible_Ecorr")
+                if bool(icorr_oob.loc[idx]):
+                    parts.append("icorr_out_of_physical_bounds")
+                elif not bool(icorr_present.loc[idx]):
+                    parts.append("missing_or_nonpositive_icorr")
+                reasons.append(";".join(parts))
+            rej["rejection_reason"] = reasons
+            rejected_frames.append(rej)
+            df = df.loc[~reject_mask].copy()
+
+        rejected_all = (
+            pd.concat(rejected_frames, ignore_index=True)
+            if rejected_frames
+            else pd.DataFrame(columns=["record_id", "metal", "solution_id", "rejection_reason"])
+        )
+        if df.empty:
+            return df, pd.DataFrame(), rejected_all
+
+        # Compute log10(icorr) where icorr is valid and positive
+        valid_icorr_mask = df["icorr_uA_cm2"].notna() & (df["icorr_uA_cm2"] > 0.0)
+        df["log10_icorr_uA_cm2"] = np.where(
+            valid_icorr_mask,
+            np.log10(np.where(valid_icorr_mask, df["icorr_uA_cm2"], 1.0)),
+            np.nan,
+        )
+        df["has_complete_pair"] = df["Ecorr_V_SHE"].notna() & valid_icorr_mask
+
+        # Pre-compute base quality and imputation flags for deduplication priority
         ba_missing = df["beta_a_mV_dec"].isna()
         bc_missing = df["beta_c_mV_dec"].isna()
         df["beta_a_imputed"] = ba_missing
         df["beta_c_imputed"] = bc_missing
         df["is_imputed"] = ba_missing | bc_missing
 
-        group_ba_medians = df.groupby(["metal", "oxidizer_type"])["beta_a_mV_dec"].transform(
-            "median"
-        )
-        group_bc_medians = df.groupby(["metal", "oxidizer_type"])["beta_c_mV_dec"].transform(
-            "median"
-        )
-
-        df["beta_a_mV_dec"] = (
-            df["beta_a_mV_dec"].fillna(group_ba_medians).fillna(DEFAULT_BETA_A_MV_DEC)
-        )
-        df["beta_c_mV_dec"] = (
-            df["beta_c_mV_dec"].fillna(group_bc_medians).fillna(DEFAULT_BETA_C_MV_DEC)
-        )
-
-        # Quality score calculation & imputation decrement
         base_quality = pd.to_numeric(
             _coalesce_column(df, ["quality_score", "data_quality_score"], default=1.0),
             errors="coerce",
         ).fillna(1.0)
         penalty = np.where(df["is_imputed"], IMPUTATION_QUALITY_PENALTY, 0.0)
-        df["quality_score"] = np.clip(base_quality - penalty, 0.05, 1.0)
+        penalty = penalty + np.where(
+            df["icorr_source"] == "derived_from_CR", CR_DERIVED_QUALITY_PENALTY, 0.0
+        )
+        penalty = penalty + np.where(
+            df["icorr_source"] == "derived_from_Rp", RP_DERIVED_QUALITY_PENALTY, 0.0
+        )
+        q_score = np.clip(base_quality - penalty, 0.05, 1.0)
+        if "pH_source" in df.columns:
+            inferred_neutral_mask = df["pH_source"].astype(str).str.strip().eq("inferred_neutral")
+            q_score = np.where(
+                inferred_neutral_mask,
+                np.clip(q_score * INFERRED_NEUTRAL_PH_WEIGHT_FACTOR, 0.05, 1.0),
+                q_score,
+            )
+        df["quality_score"] = q_score
 
-        return df.reset_index(drop=True), rejected_all.reset_index(drop=True)
+        # Split complete pairs vs. partial-target records and deduplicate by physical content (not record_id)
+        complete_df = df.loc[df["has_complete_pair"]].copy()
+        partial_df = df.loc[~df["has_complete_pair"]].copy()
+
+        if not complete_df.empty:
+            complete_df = (
+                complete_df.sort_values(
+                    by=["quality_score", "is_imputed"],
+                    ascending=[False, True],
+                    kind="mergesort",
+                )
+                .drop_duplicates(
+                    subset=["metal", "solution_id", "Ecorr_V_SHE", "icorr_uA_cm2"],
+                    keep="first",
+                )
+                .sort_index()
+                .copy()
+            )
+        if not partial_df.empty:
+            partial_df = (
+                partial_df.sort_values(
+                    by=["quality_score", "is_imputed"],
+                    ascending=[False, True],
+                    kind="mergesort",
+                )
+                .drop_duplicates(
+                    subset=[
+                        "metal",
+                        "solution_id",
+                        "Ecorr_V_SHE",
+                        "icorr_uA_cm2",
+                        "beta_a_mV_dec",
+                        "beta_c_mV_dec",
+                    ],
+                    keep="first",
+                )
+                .sort_index()
+                .copy()
+            )
+
+        # Impute missing beta_a and beta_c using same-metal, same-oxidizer medians from complete pairs (or 60 / 120 mV/dec defaults)
+        if not complete_df.empty:
+            ba_group_med = (
+                complete_df.groupby(["metal", "oxidizer_type"])["beta_a_mV_dec"].median()
+            )
+            bc_group_med = (
+                complete_df.groupby(["metal", "oxidizer_type"])["beta_c_mV_dec"].median()
+            )
+        else:
+            ba_group_med = pd.Series(dtype=float)
+            bc_group_med = pd.Series(dtype=float)
+
+        def _apply_tafel_imputation(frame: pd.DataFrame) -> pd.DataFrame:
+            if frame.empty:
+                return frame
+            keys = pd.MultiIndex.from_frame(frame[["metal", "oxidizer_type"]])
+            mapped_ba = keys.map(ba_group_med).to_numpy(dtype=float) if not ba_group_med.empty else np.full(len(frame), np.nan)
+            mapped_bc = keys.map(bc_group_med).to_numpy(dtype=float) if not bc_group_med.empty else np.full(len(frame), np.nan)
+            frame["beta_a_mV_dec"] = (
+                frame["beta_a_mV_dec"]
+                .fillna(pd.Series(mapped_ba, index=frame.index))
+                .fillna(DEFAULT_BETA_A_MV_DEC)
+            )
+            frame["beta_c_mV_dec"] = (
+                frame["beta_c_mV_dec"]
+                .fillna(pd.Series(mapped_bc, index=frame.index))
+                .fillna(DEFAULT_BETA_C_MV_DEC)
+            )
+            return frame
+
+        complete_df = _apply_tafel_imputation(complete_df)
+        partial_df = _apply_tafel_imputation(partial_df)
+
+        return (
+            complete_df.reset_index(drop=True),
+            partial_df.reset_index(drop=True),
+            rejected_all.reset_index(drop=True),
+        )
 
     @staticmethod
     def _build_galvanic_series(echem_df: pd.DataFrame) -> pd.DataFrame:
@@ -1174,6 +1470,8 @@ class HarmonizedDatabase:
             "symbol": ("categorical", "dimensionless", "Chemical symbol of the Metal."),
             "material_name": ("text", "dimensionless", "Full English name of the Metal."),
             "category": ("categorical", "dimensionless", "Semiconductor film functional category (metal, barrier, liner, semiconductor)."),
+            "material_class": ("categorical", "dimensionless", "High-level material classification (e.g., pure_metal, alloy, nitride, barrier)."),
+            "components_json": ("text", "json", "Structured JSON breakdown of Solution chemical components and concentrations."),
             "tier": ("categorical", "dimensionless", "Material catalog tier (core semiconductor metal vs. extended material)."),
             "has_faraday_properties": ("boolean", "dimensionless", "True when density and equivalent weight are available for Faraday corrosion-rate conversion."),
             "sample_name": ("text", "dimensionless", "Original experimental sample or specimen designation reported in the source publication."),
@@ -1194,6 +1492,8 @@ class HarmonizedDatabase:
             "Ecorr_unit": ("categorical", "unit string", "Original potential unit (V or mV) prior to conversion to V vs. SHE."),
             "Ecorr_V_SHE": ("numeric", "V vs. SHE", "Standardized Corrosion Potential (E_corr) converted to Volts vs. Standard Hydrogen Electrode."),
             "icorr_uA_cm2": ("numeric", "µA/cm²", "Standardized Corrosion Current Density (i_corr) at E_corr in microamperes per square centimeter."),
+            "icorr_source": ("categorical", "dimensionless", "Provenance of icorr_uA_cm2 (measured, derived_from_CR via Faraday law, or derived_from_Rp via Stern-Geary)."),
+            "has_complete_pair": ("boolean_flag", "boolean", "True when both Ecorr_V_SHE and icorr_uA_cm2 are present and valid for full polarization and lookup."),
             "icorr_unit": ("categorical", "unit string", "Original current density unit prior to normalization to µA/cm²."),
             "log_icorr": ("numeric", "log10(A/cm²)", "Raw base-10 logarithm of corrosion current density in A/cm² from literature compilation."),
             "log_icorr_unit": ("categorical", "unit string", "Current density unit underlying raw log_icorr (default A/cm²)."),
@@ -1579,6 +1879,7 @@ class HarmonizedDatabase:
             "data_dictionary": out_path / "data_dictionary.csv",
             "data_dictionary_markdown": out_path / "DATA_DICTIONARY.md",
             "rejected_records": out_path / "rejected_rows.csv",
+            "partial_target_records": out_path / "partial_target_records.csv",
         }
 
         self.electrochemical_database.to_csv(paths["electrochemical_database"], index=False)
@@ -1590,6 +1891,7 @@ class HarmonizedDatabase:
             self.render_data_dictionary_markdown(), encoding="utf-8"
         )
         self.rejected_records.to_csv(paths["rejected_records"], index=False)
+        self.partial_target_records.to_csv(paths["partial_target_records"], index=False)
         return paths
 
     def export_to_parquet(self, output_dir: str | Path = "data/processed") -> dict[str, Path]:
@@ -1613,6 +1915,7 @@ class HarmonizedDatabase:
             "solution_properties": out_path / "solution_properties.parquet",
             "galvanic_series": out_path / "galvanic_series.parquet",
             "data_dictionary": out_path / "data_dictionary.parquet",
+            "partial_target_records": out_path / "partial_target_records.parquet",
         }
         _sanitize_for_parquet(self.electrochemical_database).to_parquet(
             paths["electrochemical_database"], index=False
@@ -1628,6 +1931,9 @@ class HarmonizedDatabase:
         )
         _sanitize_for_parquet(self.data_dictionary).to_parquet(
             paths["data_dictionary"], index=False
+        )
+        _sanitize_for_parquet(self.partial_target_records).to_parquet(
+            paths["partial_target_records"], index=False
         )
         return paths
 
@@ -1654,6 +1960,7 @@ class HarmonizedDatabase:
         solutions = _load_table("solution_properties", required=True)
         galvanic = _load_table("galvanic_series", required=False)
         dictionary = _load_table("data_dictionary", required=False)
+        partial_records = _load_table("partial_target_records", required=False)
         rejected_path = base_path / "rejected_rows.csv"
         rejected = pd.read_csv(rejected_path, encoding="utf-8-sig") if rejected_path.exists() else pd.DataFrame()
 
@@ -1664,4 +1971,5 @@ class HarmonizedDatabase:
             galvanic_series=galvanic,
             data_dictionary=dictionary,
             rejected_records=rejected,
+            partial_target_records=partial_records,
         )

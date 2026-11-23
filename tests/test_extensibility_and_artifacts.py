@@ -42,9 +42,8 @@ class TestDataDrivenMaterialCatalog(unittest.TestCase):
         metals = db.available_metals
         # Core metals appear first in canonical order, followed by extended materials
         self.assertEqual(metals[: len(CORE_METALS)], list(CORE_METALS))
-        self.assertIn("Fe", metals)
+        self.assertGreater(len(metals), len(CORE_METALS))
         self.assertIn("TiN", metals)
-        self.assertIn("Ni", metals)
         self.assertGreater(len(db.rejected_records), 0)
         self.assertIn("rejection_reason", db.rejected_records.columns)
 

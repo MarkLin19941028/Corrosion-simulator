@@ -201,6 +201,10 @@ def build_processed_artifacts(
         }
 
     counts = database.metal_sample_counts()
+    combined_ml = database.ml_training_dataframe
+    icorr_src = combined_ml["icorr_source"] if "icorr_source" in combined_ml.columns else None
+    n_derived_cr = int((icorr_src == "derived_from_CR").sum()) if icorr_src is not None else 0
+    n_derived_rp = int((icorr_src == "derived_from_Rp").sum()) if icorr_src is not None else 0
     manifest: dict[str, Any] = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
         "built_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -208,6 +212,10 @@ def build_processed_artifacts(
         "filter_to_core_metals": bool(filter_to_core_metals),
         "supplement_missing_core_metals": bool(supplement_missing_core_metals),
         "n_records": int(len(database.electrochemical_database)),
+        "n_complete_pairs": int(len(database.electrochemical_database)),
+        "n_partial_records": int(len(database.partial_target_records)),
+        "n_derived_icorr_cr": n_derived_cr,
+        "n_derived_icorr_rp": n_derived_rp,
         "n_rejected": int(n_rejected),
         "n_solutions": int(len(database.solution_properties)),
         "n_materials": int(len(database.available_metals)),

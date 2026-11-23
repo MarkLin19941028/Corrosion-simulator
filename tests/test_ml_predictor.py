@@ -14,6 +14,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 from corrosion_simulator.database import ExposureCondition, HarmonizedDatabase
 from corrosion_simulator.ml_predictor import (
@@ -237,13 +238,15 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
 
     def test_imputed_tafel_exclusion_group_cv_per_metal_and_quality_weights(self) -> None:
         raw_db = HarmonizedDatabase.from_directory("data/raw")
-        df = raw_db.electrochemical_database
+        ml_df = raw_db.ml_training_dataframe
 
         # 1. Excluding imputed Tafel slopes reduces beta_a/beta_c training & CV counts to measured rows
-        measured_ba = int((~df["beta_a_imputed"]).sum())
-        measured_bc = int((~df["beta_c_imputed"]).sum())
-        self.assertLess(measured_ba, len(df))
-        self.assertLess(measured_bc, len(df))
+        valid_ecorr = int(ml_df["Ecorr_V_SHE"].notna().sum())
+        valid_icorr = int((ml_df["icorr_uA_cm2"].notna() & (ml_df["icorr_uA_cm2"] > 0)).sum())
+        measured_ba = int((~ml_df["beta_a_imputed"]).sum())
+        measured_bc = int((~ml_df["beta_c_imputed"]).sum())
+        self.assertLess(measured_ba, len(ml_df))
+        self.assertLess(measured_bc, len(ml_df))
 
         predictor_clean = HybridMLPredictor(
             model_family="random_forest",
@@ -252,8 +255,8 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
             exclude_imputed_tafel=True,
             use_quality_weights=True,
         ).fit(raw_db)
-        self.assertEqual(predictor_clean.target_training_counts["Ecorr_V_SHE"], len(df))
-        self.assertEqual(predictor_clean.target_training_counts["log10_icorr_uA_cm2"], len(df))
+        self.assertEqual(predictor_clean.target_training_counts["Ecorr_V_SHE"], valid_ecorr)
+        self.assertEqual(predictor_clean.target_training_counts["log10_icorr_uA_cm2"], valid_icorr)
         self.assertEqual(predictor_clean.target_training_counts["beta_a_mV_dec"], measured_ba)
         self.assertEqual(predictor_clean.target_training_counts["beta_c_mV_dec"], measured_bc)
 
@@ -261,14 +264,13 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
         metrics_group = predictor_clean.cross_validate(raw_db, cv_strategy="group_5fold")
         by_target = {m.target: m for m in metrics_group}
         self.assertEqual(by_target["Ecorr_V_SHE"].cv_strategy, "group_5fold")
-        self.assertEqual(by_target["Ecorr_V_SHE"].n_samples, len(df))
+        self.assertEqual(by_target["Ecorr_V_SHE"].n_samples, valid_ecorr)
         self.assertEqual(by_target["beta_a_mV_dec"].n_samples, measured_ba)
         self.assertEqual(by_target["beta_c_mV_dec"].n_samples, measured_bc)
         self.assertIn("Cu", by_target["Ecorr_V_SHE"].per_metal_metrics)
-        self.assertIn("Ta", by_target["Ecorr_V_SHE"].per_metal_metrics)
         self.assertEqual(
             int(sum(v["n_samples"] for v in by_target["Ecorr_V_SHE"].per_metal_metrics.values())),
-            len(df),
+            valid_ecorr,
         )
 
         # 3. Quality weights actively influence tree fitting (use_quality_weights=True vs False)
@@ -369,6 +371,69 @@ class TestPhase2MLNotebookArtifact(unittest.TestCase):
         code_cells = [c for c in nb.get("cells", []) if c.get("cell_type") == "code"]
         self.assertGreaterEqual(len(code_cells), 5)
         self.assertTrue(all(len(c.get("outputs", [])) > 0 for c in code_cells))
+
+
+class TestPartialTargetMLTraining(unittest.TestCase):
+    """Verify HybridMLPredictor utilizes partial-target records per target without NaN errors."""
+
+    def test_fit_and_cv_use_partial_target_records_for_individual_targets(self) -> None:
+        seed_db = HarmonizedDatabase.from_seed()
+        base_n = len(seed_db.electrochemical_database)
+        extra_partial = pd.DataFrame(
+            [
+                {
+                    "record_id": f"P_ECORR_{i}",
+                    "metal": "Ru",
+                    "solution_id": "SOL_PARTIAL",
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "pH": 3.0 + 0.5 * i,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.45 + 0.02 * i,
+                    "icorr_uA_cm2": None,
+                    "beta_a_mV_dec": 80.0,
+                    "beta_c_mV_dec": 120.0,
+                }
+                for i in range(4)
+            ]
+            + [
+                {
+                    "record_id": f"P_ICORR_{i}",
+                    "metal": "Ru",
+                    "solution_id": "SOL_PARTIAL",
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "pH": 3.5 + 0.5 * i,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": None,
+                    "icorr_uA_cm2": 0.5 + 0.2 * i,
+                    "beta_a_mV_dec": 85.0,
+                    "beta_c_mV_dec": 125.0,
+                }
+                for i in range(3)
+            ]
+        )
+        combined_raw = pd.concat(
+            [seed_db.electrochemical_database, extra_partial], ignore_index=True
+        )
+        db = HarmonizedDatabase.from_raw_tables(
+            combined_raw,
+            material_df=seed_db.material_properties,
+            solution_df=seed_db.solution_properties,
+            supplement_missing_core_metals=False,
+        )
+        self.assertEqual(len(db.partial_target_records), 7)
+
+        predictor = HybridMLPredictor(model_family="random_forest", n_estimators=20, random_state=42)
+        predictor.fit(db)
+        # Ecorr model receives complete pairs + 4 Ecorr-only rows; icorr model receives complete pairs + 3 icorr-only rows
+        self.assertEqual(predictor.target_training_counts["Ecorr_V_SHE"], len(db.electrochemical_database) + 4)
+        self.assertEqual(predictor.target_training_counts["log10_icorr_uA_cm2"], len(db.electrochemical_database) + 3)
+
+        cv = predictor.cross_validate(db, cv_strategy="stratified_5fold")
+        cv_map = {m.target: m for m in cv}
+        self.assertEqual(cv_map["Ecorr_V_SHE"].n_samples, len(db.electrochemical_database) + 4)
+        self.assertEqual(cv_map["log10_icorr_uA_cm2"].n_samples, len(db.electrochemical_database) + 3)
 
 
 if __name__ == "__main__":

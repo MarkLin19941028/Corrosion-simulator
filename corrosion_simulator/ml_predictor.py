@@ -827,7 +827,12 @@ class _UncertainTargetModel:
 def _extract_target_vectors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     ecorr = pd.to_numeric(df["Ecorr_V_SHE"], errors="coerce").to_numpy(dtype=float)
     icorr = pd.to_numeric(df["icorr_uA_cm2"], errors="coerce").to_numpy(dtype=float)
-    log_icorr = np.log10(np.maximum(icorr, 1e-12))
+    valid_icorr = np.isfinite(icorr) & (icorr > 0.0)
+    log_icorr = np.where(
+        valid_icorr,
+        np.log10(np.where(valid_icorr, icorr, 1.0)),
+        np.nan,
+    )
     beta_a = pd.to_numeric(df["beta_a_mV_dec"], errors="coerce").to_numpy(dtype=float)
     beta_c = pd.to_numeric(df["beta_c_mV_dec"], errors="coerce").to_numpy(dtype=float)
     return {
@@ -1001,7 +1006,7 @@ class HybridMLPredictor:
         self._is_fitted: bool = False
 
     def fit(self, database: HarmonizedDatabase) -> HybridMLPredictor:
-        df = database.electrochemical_database.reset_index(drop=True)
+        df = database.ml_training_dataframe.reset_index(drop=True)
         if df.empty:
             raise ValueError("Cannot train HybridMLPredictor on an empty database.")
 
@@ -1087,7 +1092,7 @@ class HybridMLPredictor:
         are cross-validated exclusively on experimentally measured (non-imputed) records
         to prevent group-median imputation leakage across folds.
         """
-        df = database.electrochemical_database.reset_index(drop=True)
+        df = database.ml_training_dataframe.reset_index(drop=True)
         if len(df) < 3:
             raise ValueError("At least 3 samples are required for cross-validation.")
 
