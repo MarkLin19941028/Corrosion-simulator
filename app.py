@@ -12,7 +12,15 @@ import math
 import pandas as pd
 import streamlit as st
 
+from corrosion_simulator.build_artifacts import (
+    build_processed_artifacts,
+    check_artifacts_freshness,
+)
 from corrosion_simulator.ml_predictor import MODEL_FAMILY_LABELS
+from corrosion_simulator.paths import (
+    iter_raw_csv_files,
+    resolve_raw_and_processed_dirs,
+)
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     GalvanicViewPayload,
@@ -41,10 +49,49 @@ KINETICS_LABELS = {
 }
 
 
-@st.cache_resource(show_spinner="Loading harmonized electrochemical database and training ML models...")
-def get_controller() -> CorrosionPlatformController:
-    """Load database and fit ML predictor once per Streamlit server process."""
+@st.cache_resource(show_spinner="Loading prebuilt electrochemical database and ML models...")
+def _load_cached_controller() -> CorrosionPlatformController:
+    """Load database and ML predictors once per Streamlit server process."""
     return CorrosionPlatformController.from_default_data()
+
+
+def get_controller() -> CorrosionPlatformController:
+    """Ensure external data/raw changes trigger a visible full-model rebuild before loading controller."""
+    if not st.session_state.get("_controller_verified", False):
+        raw_path, proc_path = resolve_raw_and_processed_dirs()
+        status, _ = check_artifacts_freshness(raw_path, proc_path)
+        if status in ("stale", "missing") and iter_raw_csv_files(raw_path):
+            _load_cached_controller.clear()
+            progress_slot = st.empty()
+            progress_bar = progress_slot.progress(
+                0.0,
+                text="Detected updated CSV data in data/raw/ — preparing full ML model build...",
+            )
+
+            def _on_progress(step: int, total: int, message: str) -> None:
+                fraction = min(max(step / max(total, 1), 0.0), 1.0)
+                progress_bar.progress(fraction, text=message)
+
+            try:
+                summary = build_processed_artifacts(
+                    raw_dir=raw_path,
+                    output_dir=proc_path,
+                    models=["all"],
+                    export_csv=False,
+                    progress_callback=_on_progress,
+                )
+                st.session_state["_rebuild_banner"] = (
+                    f"Updated CSV data loaded: harmonized {summary.n_records} records across "
+                    f"{summary.n_materials} materials and prebuilt all {len(summary.trained_models)} ML models."
+                )
+            except OSError:
+                # Read-only external directory; _load_cached_controller() will fall back to in-memory training
+                pass
+            finally:
+                progress_slot.empty()
+        st.session_state["_controller_verified"] = True
+
+    return _load_cached_controller()
 
 
 def _format_time_s(seconds: float) -> str:
@@ -139,10 +186,31 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
 
     st.sidebar.title("Simulation Parameters")
 
-    if controller.artifact_status == "stale" and controller.artifact_warning:
+    rebuild_banner = st.session_state.get("_rebuild_banner")
+    if rebuild_banner:
+        st.sidebar.success(rebuild_banner)
+
+    if controller.artifact_status == "seed" and controller.artifact_warning:
+        st.sidebar.error(controller.artifact_warning)
+    elif controller.artifact_status in ("stale", "live_fallback") and controller.artifact_warning:
         st.sidebar.warning(controller.artifact_warning)
-    elif controller.artifact_status == "live_fallback" and controller.artifact_warning:
+    elif controller.artifact_status == "rebuilt" and controller.artifact_warning and not rebuild_banner:
+        st.sidebar.success(controller.artifact_warning)
+    elif controller.artifact_warning:
         st.sidebar.info(controller.artifact_warning)
+
+    with st.sidebar.expander("External Data & Model Cache", expanded=False):
+        n_records = len(controller.database.electrochemical_database)
+        st.caption(
+            f"**Status:** `{controller.artifact_status}`  \n"
+            f"**Records:** `{n_records}` across `{len(all_metals)}` materials  \n"
+            f"**Raw CSV Dir:** `{controller.raw_dir or 'N/A'}`"
+        )
+        if st.button("🔄 Reload External Data", width="stretch"):
+            _load_cached_controller.clear()
+            st.session_state.pop("_controller_verified", None)
+            st.session_state.pop("_rebuild_banner", None)
+            st.rerun()
 
     st.sidebar.subheader("1. Metal / Material Selection")
     scope_options: list[tuple[str, str, str]] = [

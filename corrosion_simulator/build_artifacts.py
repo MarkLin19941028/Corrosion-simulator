@@ -15,6 +15,7 @@ Outputs to ``data/processed/`` by default:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
@@ -25,12 +26,18 @@ from typing import Any, Final, Literal, Sequence
 from corrosion_simulator.database import CORE_METALS, HarmonizedDatabase
 from corrosion_simulator.ml_predictor import (
     GP_MAX_TRAINING_SAMPLES,
+    MODEL_FAMILY_LABELS,
     SUPPORTED_MODEL_FAMILIES,
     HybridMLPredictor,
     ModelFamily,
 )
+from corrosion_simulator.paths import (
+    iter_raw_csv_files,
+    resolve_raw_and_processed_dirs,
+)
 
 ArtifactFreshnessStatus = Literal["fresh", "stale", "missing"]
+ProgressCallback = Callable[[int, int, str], None]
 MANIFEST_SCHEMA_VERSION: Final[int] = 1
 DEFAULT_PREBUILT_MODELS: Final[tuple[ModelFamily, ...]] = (
     "random_forest",
@@ -55,9 +62,13 @@ class ArtifactBuildSummary:
     manifest: dict[str, Any]
 
 
-def load_manifest(processed_dir: str | Path = "data/processed") -> dict[str, Any] | None:
+def load_manifest(processed_dir: str | Path | None = None) -> dict[str, Any] | None:
     """Read ``manifest.json`` from ``processed_dir``, or return ``None`` if absent/invalid."""
-    manifest_path = Path(processed_dir) / "manifest.json"
+    if processed_dir is None:
+        _, proc_path = resolve_raw_and_processed_dirs()
+    else:
+        proc_path = Path(processed_dir)
+    manifest_path = proc_path / "manifest.json"
     if not manifest_path.exists():
         return None
     try:
@@ -68,27 +79,29 @@ def load_manifest(processed_dir: str | Path = "data/processed") -> dict[str, Any
 
 
 def check_artifacts_freshness(
-    raw_dir: str | Path = "data/raw",
-    processed_dir: str | Path = "data/processed",
+    raw_dir: str | Path | None = None,
+    processed_dir: str | Path | None = None,
 ) -> tuple[ArtifactFreshnessStatus, str | None]:
     """Check whether prebuilt artifacts exist and match the current ``raw_dir`` fingerprint.
 
     Returns ``(status, message)`` where ``status`` is one of:
-    - ``"fresh"``: prebuilt Parquet tables and manifest exist and match ``raw_dir``.
+    - ``"fresh"``: prebuilt Parquet tables and manifest exist and match ``raw_dir`` (or no raw CSVs exist).
     - ``"stale"``: prebuilt artifacts exist, but ``raw_dir`` has changed since build.
     - ``"missing"``: no complete prebuilt artifact bundle exists.
     """
-    proc_path = Path(processed_dir)
+    raw_path, proc_path = resolve_raw_and_processed_dirs(
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+    )
     manifest = load_manifest(proc_path)
     required_parquet = proc_path / "electrochemical_database.parquet"
     if manifest is None or not required_parquet.exists():
         return (
             "missing",
-            "Prebuilt artifacts not found in data/processed/. Run `.venv/bin/python -m corrosion_simulator.build_artifacts` for faster startup.",
+            f"Prebuilt artifacts not found in '{proc_path}'.",
         )
 
-    raw_path = Path(raw_dir)
-    if not raw_path.exists() or not any(raw_path.rglob("*.csv")):
+    if not iter_raw_csv_files(raw_path):
         return ("fresh", None)
 
     current_fp = HarmonizedDatabase.compute_raw_directory_fingerprint(raw_path)
@@ -98,8 +111,7 @@ def check_artifacts_freshness(
 
     return (
         "stale",
-        "Raw CSV files in `data/raw/` have changed since the last build. "
-        "Running on cached artifacts — execute `.venv/bin/python -m corrosion_simulator.build_artifacts` to refresh.",
+        f"Raw CSV files in '{raw_path}' have changed since the last build.",
     )
 
 
@@ -124,8 +136,8 @@ def _parse_model_families(models: Sequence[str] | None) -> list[ModelFamily]:
 
 
 def build_processed_artifacts(
-    raw_dir: str | Path = "data/raw",
-    output_dir: str | Path = "data/processed",
+    raw_dir: str | Path | None = None,
+    output_dir: str | Path | None = None,
     *,
     models: Sequence[str] | None = None,
     gp_max_samples: int = GP_MAX_TRAINING_SAMPLES,
@@ -134,11 +146,19 @@ def build_processed_artifacts(
     supplement_missing_core_metals: bool = False,
     strict: bool = False,
     random_state: int = 42,
+    progress_callback: ProgressCallback | None = None,
 ) -> ArtifactBuildSummary:
     """Execute the full offline ETL + ML model build pipeline and persist to ``output_dir``."""
-    raw_path = Path(raw_dir)
-    out_path = Path(output_dir)
+    raw_path, out_path = resolve_raw_and_processed_dirs(
+        raw_dir=raw_dir,
+        processed_dir=output_dir,
+    )
     out_path.mkdir(parents=True, exist_ok=True)
+
+    selected_families = _parse_model_families(models)
+    total_steps = len(selected_families) + 1
+    if progress_callback is not None:
+        progress_callback(0, total_steps, f"Harmonizing CSV tables from {raw_path}...")
 
     fingerprint = HarmonizedDatabase.compute_raw_directory_fingerprint(raw_path)
     database = HarmonizedDatabase.from_directory(
@@ -171,13 +191,19 @@ def build_processed_artifacts(
             f"Materials lacking Faraday physical properties (density/equivalent weight): {', '.join(missing_faraday)}."
         )
 
-    selected_families = _parse_model_families(models)
     models_dir = out_path / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     trained_models: list[str] = []
     model_artifacts: dict[str, dict[str, Any]] = {}
 
-    for family in selected_families:
+    for idx, family in enumerate(selected_families, start=1):
+        if progress_callback is not None:
+            label = MODEL_FAMILY_LABELS.get(family, family)
+            progress_callback(
+                idx,
+                total_steps,
+                f"Training ML model ({idx}/{len(selected_families)}): {label}",
+            )
         predictor = HybridMLPredictor(
             model_family=family,
             random_state=random_state,
@@ -185,7 +211,9 @@ def build_processed_artifacts(
         )
         predictor.fit(database)
         model_path = models_dir / f"{family}.joblib"
-        predictor.save(model_path)
+        tmp_model_path = models_dir / f".tmp_{family}.joblib"
+        predictor.save(tmp_model_path)
+        tmp_model_path.replace(model_path)
         trained_models.append(family)
         gp_capped = any(
             getattr(m, "gp_subsampled", False) for m in predictor.models.values()
@@ -229,7 +257,14 @@ def build_processed_artifacts(
         "warnings": build_warnings,
     }
     manifest_path = out_path / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_manifest_path = out_path / ".tmp_manifest.json"
+    tmp_manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    tmp_manifest_path.replace(manifest_path)
+
+    if progress_callback is not None:
+        progress_callback(total_steps, total_steps, "Artifact build complete.")
 
     summary = ArtifactBuildSummary(
         output_dir=out_path,
@@ -255,11 +290,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Build harmonized Parquet tables and prebuilt ML models from data/raw/."
     )
-    parser.add_argument("--raw-dir", default="data/raw", help="Directory containing raw CSV files.")
+    parser.add_argument(
+        "--raw-dir",
+        default=None,
+        help="Directory containing raw CSV files (defaults to external data/raw).",
+    )
     parser.add_argument(
         "--out-dir",
-        default="data/processed",
-        help="Destination directory for Parquet tables, models, and manifest.json.",
+        default=None,
+        help="Destination directory for Parquet tables, models, and manifest.json (defaults to external data/processed).",
     )
     parser.add_argument(
         "--models",

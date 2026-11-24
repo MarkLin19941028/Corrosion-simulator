@@ -276,7 +276,9 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertIsInstance(payload.comparative_kinetics_figure, go.Figure)
 
     def test_galvanic_database_source_handles_mismatched_solution_ids_without_error(self) -> None:
-        # Use the real raw dataset where independent lookups for Cu/Co or Cu/Ru can return different solution_ids
+        import pandas as pd
+
+        # 1. Verify the active external dataset resolves Cu/Co and Cu/Ru cleanly without error
         raw_controller = CorrosionPlatformController.from_default_data()
         for pair in [("Cu", "Co"), ("Cu", "Ru")]:
             req = SimulationRequest(
@@ -296,9 +298,60 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
             self.assertEqual({payload.active_metal, payload.noble_metal}, set(pair))
             self.assertGreaterEqual(payload.acceleration_factor, 1.0)
             self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
-            if pair == ("Cu", "Ru"):
-                self.assertEqual(payload.confidence_tier, "Low")
-                self.assertTrue(any("different experimental conditions" in w for w in payload.warnings))
+
+        # 2. Deterministically verify mismatched solution_ids / temperatures degrade to Low confidence with warning
+        disjoint_db = HarmonizedDatabase.from_raw_tables(
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": "DISJ_CU",
+                        "metal": "Cu",
+                        "solution_id": "SOL_ONLY_CU",
+                        "pH": 3.0,
+                        "temperature_C": 25.0,
+                        "oxidizer_type": "H2O2",
+                        "oxidizer_concentration": 1.0,
+                        "Ecorr_V_SHE": 0.22,
+                        "icorr_uA_cm2": 4.5,
+                        "beta_a_mV_dec": 60.0,
+                        "beta_c_mV_dec": 120.0,
+                    },
+                    {
+                        "record_id": "DISJ_RU",
+                        "metal": "Ru",
+                        "solution_id": "SOL_ONLY_RU",
+                        "pH": 3.0,
+                        "temperature_C": 45.0,
+                        "oxidizer_type": "H2O2",
+                        "oxidizer_concentration": 1.0,
+                        "Ecorr_V_SHE": 0.52,
+                        "icorr_uA_cm2": 0.8,
+                        "beta_a_mV_dec": 65.0,
+                        "beta_c_mV_dec": 115.0,
+                    },
+                ]
+            )
+        )
+        disjoint_ctrl = CorrosionPlatformController(disjoint_db)
+        disjoint_payload = disjoint_ctrl.run_galvanic_analysis(
+            SimulationRequest(
+                primary_metal="Cu",
+                secondary_metal="Ru",
+                cathode_to_anode_area_ratio=1.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                pH=3.0,
+                temperature_C=25.0,
+                immersion_time_s=300.0,
+                d_crit_nm=1.0,
+                kinetics_model="auto",
+                parameter_source="database",
+            )
+        )
+        self.assertEqual(disjoint_payload.confidence_tier, "Low")
+        self.assertTrue(
+            any("different experimental conditions" in w for w in disjoint_payload.warnings)
+        )
 
     def test_live_ml_model_family_switching_and_caching(self) -> None:
         options = self.controller.available_options()

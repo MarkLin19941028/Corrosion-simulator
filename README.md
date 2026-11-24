@@ -18,8 +18,12 @@
   - [步驟 3：檢視右側四個分析分頁（指標、表格、圖表與名詞說明）](#步驟-3檢視右側四個分析分頁指標表格圖表與名詞說明)
     - [補充說明：Corrosion Depth 與 Thickness Loss Risk 的計算與門檻意義](#補充說明corrosion-depth-與-thickness-loss-risk-的計算與門檻意義)
   - [步驟 4：匯入自己的實驗資料（選用）](#步驟-4匯入自己的實驗資料選用)
-- [五、常見問題與排錯指南](#五常見問題與排錯指南)
-- [六、示範 Notebook 與進階文件](#六示範-notebook-與進階文件)
+- [五、Windows 獨立執行檔（.exe）打包與外部資料更新指南](#五windows-獨立執行檔exe打包與外部資料更新指南)
+  - [1. 打包流程與關鍵參數說明](#1-打包流程與關鍵參數說明)
+  - [2. 發佈目錄結構與部署注意事項](#2-發佈目錄結構與部署注意事項)
+  - [3. 外部訓練資料（CSV）與預建模型（processed）更新注意事項](#3-外部訓練資料csv與預建模型processed更新注意事項)
+- [六、常見問題與排錯指南](#六常見問題與排錯指南)
+- [七、示範 Notebook 與進階文件](#七示範-notebook-與進階文件)
 
 ---
 
@@ -234,15 +238,64 @@
    - **陰影帶意義**：圖中的半透明色帶為 **90% Monte Carlo 信賴區間（p05–p95）**，顯示電化學參數預測不確定性對厚度損耗與風險評估的影響範圍。
 
 ### 步驟 4：匯入自己的實驗資料（選用）
-將新的電化學、材料或溶液 CSV 檔案放進 `data/raw/`（可依金屬分資料夾存放），再執行一次 `build_artifacts` 指令重建 `data/processed/`，重新整理網頁即可載入新資料與新模型。
+將新的電化學、材料或溶液 CSV 檔案放進 `data/raw/`（可依金屬分資料夾存放），接著**重新啟動應用程式**（或展開左側邊欄 `External Data & Model Cache` 點擊 **`🔄 Reload External Data`**），系統會自動偵測檔案指紋變更並重訓全部 6 種 ML 模型；若在開發環境想預先於命令列離線建置，亦可手動執行 `build_artifacts --models all`。
 
 ---
 
-## 五、常見問題與排錯指南
+## 五、Windows 獨立執行檔（.exe）打包與外部資料更新指南
+
+本專案提供 [main.py](main.py) 入口程式與 [build_exe.bat](build_exe.bat) 一鍵打包腳本，支援以 PyInstaller（`-D` 目錄模式）封裝為免安裝 Python 的 Windows 獨立應用程式，並將 `data/` 獨立於執行檔外部以支援後續即時更新資料與模型。
+
+### 1. 打包流程與關鍵參數說明
+
+- **跨平台限制**：PyInstaller **不支援跨系統交叉編譯**。請務必在 **64 位元 Windows（Win 10 / 11）** 環境下執行打包（在 macOS 僅能產出 macOS 執行檔，無法產出 `.exe`）。
+- **一鍵自動打包（推薦）**：
+  ```bat
+  .venv\Scripts\pip.exe install -r requirements.txt pyinstaller
+  build_exe.bat
+  ```
+  腳本會依序執行：(1) 預建最新 Parquet 與全部 6 個 `.joblib` 模型 → (2) 以 PyInstaller 封裝程式與相依套件 → (3) 自動將外部 `data\raw` 與 `data\processed` 複製到 `dist\CorrosionSimulator\data\`（與 `.exe` 同層）。
+- **關鍵打包與入口設計要點**：
+  - **外部資料不可打入 `_internal`**：切勿在 PyInstaller 加上 `--add-data "data;data"`，否則資料會被藏進 `_internal\`（`sys._MEIPASS`），使用者無法在 `.exe` 同層直覺更新。
+  - **必收動態相依與 Metadata**：除 `streamlit`、`sklearn`、`matplotlib` 外，必須包含 `--collect-all plotly`（內含 `plotly_white` 樣板 JSON）、`--collect-all pyarrow`（Parquet Cython 引擎）、`--collect-submodules scipy`、`--collect-submodules joblib` 與 `--copy-metadata`（詳見 [build_exe.bat](build_exe.bat)）。
+  - **請維持主控台（Console）模式**：請勿加上 `-w` / `--noconsole`——Streamlit 為常駐本地伺服器，保留黑色命令視窗可顯示載入狀態，且關閉視窗即可乾淨釋放 `8501` 埠與背景行程。
+  - **企業網路與多進程防護**：[main.py](main.py) 已內建 `multiprocessing.freeze_support()`（防止 Windows 下 `joblib` 子進程無限重啟 `.exe`）、`NO_PROXY=localhost,127.0.0.1,::1`（避免公司 Proxy 攔截本機連線）、`--global.developmentMode=false`，以及 TCP Socket 就緒輪詢（待伺服器真正監聽後才開啟瀏覽器，避免防毒軟體冷啟動掃描超過 3 秒導致連線失敗）。
+
+### 2. 發佈目錄結構與部署注意事項
+
+打包完成後，請將整個 `dist\CorrosionSimulator\` 資料夾壓縮發佈，結構如下：
+
+```text
+CorrosionSimulator\
+├── CorrosionSimulator.exe        # 主程式（雙擊啟動，自動開啟 http://127.0.0.1:8501）
+├── _internal\                    # PyInstaller 內部執行環境 (sys._MEIPASS)，請勿修改或放入 CSV
+└── data\                         # 外部資料目錄（必須與 .exe 位於同一層）
+    ├── raw\                      # 原始訓練 CSV（ml_training_dataset.csv、material_properties.csv 等）
+    └── processed\                # 自動維護之 Parquet 資料表、manifest.json 指紋與 models\*.joblib
+```
+
+- **避免路徑過長（Windows `MAX_PATH` 限制）**：`_internal\` 內的套件層級較深，請提醒使用者解壓縮至較短的路徑（如 `D:\CorrosionSimulator\`），避免放在過深的中文或 OneDrive 巢狀目錄導致 DLL 載入失敗。
+- **確保資料夾可寫入**：請勿放置於需管理員權限的受保護目錄（如 `C:\Program Files\`），否則更新 CSV 後無法將新模型寫入 `data\processed\` 快取（系統雖會自動降級為記憶體內即時訓練而不崩潰，但每次重啟皆需重新訓練）。
+
+### 3. 外部訓練資料（CSV）與預建模型（processed）更新注意事項
+
+程式啟動（或點擊側邊欄 **`🔄 Reload External Data`**）時，會自動比對外部 `data/raw/` 的 SHA-256 指紋與 `data/processed/manifest.json`，依下列規則運作：
+
+| 更新情境 | 操作方式 | 系統啟動行為 | 重要注意事項 |
+| :--- | :--- | :--- | :--- |
+| **1. 日常未修改資料** | 直接雙擊 `.exe` | 指紋相符（`fresh`），直接秒讀 `data/processed/` 內的 Parquet 與 `.joblib` 模型（啟動 `< 0.5 秒`）。 | 預設僅先載入 `random_forest`，切換其他模型時才從硬碟讀取對應 `.joblib`，節省記憶體。 |
+| **2. 新增／修改／替換 `data/raw/` 內的 CSV** | 更新 `data/raw/` 下的 CSV 後，重啟 `.exe`（或按側邊欄 Reload） | 偵測到指紋變更（`stale`）或無快取（`missing`），網頁顯示即時進度條，**一次重訓並儲存全部 6 種 ML 模型**至 `data/processed/`。 | - 全量訓練（含 `gaussian_process` 與 `rf_gp_ensemble`）約需 **1.5～4 分鐘**，請待進度條完成勿強關視窗。<br>- `manifest.json` 採最後原子寫入；若中途關閉，下次啟動會自動安全重跑。<br>- 若新增合金／化合物，請同步於 `material_properties.csv` 補齊密度與當量重。 |
+| **3. 單獨替換 `data/processed/models/*.joblib`** | `data/raw/` 不變，僅替換調校後的 `.joblib` 後重啟 `.exe` | 因 `data/raw/` 指紋未變，直接讀取並使用新放入的 `.joblib` 模型，不觸發重訓。 | - **版本相容性**：請使用**相同 Windows 架構與相容 Python / `scikit-learn` 版本**產出的 `.joblib`（若跨系統如 macOS 產出導致二進位不相容，系統會自動捕獲並以當前資料庫重訓修復）。<br>- **若有新增金屬或藥液種類**，不可只單換 `.joblib`，須連同 `processed/` 下的 `.parquet` 與 `manifest.json` 整包更新。 |
+| **4. 跨電腦整包發佈新版 `data/processed/`** | 在他機預建好整包 `processed/` 複製至目標機 | 載入新版資料表與全部預建模型。 | **防覆寫關鍵**：務必**「連同對應的新版 `data/raw/` 一起複製覆蓋」**，或**「將目標機的 `data/raw/` 清空（僅保留 `data/processed/`）」**！若目標機仍留著**舊版 `data/raw/`**，啟動時會因指紋不符而誤拿舊 `raw/` 重訓並覆蓋掉剛放入的新 `processed/`。 |
+
+---
+
+## 六、常見問題與排錯指南
 
 | 常見現象 / 錯誤訊息 | 原因說明 | 解決方法 |
 | :--- | :--- | :--- |
-| 左側邊欄顯示 `Raw CSV files in data/raw/ have changed...` 或 `Prebuilt artifacts not found` | `data/raw/` 檔案已變動但尚未重建快取，或 `data/processed/` 缺少預建檔。 | 執行 `build_artifacts` 指令重新建置預建資料表與模型，完成後重新整理瀏覽器。 |
+| 材料選單全部標示 `(n=..., low data)`，或側邊欄顯示紅字 `No CSV training files were found...` | 外部 `data/raw/` 與 `data/processed/` 皆不存在或無檔案（例如打包後漏複製外部 `data/`），系統已退回內建 8 金屬種子資料。 | 確認 `data/` 資料夾位於 `.exe` **同層目錄**（即 `CorrosionSimulator\data\raw\*.csv`，而非 `_internal\` 內），放入 CSV 後重啟或點擊 **`🔄 Reload External Data`**。 |
+| 更新 `data/raw/` CSV 後首次啟動等待約 2–3 分鐘 | 系統偵測到原始 CSV 變動，正在自動重建資料庫並預訓練全部 6 種 ML 模型（其中高斯過程模型計算量較大）。 | 等待畫面進度條跑完即可；完成後會寫入 `data/processed/` 快取，後續未再改動 CSV 時啟動即恢復秒開。 |
 | Windows PowerShell 執行 `Activate.ps1` 出現 `running scripts is disabled` | Windows 預設禁止執行未簽署的 PowerShell 腳本。 | **最簡單做法**：不需啟用虛擬環境，直接使用本文件表格中的 `.venv\Scripts\python.exe` 與 `.venv\Scripts\streamlit.exe` 即可。<br>若仍想啟用，請先執行：`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`。 |
 | 啟動時出現 `TypeError: ... got an unexpected keyword argument 'width'` | 安裝的 `streamlit` 版本低於 `1.50.0`。 | 升級套件：`pip install --upgrade -r requirements.txt`（確認 `streamlit >= 1.50.0`）。 |
 | 報錯 `ImportError: Unable to find a usable engine` 或 Parquet 讀取失敗 | 缺少 `pyarrow` 套件。 | 執行 `pip install "pyarrow>=16.0.0"` 或重新安裝 `requirements.txt`。 |
@@ -254,7 +307,7 @@
 
 ---
 
-## 六、示範 Notebook 與進階文件
+## 七、示範 Notebook 與進階文件
 
 - **五份方法論示範 Notebook（`notebooks/`）**：
   1. `01_data_exploration_and_cleaning.ipynb` — 原始資料清理、單位／參考電極標準化與伽凡尼序列建立。

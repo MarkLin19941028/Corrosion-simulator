@@ -74,6 +74,15 @@ from corrosion_simulator.physics import (
     wagner_traud_cathodic_current,
     wagner_traud_net_current,
 )
+from corrosion_simulator.paths import (
+    DATA_DIR_ENV_VAR,
+    get_bundle_dir,
+    get_executable_dir,
+    get_external_data_dir,
+    iter_raw_csv_files,
+    is_frozen,
+    resolve_raw_and_processed_dirs,
+)
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     GalvanicViewPayload,
@@ -104,6 +113,7 @@ from corrosion_simulator.reporting import (
 
 __all__ = [
     "CORE_METALS",
+    "DATA_DIR_ENV_VAR",
     "DEFAULT_CRITICAL_THICKNESS_NM",
     "DEFAULT_DISSOLUTION_VALENCE",
     "DEFAULT_PASSIVATION_LIMIT_NM",
@@ -167,6 +177,11 @@ __all__ = [
     "export_report_svg",
     "generate_all_report_exports",
     "generate_polarization_curve",
+    "get_bundle_dir",
+    "get_executable_dir",
+    "get_external_data_dir",
+    "is_frozen",
+    "iter_raw_csv_files",
     "normalize_current_density_to_uA_cm2",
     "normalize_tafel_slope_to_mV_dec",
     "plot_galvanic_tafel_overlay",
@@ -176,6 +191,7 @@ __all__ = [
     "propagate_galvanic_uncertainty_monte_carlo",
     "propagate_kinetics_uncertainty_monte_carlo",
     "propagate_uncertainty_monte_carlo",
+    "resolve_raw_and_processed_dirs",
     "screen_galvanic_driving_force",
     "screen_galvanic_pair_from_database",
     "select_kinetic_model_from_pourbaix",

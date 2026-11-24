@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -45,6 +46,10 @@ from corrosion_simulator.ml_predictor import (
     MonteCarloPropagationResult,
     propagate_uncertainty_monte_carlo,
 )
+from corrosion_simulator.paths import (
+    iter_raw_csv_files,
+    resolve_raw_and_processed_dirs,
+)
 from corrosion_simulator.physics import (
     FaradayCorrosionResult,
     GalvanicDrivingForceResult,
@@ -58,7 +63,7 @@ from corrosion_simulator.physics import (
 
 ParameterSource = Literal["database", "ml", "manual"]
 KineticsSelection = Literal["auto", "linear", "passivation", "power_law"]
-ArtifactStatus = Literal["fresh", "stale", "live_fallback", "live", "seed"]
+ArtifactStatus = Literal["fresh", "rebuilt", "stale", "live_fallback", "live", "seed"]
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 _CONFIDENCE_BY_RANK = {0: "Low", 1: "Medium", 2: "High"}
@@ -809,11 +814,13 @@ class CorrosionPlatformController:
         database: HarmonizedDatabase,
         predictor: HybridMLPredictor | None = None,
         *,
+        raw_dir: str | Path | None = None,
         artifact_dir: str | Path | None = None,
         artifact_status: ArtifactStatus = "live",
         artifact_warning: str | None = None,
     ) -> None:
         self.database = database
+        self.raw_dir: Path | None = Path(raw_dir) if raw_dir is not None else None
         self.artifact_dir: Path | None = Path(artifact_dir) if artifact_dir is not None else None
         self.artifact_status: ArtifactStatus = artifact_status
         self.artifact_warning: str | None = artifact_warning
@@ -826,12 +833,46 @@ class CorrosionPlatformController:
         }
 
     def _load_or_fit_predictor(self, model_family: ModelFamily) -> HybridMLPredictor:
+        sample_metal = (
+            self.database.available_metals[0]
+            if self.database.available_metals
+            else CORE_METALS[0]
+        )
         if self.artifact_dir is not None:
             prebuilt_path = self.artifact_dir / "models" / f"{model_family}.joblib"
             if prebuilt_path.exists():
-                return HybridMLPredictor.load(prebuilt_path)
+                try:
+                    loaded = HybridMLPredictor.load(prebuilt_path)
+                    if loaded.model_family != model_family:
+                        raise ValueError(
+                            f"Model family mismatch in {prebuilt_path.name}: expected {model_family!r}, got {loaded.model_family!r}"
+                        )
+                    # Smoke-test prediction to catch cross-OS / scikit-learn pickle incompatibilities early
+                    loaded.predict(MLFeatureQuery(metal=sample_metal))
+                    return loaded
+                except Exception as exc:
+                    heal_note = (
+                        f"Prebuilt model '{prebuilt_path.name}' could not be loaded ({exc}); "
+                        "automatically retrained on the current database."
+                    )
+                    self.artifact_warning = (
+                        f"{self.artifact_warning} {heal_note}".strip()
+                        if self.artifact_warning
+                        else heal_note
+                    )
+
         predictor = HybridMLPredictor(model_family=model_family, random_state=42)
         predictor.fit(self.database)
+        if self.artifact_dir is not None:
+            try:
+                models_dir = self.artifact_dir / "models"
+                models_dir.mkdir(parents=True, exist_ok=True)
+                tmp_path = models_dir / f".tmp_{model_family}.joblib"
+                target_path = models_dir / f"{model_family}.joblib"
+                predictor.save(tmp_path)
+                tmp_path.replace(target_path)
+            except OSError:
+                pass
         return predictor
 
     def get_predictor(self, model_family: ModelFamily | None = None) -> HybridMLPredictor:
@@ -851,45 +892,100 @@ class CorrosionPlatformController:
     @classmethod
     def from_default_data(
         cls,
-        raw_dir: str | Path = "data/raw",
+        raw_dir: str | Path | None = None,
         *,
-        processed_dir: str | Path = "data/processed",
+        processed_dir: str | Path | None = None,
+        data_dir: str | Path | None = None,
         model_family: ModelFamily = "random_forest",
+        auto_rebuild: bool = True,
+        rebuild_models: Sequence[str] = ("all",),
+        progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> CorrosionPlatformController:
-        """Load prebuilt artifacts when available (fast path), else ingest ``raw_dir`` or seed data."""
-        from corrosion_simulator.build_artifacts import check_artifacts_freshness
+        """Load prebuilt artifacts when fresh, auto-rebuild all models when raw CSVs change, or fall back cleanly."""
+        from corrosion_simulator.build_artifacts import (
+            build_processed_artifacts,
+            check_artifacts_freshness,
+        )
 
-        raw_path = Path(raw_dir)
-        proc_path = Path(processed_dir)
+        raw_path, proc_path = resolve_raw_and_processed_dirs(
+            data_dir,
+            raw_dir=raw_dir,
+            processed_dir=processed_dir,
+        )
+        has_raw_csvs = bool(iter_raw_csv_files(raw_path))
         status, warning_msg = check_artifacts_freshness(raw_path, proc_path)
 
-        if status in ("fresh", "stale"):
-            database = HarmonizedDatabase.from_processed_directory(proc_path)
-            ctrl = cls(
-                database=database,
-                predictor=None,
-                artifact_dir=proc_path,
-                artifact_status=status,
-                artifact_warning=warning_msg,
-            )
-            if model_family != ctrl.predictor.model_family:
-                ctrl.predictor = ctrl.get_predictor(model_family)
-            return ctrl
+        if status == "fresh" or (status == "stale" and not auto_rebuild):
+            try:
+                database = HarmonizedDatabase.from_processed_directory(proc_path)
+                ctrl = cls(
+                    database=database,
+                    predictor=None,
+                    raw_dir=raw_path,
+                    artifact_dir=proc_path,
+                    artifact_status=status,
+                    artifact_warning=warning_msg,
+                )
+                if model_family != ctrl.predictor.model_family:
+                    ctrl.predictor = ctrl.get_predictor(model_family)
+                return ctrl
+            except Exception as exc:
+                if not has_raw_csvs:
+                    raise
+                warning_msg = f"Failed to read cached artifacts in '{proc_path}' ({exc}); rebuilding from '{raw_path}'."
 
-        # Fallback: build live from raw_dir (or seed if raw_dir has no CSVs)
-        if raw_path.exists() and any(raw_path.rglob("*.csv")):
+        # Raw CSVs exist and artifacts are missing/stale -> rebuild full artifact & model suite when auto_rebuild=True
+        if has_raw_csvs and auto_rebuild:
+            try:
+                summary = build_processed_artifacts(
+                    raw_dir=raw_path,
+                    output_dir=proc_path,
+                    models=rebuild_models,
+                    export_csv=False,
+                    progress_callback=progress_callback,
+                )
+                database = HarmonizedDatabase.from_processed_directory(proc_path)
+                rebuilt_msg = (
+                    f"Detected updated CSV data in '{raw_path}' — rebuilt database "
+                    f"({summary.n_records} records across {summary.n_materials} materials) "
+                    f"and trained {len(summary.trained_models)} ML model(s)."
+                )
+                ctrl = cls(
+                    database=database,
+                    predictor=None,
+                    raw_dir=raw_path,
+                    artifact_dir=proc_path,
+                    artifact_status="rebuilt",
+                    artifact_warning=rebuilt_msg,
+                )
+                if model_family != ctrl.predictor.model_family:
+                    ctrl.predictor = ctrl.get_predictor(model_family)
+                return ctrl
+            except OSError as exc:
+                warning_msg = (
+                    f"Could not write prebuilt cache to '{proc_path}' ({exc}); "
+                    f"loaded '{raw_path}' in memory instead."
+                )
+
+        # Fallback: build live in memory from raw_path, or from built-in seed data if no external CSVs exist
+        if has_raw_csvs:
             database = HarmonizedDatabase.from_directory(raw_path)
-            live_status = "live_fallback"
+            live_status: ArtifactStatus = "live_fallback"
             live_warning = warning_msg
         else:
             database = HarmonizedDatabase.from_seed()
             live_status = "seed"
-            live_warning = None
+            live_warning = (
+                f"No CSV training files were found in '{raw_path}' (and no prebuilt cache in '{proc_path}'). "
+                "Running on the built-in 8-metal seed dataset (n < 10 -> low data). "
+                f"Place your CSV files in '{raw_path}' and restart or click Reload Data."
+            )
         predictor = HybridMLPredictor(model_family=model_family, random_state=42)
         predictor.fit(database)
         return cls(
             database=database,
             predictor=predictor,
+            raw_dir=raw_path,
             artifact_dir=None,
             artifact_status=live_status,
             artifact_warning=live_warning,

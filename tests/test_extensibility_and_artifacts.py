@@ -361,5 +361,165 @@ class TestOfflineBuildPipelineAndStaleDetection(unittest.TestCase):
                 )
 
 
+class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
+    def test_frozen_mode_resolves_external_data_next_to_executable_not_meipass(self) -> None:
+        import os
+        import sys
+        from unittest.mock import patch
+
+        from corrosion_simulator.paths import (
+            DATA_DIR_ENV_VAR,
+            get_bundle_dir,
+            get_executable_dir,
+            get_external_data_dir,
+            iter_raw_csv_files,
+            resolve_raw_and_processed_dirs,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dist_app = Path(tmpdir).resolve() / "dist" / "CorrosionSimulator"
+            internal_dir = dist_app / "_internal"
+            exe_path = dist_app / "CorrosionSimulator.exe"
+            internal_dir.mkdir(parents=True)
+            exe_path.write_text("", encoding="utf-8")
+
+            env_clean = {k: v for k, v in os.environ.items() if k != DATA_DIR_ENV_VAR}
+            with (
+                patch.dict(os.environ, env_clean, clear=True),
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "_MEIPASS", str(internal_dir), create=True),
+                patch.object(sys, "executable", str(exe_path)),
+            ):
+                self.assertEqual(get_bundle_dir(), internal_dir)
+                self.assertEqual(get_executable_dir(), dist_app)
+                self.assertEqual(get_external_data_dir(), dist_app / "data")
+                raw_d, proc_d = resolve_raw_and_processed_dirs()
+                self.assertEqual(raw_d, dist_app / "data" / "raw")
+                self.assertEqual(proc_d, dist_app / "data" / "processed")
+
+            # Top-level data/*.csv fallback ignores processed/ artifacts
+            flat_data = dist_app / "flat_data"
+            (flat_data / "processed").mkdir(parents=True)
+            (flat_data / "top_level.csv").write_text("metal,Ecorr_V_SHE,icorr_uA_cm2\nCu,0.2,3.0\n", encoding="utf-8")
+            (flat_data / "processed" / "electrochemical_database.csv").write_text("ignored\n", encoding="utf-8")
+            (flat_data / "rejected_rows.csv").write_text("ignored\n", encoding="utf-8")
+            raw_flat, proc_flat = resolve_raw_and_processed_dirs(flat_data)
+            self.assertEqual(raw_flat, flat_data.resolve())
+            self.assertEqual(proc_flat, flat_data.resolve() / "processed")
+            discovered = iter_raw_csv_files(raw_flat)
+            self.assertEqual([p.name for p in discovered], ["top_level.csv"])
+
+    def test_raw_csv_update_triggers_full_all_models_rebuild_and_processed_model_hot_swap(self) -> None:
+        from corrosion_simulator.ml_predictor import SUPPORTED_MODEL_FAMILIES
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            raw_dir = data_dir / "raw"
+            proc_dir = data_dir / "processed"
+            raw_dir.mkdir(parents=True)
+
+            base_rows = [
+                {
+                    "record_id": f"INIT_{i}",
+                    "metal": "Cu" if i % 2 == 0 else "Co",
+                    "solution_id": f"SOL_{i % 2}",
+                    "pH": 3.0 + (i % 4) * 0.5,
+                    "temperature_C": 25.0 + (i % 2) * 5.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "Ecorr_V_SHE": 0.24 if i % 2 == 0 else -0.12,
+                    "icorr_uA_cm2": 4.0 + i * 0.3,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                }
+                for i in range(12)
+            ]
+            csv_file = raw_dir / "training.csv"
+            pd.DataFrame(base_rows).to_csv(csv_file, index=False)
+
+            progress_events: list[tuple[int, int, str]] = []
+            ctrl_first = CorrosionPlatformController.from_default_data(
+                data_dir=data_dir,
+                progress_callback=lambda step, total, msg: progress_events.append((step, total, msg)),
+            )
+            self.assertEqual(ctrl_first.artifact_status, "rebuilt")
+            self.assertEqual(set(ctrl_first.available_options()["metals"]), {"Cu", "Co"})
+            self.assertGreater(len(progress_events), len(SUPPORTED_MODEL_FAMILIES))
+            self.assertEqual(progress_events[-1][0], progress_events[-1][1])
+
+            # Verify ALL 6 ML model families were built and saved
+            for family in SUPPORTED_MODEL_FAMILIES:
+                self.assertTrue(
+                    (proc_dir / "models" / f"{family}.joblib").exists(),
+                    msg=f"Expected prebuilt model {family}.joblib to exist",
+                )
+
+            # Second startup with unchanged raw/ hits fast 'fresh' path directly
+            ctrl_second = CorrosionPlatformController.from_default_data(data_dir=data_dir)
+            self.assertEqual(ctrl_second.artifact_status, "fresh")
+
+            # Direct replacement of a model inside processed/models/ is used directly when raw/ is unchanged
+            custom_et = HybridMLPredictor(model_family="extra_trees", n_estimators=17, random_state=7)
+            custom_et.fit(ctrl_second.database)
+            custom_et.save(proc_dir / "models" / "extra_trees.joblib")
+            ctrl_custom = CorrosionPlatformController.from_default_data(data_dir=data_dir)
+            self.assertEqual(ctrl_custom.artifact_status, "fresh")
+            self.assertEqual(ctrl_custom.get_predictor("extra_trees").n_estimators, 17)
+
+            # Corrupted .joblib auto-heals without crashing
+            (proc_dir / "models" / "gradient_boosting.joblib").write_bytes(b"corrupted-pickle-bytes")
+            ctrl_healed = CorrosionPlatformController.from_default_data(data_dir=data_dir)
+            healed_pred = ctrl_healed.get_predictor("gradient_boosting")
+            self.assertEqual(healed_pred.model_family, "gradient_boosting")
+            self.assertIn("automatically retrained", ctrl_healed.artifact_warning or "")
+
+            # Updating CSV in data/raw/ automatically rebuilds models & ingests new metal on next startup
+            updated_rows = base_rows + [
+                {
+                    "record_id": f"RU_{j}",
+                    "metal": "Ru",
+                    "solution_id": "SOL_0",
+                    "pH": 3.5,
+                    "temperature_C": 25.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "Ecorr_V_SHE": 0.48,
+                    "icorr_uA_cm2": 0.6 + j * 0.1,
+                    "beta_a_mV_dec": 65.0,
+                    "beta_c_mV_dec": 115.0,
+                }
+                for j in range(4)
+            ]
+            pd.DataFrame(updated_rows).to_csv(csv_file, index=False)
+
+            ctrl_updated = CorrosionPlatformController.from_default_data(data_dir=data_dir)
+            self.assertEqual(ctrl_updated.artifact_status, "rebuilt")
+            self.assertIn("Ru", ctrl_updated.available_options()["metals"])
+            fresh_after, _ = check_artifacts_freshness(raw_dir, proc_dir)
+            self.assertEqual(fresh_after, "fresh")
+
+    def test_empty_external_data_dir_falls_back_to_seed_with_explicit_path_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            empty_data = Path(tmpdir) / "empty_data"
+            ctrl = CorrosionPlatformController.from_default_data(data_dir=empty_data)
+            self.assertEqual(ctrl.artifact_status, "seed")
+            self.assertIsNotNone(ctrl.artifact_warning)
+            self.assertIn("empty_data", ctrl.artifact_warning or "")
+
+    def test_main_entry_no_proxy_and_port_selection(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        from main import _configure_local_no_proxy, _find_available_port
+
+        with patch.dict(os.environ, {"NO_PROXY": "corp.internal.local"}, clear=False):
+            _configure_local_no_proxy()
+            tokens = set(os.environ["NO_PROXY"].split(","))
+            self.assertTrue({"corp.internal.local", "localhost", "127.0.0.1", "::1"}.issubset(tokens))
+
+        port = _find_available_port("127.0.0.1", preferred_port=18501, max_tries=5)
+        self.assertGreaterEqual(port, 18501)
+
+
 if __name__ == "__main__":
     unittest.main()

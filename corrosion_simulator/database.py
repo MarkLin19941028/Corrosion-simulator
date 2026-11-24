@@ -15,6 +15,10 @@ from corrosion_simulator.element_constants import (
     PURE_ELEMENT_PROPERTIES,
     infer_base_element,
 )
+from corrosion_simulator.paths import (
+    iter_raw_csv_files,
+    resolve_raw_and_processed_dirs,
+)
 from corrosion_simulator.seed_data import SEED_MATERIAL_PROPERTIES, build_seed_tables
 
 CORE_METALS: Final[tuple[str, ...]] = ("Cu", "Co", "W", "Ru", "Ti", "Ta", "Al", "Mo")
@@ -553,17 +557,20 @@ class HarmonizedDatabase:
     @classmethod
     def from_directory(
         cls,
-        raw_dir: str | Path = "data/raw",
+        raw_dir: str | Path | None = None,
         *,
         filter_to_core_metals: bool = False,
         supplement_missing_core_metals: bool = False,
     ) -> HarmonizedDatabase:
         """Ingest raw CSV tables from ``raw_dir`` (or fall back to the built-in seed dataset)."""
-        base_path = Path(raw_dir)
+        if raw_dir is None:
+            base_path, _ = resolve_raw_and_processed_dirs()
+        else:
+            base_path = Path(raw_dir)
         if not base_path.exists():
             return cls.from_seed()
 
-        csv_files = sorted(base_path.rglob("*.csv"))
+        csv_files = iter_raw_csv_files(base_path)
         if not csv_files:
             return cls.from_seed()
 
@@ -1841,24 +1848,26 @@ class HarmonizedDatabase:
         raise ValueError(f"Unknown solution_id: {solution_id!r}")
 
     @staticmethod
-    def compute_raw_directory_fingerprint(raw_dir: str | Path = "data/raw") -> dict[str, Any]:
+    def compute_raw_directory_fingerprint(raw_dir: str | Path | None = None) -> dict[str, Any]:
         """Compute a deterministic SHA-256 fingerprint of all CSV files under ``raw_dir``."""
-        base_path = Path(raw_dir)
+        if raw_dir is None:
+            base_path, _ = resolve_raw_and_processed_dirs()
+        else:
+            base_path = Path(raw_dir)
         files_info: dict[str, dict[str, Any]] = {}
         combined_hasher = hashlib.sha256()
-        if base_path.exists():
-            for csv_path in sorted(base_path.rglob("*.csv")):
-                rel = str(csv_path.relative_to(base_path)).replace("\\", "/")
-                data = csv_path.read_bytes()
-                file_sha = hashlib.sha256(data).hexdigest()
-                files_info[rel] = {
-                    "sha256": file_sha,
-                    "size_bytes": len(data),
-                }
-                combined_hasher.update(rel.encode("utf-8"))
-                combined_hasher.update(b":")
-                combined_hasher.update(file_sha.encode("utf-8"))
-                combined_hasher.update(b"\n")
+        for csv_path in iter_raw_csv_files(base_path):
+            rel = str(csv_path.relative_to(base_path)).replace("\\", "/")
+            data = csv_path.read_bytes()
+            file_sha = hashlib.sha256(data).hexdigest()
+            files_info[rel] = {
+                "sha256": file_sha,
+                "size_bytes": len(data),
+            }
+            combined_hasher.update(rel.encode("utf-8"))
+            combined_hasher.update(b":")
+            combined_hasher.update(file_sha.encode("utf-8"))
+            combined_hasher.update(b"\n")
         return {
             "raw_dir": str(base_path),
             "combined_sha256": combined_hasher.hexdigest(),
