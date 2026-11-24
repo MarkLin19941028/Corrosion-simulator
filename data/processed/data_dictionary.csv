@@ -1,196 +1,196 @@
 table_name,column_name,dtype,attribute_role,unit,non_null_count,description
-electrochemical_database,record_id,object,identifier,dimensionless,1741,Unique electrochemical measurement record identifier.
-electrochemical_database,material_id,object,identifier,dimensionless,1741,Canonical Metal identifier matching symbol.
-electrochemical_database,solution_id,object,identifier,dimensionless,1741,Unique Solution formulation identifier.
-electrochemical_database,metal,object,categorical,dimensionless,1741,"Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."
-electrochemical_database,material_class,object,categorical,dimensionless,1741,"High-level material classification (e.g., pure_metal, alloy, nitride, barrier)."
-electrochemical_database,sample_name,object,text,dimensionless,1392,Original experimental sample or specimen designation reported in the source publication.
-electrochemical_database,metal_form,object,categorical,dimensionless,1482,"Physical morphology or deposition form of the Metal (thin film, PVD, ALD, bulk, foil, rod)."
-electrochemical_database,surface_preparation,object,text,dimensionless,1320,"Pre-exposure surface conditioning or polishing treatment (e.g., CMP, mechanical polish, annealed)."
-electrochemical_database,solution_description,object,text,dimensionless,1274,Raw text description of the Solution composition from the literature source.
-electrochemical_database,pH,float64,numeric,pH units,1741,Hydrogen ion activity (-log10[H+]) of the Solution.
-electrochemical_database,temperature_C,float64,numeric,°C,1741,Operating temperature of the Exposure Condition in degrees Celsius.
-electrochemical_database,reference_electrode,object,categorical,dimensionless,1741,Original experimental reference electrode before conversion to SHE.
-electrochemical_database,Ecorr_V_SHE,float64,numeric,V vs. SHE,1741,Standardized Corrosion Potential (E_corr) converted to Volts vs. Standard Hydrogen Electrode.
-electrochemical_database,Ecorr_V_original,float64,numeric,V vs. ref,1741,Originally reported open-circuit Corrosion Potential prior to SHE conversion.
-electrochemical_database,icorr_uA_cm2,float64,numeric,µA/cm²,1741,Standardized Corrosion Current Density (i_corr) at E_corr in microamperes per square centimeter.
-electrochemical_database,log_icorr,float64,numeric,log10(A/cm²),1579,Raw base-10 logarithm of corrosion current density in A/cm² from literature compilation.
-electrochemical_database,beta_a_mV_dec,float64,numeric,mV/dec,1741,Strictly positive anodic Tafel Slope (beta_a) in millivolts per decade of current density.
-electrochemical_database,beta_c_mV_dec,float64,numeric,mV/dec,1741,Strictly positive cathodic Tafel Slope (beta_c) in millivolts per decade of current density.
-electrochemical_database,tafel_slopes_general,object,text,mV/dec,29,Unassigned or general Tafel slope values extracted from literature text.
-electrochemical_database,Rp_ohm_cm2,float64,numeric,Ω·cm²,427,Linear polarization resistance (R_p) in ohm-square centimeters.
-electrochemical_database,Rp_unit,object,categorical,unit string,427,Reported physical unit for linear polarization resistance R_p.
-electrochemical_database,CR_reported_value,float64,numeric,reported unit,516,Corrosion Rate value as originally reported in the source publication.
-electrochemical_database,CR_reported_unit,object,categorical,unit string,516,"Physical unit for CR_reported_value (e.g., nm/min, mm/year, Å/min)."
-electrochemical_database,CR_calculated_nm_min,float64,numeric,nm/min,1377,Faraday-derived Corrosion Rate in nanometers per minute.
-electrochemical_database,measurement_method,object,text,dimensionless,1485,"Experimental electrochemical or analytical measurement techniques (potentiodynamic, EIS, LPR, ICP-MS)."
-electrochemical_database,scan_rate,object,text,mV/s,822,Potentiodynamic polarization potential sweep rate.
-electrochemical_database,immersion_time,object,text,time unit,721,Experimental immersion or pre-conditioning duration reported in the study.
-electrochemical_database,aeration_condition,object,categorical,dimensionless,335,"Dissolved gas saturation state during testing (aerated, deaerated, N2/Ar purged)."
-electrochemical_database,reaction_type,object,categorical,dimensionless,1741,"Primary electrochemical process classification (corrosion, passivity, etching)."
-electrochemical_database,reactions,object,text,dimensionless,1741,"Half-cell reactions active under the Exposure Condition (HER, ORR, OER, metal dissolution)."
-electrochemical_database,source_type,object,categorical,dimensionless,1741,"Literature or benchmark source classification (journal, seed_benchmark)."
-electrochemical_database,source_reference,object,text,DOI / ID,1741,"Publication DOI, table row identifier, or benchmark reference string."
-electrochemical_database,data_extraction_method,object,categorical,dimensionless,1741,"Ingestion extraction pipeline method (table_column_mapped, regex, manual_curation)."
-electrochemical_database,data_quality_score,float64,quality_metric,"score [0, 1]",1741,Raw ingestion data quality score prior to imputation penalty.
-electrochemical_database,quality_notes,object,text,dimensionless,1741,Automated ingestion audit notes regarding unit inference or missing metadata.
+electrochemical_database,record_id,object,identifier,dimensionless,2012,Unique electrochemical measurement record identifier.
+electrochemical_database,material_id,object,identifier,dimensionless,2012,Canonical Metal identifier matching symbol.
+electrochemical_database,solution_id,object,identifier,dimensionless,2012,Unique Solution formulation identifier.
+electrochemical_database,metal,object,categorical,dimensionless,2012,"Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."
+electrochemical_database,material_class,object,categorical,dimensionless,2012,"High-level material classification (e.g., pure_metal, alloy, nitride, barrier)."
+electrochemical_database,sample_name,object,text,dimensionless,1632,Original experimental sample or specimen designation reported in the source publication.
+electrochemical_database,metal_form,object,categorical,dimensionless,1690,"Physical morphology or deposition form of the Metal (thin film, PVD, ALD, bulk, foil, rod)."
+electrochemical_database,surface_preparation,object,text,dimensionless,1537,"Pre-exposure surface conditioning or polishing treatment (e.g., CMP, mechanical polish, annealed)."
+electrochemical_database,solution_description,object,text,dimensionless,1670,Raw text description of the Solution composition from the literature source.
+electrochemical_database,pH,float64,numeric,pH units,2012,Hydrogen ion activity (-log10[H+]) of the Solution.
+electrochemical_database,temperature_C,float64,numeric,°C,2012,Operating temperature of the Exposure Condition in degrees Celsius.
+electrochemical_database,reference_electrode,object,categorical,dimensionless,2012,Original experimental reference electrode before conversion to SHE.
+electrochemical_database,Ecorr_V_SHE,float64,numeric,V vs. SHE,2012,Standardized Corrosion Potential (E_corr) converted to Volts vs. Standard Hydrogen Electrode.
+electrochemical_database,Ecorr_V_original,float64,numeric,V vs. ref,2012,Originally reported open-circuit Corrosion Potential prior to SHE conversion.
+electrochemical_database,icorr_uA_cm2,float64,numeric,µA/cm²,2012,Standardized Corrosion Current Density (i_corr) at E_corr in microamperes per square centimeter.
+electrochemical_database,log_icorr,float64,numeric,log10(A/cm²),1813,Raw base-10 logarithm of corrosion current density in A/cm² from literature compilation.
+electrochemical_database,beta_a_mV_dec,float64,numeric,mV/dec,2012,Strictly positive anodic Tafel Slope (beta_a) in millivolts per decade of current density.
+electrochemical_database,beta_c_mV_dec,float64,numeric,mV/dec,2012,Strictly positive cathodic Tafel Slope (beta_c) in millivolts per decade of current density.
+electrochemical_database,tafel_slopes_general,object,text,mV/dec,30,Unassigned or general Tafel slope values extracted from literature text.
+electrochemical_database,Rp_ohm_cm2,float64,numeric,Ω·cm²,594,Linear polarization resistance (R_p) in ohm-square centimeters.
+electrochemical_database,Rp_unit,object,categorical,unit string,594,Reported physical unit for linear polarization resistance R_p.
+electrochemical_database,CR_reported_value,float64,numeric,reported unit,602,Corrosion Rate value as originally reported in the source publication.
+electrochemical_database,CR_reported_unit,object,categorical,unit string,602,"Physical unit for CR_reported_value (e.g., nm/min, mm/year, Å/min)."
+electrochemical_database,CR_calculated_nm_min,float64,numeric,nm/min,1462,Faraday-derived Corrosion Rate in nanometers per minute.
+electrochemical_database,measurement_method,object,text,dimensionless,1693,"Experimental electrochemical or analytical measurement techniques (potentiodynamic, EIS, LPR, ICP-MS)."
+electrochemical_database,scan_rate,object,text,mV/s,880,Potentiodynamic polarization potential sweep rate.
+electrochemical_database,immersion_time,object,text,time unit,793,Experimental immersion or pre-conditioning duration reported in the study.
+electrochemical_database,aeration_condition,object,categorical,dimensionless,365,"Dissolved gas saturation state during testing (aerated, deaerated, N2/Ar purged)."
+electrochemical_database,reaction_type,object,categorical,dimensionless,2012,"Primary electrochemical process classification (corrosion, passivity, etching)."
+electrochemical_database,reactions,object,text,dimensionless,2012,"Half-cell reactions active under the Exposure Condition (HER, ORR, OER, metal dissolution)."
+electrochemical_database,source_type,object,categorical,dimensionless,2012,"Literature or benchmark source classification (journal, seed_benchmark)."
+electrochemical_database,source_reference,object,text,DOI / ID,2012,"Publication DOI, table row identifier, or benchmark reference string."
+electrochemical_database,data_extraction_method,object,categorical,dimensionless,2012,"Ingestion extraction pipeline method (table_column_mapped, regex, manual_curation)."
+electrochemical_database,data_quality_score,float64,quality_metric,"score [0, 1]",2012,Raw ingestion data quality score prior to imputation penalty.
+electrochemical_database,quality_notes,object,text,dimensionless,2012,Automated ingestion audit notes regarding unit inference or missing metadata.
 electrochemical_database,notes,float64,text,dimensionless,0,Curator annotations or supplementary notes.
-electrochemical_database,solution_name,object,text,dimensionless,1331,Human-readable chemical formulation summary for the Solution.
-electrochemical_database,solution_category,object,categorical,dimensionless,1331,"pH regime category of the Solution (acidic, neutral, alkaline, etc.)."
-electrochemical_database,materials,object,text,dimensionless,1331,Semicolon-delimited list of Metals evaluated with this Solution.
-electrochemical_database,base_solvent,object,categorical,dimensionless,1331,Primary liquid solvent (typically DI water).
-electrochemical_database,oxidizer_type,object,categorical,dimensionless,1741,"Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."
-electrochemical_database,oxidizer_concentration,float64,numeric,wt% or M,1741,Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None).
-electrochemical_database,oxidizer_concentration_unit,object,categorical,unit string,189,"Concentration unit for oxidizer_concentration (e.g., wt%, M, mM)."
-electrochemical_database,acid_type,object,categorical,dimensionless,465,"Acid component in the Solution formulation (e.g., H2SO4, HCl, HF, HClO4, citric acid)."
-electrochemical_database,acid_concentration,float64,numeric,M or wt%,465,Concentration of the acid component.
-electrochemical_database,acid_concentration_unit,object,categorical,unit string,465,Concentration unit for acid_concentration.
-electrochemical_database,base_type,object,categorical,dimensionless,160,"Alkaline base component in the Solution formulation (e.g., KOH, NaOH, TMAH)."
-electrochemical_database,base_concentration,float64,numeric,M or wt%,160,Concentration of the alkaline base component.
-electrochemical_database,base_concentration_unit,object,categorical,unit string,160,Concentration unit for base_concentration.
-electrochemical_database,HF_concentration_wt_pct,float64,numeric,wt%,45,Hydrofluoric acid (HF) weight percent concentration in the Solution.
-electrochemical_database,chelating_agent_type,object,categorical,dimensionless,57,"Complexing or chelating agent (e.g., citric acid, glycine, oxalic acid, EDTA)."
-electrochemical_database,chelating_agent_concentration,float64,numeric,mM or wt%,57,Concentration of the complexing/chelating agent.
-electrochemical_database,chelating_agent_concentration_unit,object,categorical,unit string,57,Concentration unit for chelating_agent_concentration.
-electrochemical_database,inhibitor_type,object,categorical,dimensionless,23,"Corrosion inhibitor chemical species (e.g., BTA)."
-electrochemical_database,inhibitor_concentration,float64,numeric,mM or wt%,23,Concentration of the corrosion inhibitor.
-electrochemical_database,inhibitor_concentration_unit,object,categorical,unit string,23,Concentration unit for inhibitor_concentration.
+electrochemical_database,solution_name,object,text,dimensionless,1790,Human-readable chemical formulation summary for the Solution.
+electrochemical_database,solution_category,object,categorical,dimensionless,1790,"pH regime category of the Solution (acidic, neutral, alkaline, etc.)."
+electrochemical_database,materials,object,text,dimensionless,1790,Semicolon-delimited list of Metals evaluated with this Solution.
+electrochemical_database,base_solvent,object,categorical,dimensionless,1790,Primary liquid solvent (typically DI water).
+electrochemical_database,oxidizer_type,object,categorical,dimensionless,2012,"Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."
+electrochemical_database,oxidizer_concentration,float64,numeric,wt% or M,2012,Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None).
+electrochemical_database,oxidizer_concentration_unit,object,categorical,unit string,213,"Concentration unit for oxidizer_concentration (e.g., wt%, M, mM)."
+electrochemical_database,acid_type,object,categorical,dimensionless,623,"Acid component in the Solution formulation (e.g., H2SO4, HCl, HF, HClO4, citric acid)."
+electrochemical_database,acid_concentration,float64,numeric,M or wt%,623,Concentration of the acid component.
+electrochemical_database,acid_concentration_unit,object,categorical,unit string,623,Concentration unit for acid_concentration.
+electrochemical_database,base_type,object,categorical,dimensionless,222,"Alkaline base component in the Solution formulation (e.g., KOH, NaOH, TMAH)."
+electrochemical_database,base_concentration,float64,numeric,M or wt%,222,Concentration of the alkaline base component.
+electrochemical_database,base_concentration_unit,object,categorical,unit string,222,Concentration unit for base_concentration.
+electrochemical_database,HF_concentration_wt_pct,float64,numeric,wt%,49,Hydrofluoric acid (HF) weight percent concentration in the Solution.
+electrochemical_database,chelating_agent_type,object,categorical,dimensionless,69,"Complexing or chelating agent (e.g., citric acid, glycine, oxalic acid, EDTA)."
+electrochemical_database,chelating_agent_concentration,float64,numeric,mM or wt%,69,Concentration of the complexing/chelating agent.
+electrochemical_database,chelating_agent_concentration_unit,object,categorical,unit string,69,Concentration unit for chelating_agent_concentration.
+electrochemical_database,inhibitor_type,object,categorical,dimensionless,133,"Corrosion inhibitor chemical species (e.g., BTA)."
+electrochemical_database,inhibitor_concentration,float64,numeric,mM or wt%,133,Concentration of the corrosion inhibitor.
+electrochemical_database,inhibitor_concentration_unit,object,categorical,unit string,133,Concentration unit for inhibitor_concentration.
 electrochemical_database,organic_solvent_type,object,categorical,dimensionless,5,"Co-solvent organic species in the Solution (e.g., ethylene glycol, IPA)."
 electrochemical_database,organic_solvent_concentration,float64,numeric,wt% or mM,5,Concentration of the organic co-solvent.
-electrochemical_database,supporting_salt_type,object,categorical,dimensionless,813,"Supporting ionic salt species in the Solution (e.g., NaCl, Na2SO4, KNO3, KCl)."
-electrochemical_database,supporting_salt_concentration,float64,numeric,M or wt%,813,Concentration of the supporting ionic salt.
-electrochemical_database,supporting_salt_concentration_unit,object,categorical,unit string,813,Concentration unit for supporting_salt_concentration.
+electrochemical_database,supporting_salt_type,object,categorical,dimensionless,1258,"Supporting ionic salt species in the Solution (e.g., NaCl, Na2SO4, KNO3, KCl)."
+electrochemical_database,supporting_salt_concentration,float64,numeric,M or wt%,1258,Concentration of the supporting ionic salt.
+electrochemical_database,supporting_salt_concentration_unit,object,categorical,unit string,1258,Concentration unit for supporting_salt_concentration.
 electrochemical_database,dissolved_oxygen_ppm,float64,numeric,ppm,0,Dissolved oxygen concentration in parts per million.
 electrochemical_database,conductivity_mS_cm,float64,numeric,mS/cm,0,Ionic electrical conductivity of the Solution in millisiemens per centimeter.
 electrochemical_database,ionic_strength_mol_L,float64,numeric,mol/L,0,Total molar ionic strength of the Solution.
 electrochemical_database,ORP_mV,float64,numeric,mV,0,Solution Oxidation-Reduction Potential in millivolts.
-electrochemical_database,deaerated,object,boolean_flag,boolean,1331,True if the Solution was explicitly purged of dissolved oxygen prior to measurement.
-electrochemical_database,components_json,object,text,json,1331,Structured JSON breakdown of Solution chemical components and concentrations.
-electrochemical_database,source,object,text,DOI / ID,1331,Aggregated publication DOI and table row provenance identifiers.
-electrochemical_database,material_name,object,text,dimensionless,1516,Full English name of the Metal.
-electrochemical_database,symbol,object,categorical,dimensionless,1516,Chemical symbol of the Metal.
-electrochemical_database,category,object,categorical,dimensionless,1516,"Semiconductor film functional category (metal, barrier, liner, semiconductor)."
-electrochemical_database,density_g_cm3,float64,numeric,g/cm³,1741,Bulk mass density of the Metal film.
-electrochemical_database,molar_mass_g_mol,float64,numeric,g/mol,1741,Atomic or molar mass of the Metal.
-electrochemical_database,valence,float64,numeric,e⁻/atom,1741,Dissolution Valence (z): electrons transferred per dissolved Metal atom in Faraday's law.
-electrochemical_database,equivalent_weight_g_eq,float64,numeric,g/eq,1741,Electrochemical equivalent weight (molar_mass_g_mol / valence).
-electrochemical_database,standard_potential_V_SHE,float64,numeric,V vs. SHE,1516,Standard reduction potential E° of the Metal in V vs. SHE.
-electrochemical_database,melting_point_C,float64,numeric,°C,1516,Melting temperature of the Metal at 1 atm in degrees Celsius.
-electrochemical_database,electronegativity_pauling,float64,numeric,Pauling scale,1516,Pauling electronegativity of the Metal.
-electrochemical_database,work_function_eV,float64,numeric,eV,1516,Electronic work function of the Metal surface in electron-volts.
-electrochemical_database,oxide_type,object,text,chemical formula,1516,Primary surface oxide formulas formed on the Metal.
-electrochemical_database,oxide_stability,object,categorical,tier,1516,"Qualitative thermodynamic stability tier of the native oxide (low, medium, high)."
-electrochemical_database,passivation_tendency,float64,numeric,"index [0, 1]",1516,Dimensionless tendency of the Metal to form a self-limiting passive oxide film.
-electrochemical_database,pourbaix_stable_pH_min,float64,numeric,pH units,1516,Lower pH boundary of the Metal's passive oxide stability window.
-electrochemical_database,pourbaix_stable_pH_max,float64,numeric,pH units,1516,Upper pH boundary of the Metal's passive oxide stability window.
-electrochemical_database,crystal_structure,object,categorical,lattice type,1516,"Room-temperature crystal structure (FCC, BCC, HCP)."
-electrochemical_database,thermal_conductivity_W_mK,float64,numeric,W/(m·K),1516,Bulk thermal conductivity of the Metal.
-electrochemical_database,electrical_resistivity_ohm_cm,float64,numeric,Ω·cm,1516,Bulk electrical resistivity of the Metal.
-electrochemical_database,common_corrosion_products,object,text,chemical species,1516,Typical dissolved ionic or solid corrosion products.
-electrochemical_database,base_element,object,categorical,dimensionless,1738,Primary metallic element symbol for elemental descriptor lookup.
-electrochemical_database,pH_effective,float64,numeric,pH units,1741,Effective pH used for thermodynamic calculations (measured or inferred from acid/base molarity).
-electrochemical_database,pH_source,object,categorical,dimensionless,1741,"Provenance of pH_effective (measured_echem, inferred_strong_acid, inferred_neutral, etc.)."
-electrochemical_database,elem_atomic_number,float64,numeric,atomic number Z,1738,Atomic number (proton count) of the Metal element.
-electrochemical_database,elem_atomic_mass,float64,numeric,g/mol,1738,Standard atomic weight of the Metal element.
-electrochemical_database,elem_pauling_en,float64,numeric,Pauling scale,1738,Elemental Pauling electronegativity.
-electrochemical_database,elem_work_function_eV,float64,numeric,eV,1738,Polycrystalline elemental electronic work function in electron-volts.
-electrochemical_database,elem_standard_potential_V_SHE,float64,numeric,V vs. SHE,1738,Elemental standard reduction potential in V vs. SHE.
-electrochemical_database,elem_melting_point_K,float64,numeric,K,1738,Elemental melting temperature in Kelvin.
-electrochemical_database,elem_molar_volume_cm3,float64,numeric,cm³/mol,1738,Elemental molar volume in cubic centimeters per mole.
-electrochemical_database,mp_material_id,object,identifier,Materials Project ID,1738,Materials Project crystal structure identifier.
-electrochemical_database,mp_work_function_eV,float64,numeric,eV,1722,DFT-computed surface work function from Materials Project in electron-volts.
-electrochemical_database,mp_surface_energy_J_m2,float64,numeric,J/m²,1722,DFT-computed cleavage/surface energy in Joules per square meter.
-electrochemical_database,mp_formation_energy_eV_atom,float64,numeric,eV/atom,1738,DFT-computed formation enthalpy per atom in electron-volts.
-electrochemical_database,mp_band_gap_eV,float64,numeric,eV,1738,Electronic band gap energy in electron-volts (0.0 eV for metallic conductors).
-electrochemical_database,thermo_E_onset_V_SHE,float64,numeric,V vs. SHE,1738,Thermodynamic Pourbaix anodic dissolution or oxidation onset potential in V vs. SHE.
-electrochemical_database,thermo_corrosion_regime,object,categorical,Pourbaix regime,1738,"Thermodynamic Pourbaix stability regime (immunity, corrosion, passivation)."
-electrochemical_database,thermo_stable_phase,object,text,chemical phase,1738,Thermodynamically favored aqueous ion or solid oxide phase at the Exposure Condition.
-electrochemical_database,thermo_source,object,categorical,dimensionless,1741,"Provenance of the Pourbaix thermodynamic assessment (e.g., mp_pourbaix)."
-electrochemical_database,mp_pourbaix_E_onset_V_SHE,float64,numeric,V vs. SHE,1738,Materials Project Pourbaix oxidation onset potential at pH_effective in V vs. SHE.
-electrochemical_database,mp_stable_phase_at_Ecorr,object,text,chemical phase,1738,"Materials Project Pourbaix stable phase evaluated at (pH_effective, Ecorr_V_SHE)."
-electrochemical_database,mp_corrosion_regime,object,categorical,Pourbaix regime,1738,"Materials Project Pourbaix stability classification at Ecorr_V_SHE (immunity, corrosion, passivation)."
-electrochemical_database,mp_delta_G_pbx_eV_atom,float64,numeric,eV/atom,1738,Pourbaix decomposition free energy (driving force above convex hull) at Ecorr_V_SHE in eV/atom.
-electrochemical_database,delta_E_overpotential_V,float64,numeric,V,1738,Anodic overpotential above thermodynamic oxidation onset (Ecorr_V_SHE - thermo_E_onset_V_SHE) in Volts.
-electrochemical_database,icorr_source,object,categorical,dimensionless,1741,"Provenance of icorr_uA_cm2 (measured, derived_from_CR via Faraday law, or derived_from_Rp via Stern-Geary)."
-electrochemical_database,log10_icorr_uA_cm2,float64,numeric,log10(µA/cm²),1741,Base-10 logarithm of standardized Corrosion Current Density i_corr in µA/cm².
-electrochemical_database,has_complete_pair,bool,boolean_flag,boolean,1741,True when both Ecorr_V_SHE and icorr_uA_cm2 are present and valid for full polarization and lookup.
-electrochemical_database,beta_a_imputed,bool,boolean_flag,boolean,1741,True if anodic Tafel slope beta_a was missing and imputed via group median or 60 mV/dec fallback.
-electrochemical_database,beta_c_imputed,bool,boolean_flag,boolean,1741,True if cathodic Tafel slope beta_c was missing and imputed via group median or 120 mV/dec fallback.
-electrochemical_database,is_imputed,bool,boolean_flag,boolean,1741,Quality flag indicating whether either Tafel slope (beta_a or beta_c) was imputed.
-electrochemical_database,quality_score,float64,quality_metric,"score [0, 1]",1741,"Data reliability score in [0, 1], automatically decremented when is_imputed is True."
-material_properties,metal,object,categorical,dimensionless,22,"Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."
-material_properties,material_id,object,identifier,dimensionless,22,Canonical Metal identifier matching symbol.
-material_properties,material_name,object,text,dimensionless,22,Full English name of the Metal.
-material_properties,symbol,object,categorical,dimensionless,22,Chemical symbol of the Metal.
-material_properties,category,object,categorical,dimensionless,22,"Semiconductor film functional category (metal, barrier, liner, semiconductor)."
-material_properties,density_g_cm3,float64,numeric,g/cm³,22,Bulk mass density of the Metal film.
-material_properties,molar_mass_g_mol,float64,numeric,g/mol,22,Atomic or molar mass of the Metal.
-material_properties,valence,float64,numeric,e⁻/atom,22,Dissolution Valence (z): electrons transferred per dissolved Metal atom in Faraday's law.
-material_properties,equivalent_weight_g_eq,float64,numeric,g/eq,22,Electrochemical equivalent weight (molar_mass_g_mol / valence).
-material_properties,standard_potential_V_SHE,float64,numeric,V vs. SHE,22,Standard reduction potential E° of the Metal in V vs. SHE.
-material_properties,melting_point_C,float64,numeric,°C,11,Melting temperature of the Metal at 1 atm in degrees Celsius.
-material_properties,electronegativity_pauling,float64,numeric,Pauling scale,22,Pauling electronegativity of the Metal.
-material_properties,work_function_eV,float64,numeric,eV,22,Electronic work function of the Metal surface in electron-volts.
-material_properties,oxide_type,object,text,chemical formula,11,Primary surface oxide formulas formed on the Metal.
-material_properties,oxide_stability,object,categorical,tier,11,"Qualitative thermodynamic stability tier of the native oxide (low, medium, high)."
-material_properties,passivation_tendency,float64,numeric,"index [0, 1]",22,Dimensionless tendency of the Metal to form a self-limiting passive oxide film.
-material_properties,pourbaix_stable_pH_min,float64,numeric,pH units,22,Lower pH boundary of the Metal's passive oxide stability window.
-material_properties,pourbaix_stable_pH_max,float64,numeric,pH units,22,Upper pH boundary of the Metal's passive oxide stability window.
-material_properties,crystal_structure,object,categorical,lattice type,11,"Room-temperature crystal structure (FCC, BCC, HCP)."
-material_properties,thermal_conductivity_W_mK,float64,numeric,W/(m·K),11,Bulk thermal conductivity of the Metal.
-material_properties,electrical_resistivity_ohm_cm,float64,numeric,Ω·cm,11,Bulk electrical resistivity of the Metal.
-material_properties,common_corrosion_products,object,text,chemical species,11,Typical dissolved ionic or solid corrosion products.
-material_properties,notes,object,text,dimensionless,1,Curator annotations or supplementary notes.
-material_properties,base_element,object,categorical,dimensionless,22,Primary metallic element symbol for elemental descriptor lookup.
-material_properties,tier,object,categorical,dimensionless,22,Material catalog tier (core semiconductor metal vs. extended material).
-material_properties,has_faraday_properties,bool,boolean,dimensionless,22,True when density and equivalent weight are available for Faraday corrosion-rate conversion.
-solution_properties,solution_id,object,identifier,dimensionless,640,Unique Solution formulation identifier.
-solution_properties,solution_name,object,text,dimensionless,626,Human-readable chemical formulation summary for the Solution.
-solution_properties,solution_category,object,categorical,dimensionless,626,"pH regime category of the Solution (acidic, neutral, alkaline, etc.)."
-solution_properties,materials,object,text,dimensionless,626,Semicolon-delimited list of Metals evaluated with this Solution.
-solution_properties,base_solvent,object,categorical,dimensionless,626,Primary liquid solvent (typically DI water).
-solution_properties,pH,float64,numeric,pH units,631,Hydrogen ion activity (-log10[H+]) of the Solution.
-solution_properties,oxidizer_type,object,categorical,dimensionless,640,"Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."
-solution_properties,oxidizer_concentration,float64,numeric,wt% or M,640,Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None).
-solution_properties,oxidizer_concentration_unit,object,categorical,unit string,97,"Concentration unit for oxidizer_concentration (e.g., wt%, M, mM)."
-solution_properties,acid_type,object,categorical,dimensionless,217,"Acid component in the Solution formulation (e.g., H2SO4, HCl, HF, HClO4, citric acid)."
-solution_properties,acid_concentration,float64,numeric,M or wt%,217,Concentration of the acid component.
-solution_properties,acid_concentration_unit,object,categorical,unit string,217,Concentration unit for acid_concentration.
-solution_properties,base_type,object,categorical,dimensionless,88,"Alkaline base component in the Solution formulation (e.g., KOH, NaOH, TMAH)."
-solution_properties,base_concentration,float64,numeric,M or wt%,88,Concentration of the alkaline base component.
-solution_properties,base_concentration_unit,object,categorical,unit string,88,Concentration unit for base_concentration.
-solution_properties,HF_concentration_wt_pct,float64,numeric,wt%,28,Hydrofluoric acid (HF) weight percent concentration in the Solution.
-solution_properties,chelating_agent_type,object,categorical,dimensionless,40,"Complexing or chelating agent (e.g., citric acid, glycine, oxalic acid, EDTA)."
-solution_properties,chelating_agent_concentration,float64,numeric,mM or wt%,40,Concentration of the complexing/chelating agent.
-solution_properties,chelating_agent_concentration_unit,object,categorical,unit string,40,Concentration unit for chelating_agent_concentration.
-solution_properties,inhibitor_type,object,categorical,dimensionless,21,"Corrosion inhibitor chemical species (e.g., BTA)."
-solution_properties,inhibitor_concentration,float64,numeric,mM or wt%,21,Concentration of the corrosion inhibitor.
-solution_properties,inhibitor_concentration_unit,object,categorical,unit string,21,Concentration unit for inhibitor_concentration.
+electrochemical_database,deaerated,object,boolean_flag,boolean,1790,True if the Solution was explicitly purged of dissolved oxygen prior to measurement.
+electrochemical_database,components_json,object,text,json,1790,Structured JSON breakdown of Solution chemical components and concentrations.
+electrochemical_database,source,object,text,DOI / ID,1790,Aggregated publication DOI and table row provenance identifiers.
+electrochemical_database,material_name,object,text,dimensionless,1618,Full English name of the Metal.
+electrochemical_database,symbol,object,categorical,dimensionless,1618,Chemical symbol of the Metal.
+electrochemical_database,category,object,categorical,dimensionless,1618,"Semiconductor film functional category (metal, barrier, liner, semiconductor)."
+electrochemical_database,density_g_cm3,float64,numeric,g/cm³,2012,Bulk mass density of the Metal film.
+electrochemical_database,molar_mass_g_mol,float64,numeric,g/mol,2012,Atomic or molar mass of the Metal.
+electrochemical_database,valence,float64,numeric,e⁻/atom,2012,Dissolution Valence (z): electrons transferred per dissolved Metal atom in Faraday's law.
+electrochemical_database,equivalent_weight_g_eq,float64,numeric,g/eq,2012,Electrochemical equivalent weight (molar_mass_g_mol / valence).
+electrochemical_database,standard_potential_V_SHE,float64,numeric,V vs. SHE,1618,Standard reduction potential E° of the Metal in V vs. SHE.
+electrochemical_database,melting_point_C,float64,numeric,°C,1618,Melting temperature of the Metal at 1 atm in degrees Celsius.
+electrochemical_database,electronegativity_pauling,float64,numeric,Pauling scale,1618,Pauling electronegativity of the Metal.
+electrochemical_database,work_function_eV,float64,numeric,eV,1618,Electronic work function of the Metal surface in electron-volts.
+electrochemical_database,oxide_type,object,text,chemical formula,1618,Primary surface oxide formulas formed on the Metal.
+electrochemical_database,oxide_stability,object,categorical,tier,1618,"Qualitative thermodynamic stability tier of the native oxide (low, medium, high)."
+electrochemical_database,passivation_tendency,float64,numeric,"index [0, 1]",1618,Dimensionless tendency of the Metal to form a self-limiting passive oxide film.
+electrochemical_database,pourbaix_stable_pH_min,float64,numeric,pH units,1618,Lower pH boundary of the Metal's passive oxide stability window.
+electrochemical_database,pourbaix_stable_pH_max,float64,numeric,pH units,1618,Upper pH boundary of the Metal's passive oxide stability window.
+electrochemical_database,crystal_structure,object,categorical,lattice type,1618,"Room-temperature crystal structure (FCC, BCC, HCP)."
+electrochemical_database,thermal_conductivity_W_mK,float64,numeric,W/(m·K),1618,Bulk thermal conductivity of the Metal.
+electrochemical_database,electrical_resistivity_ohm_cm,float64,numeric,Ω·cm,1618,Bulk electrical resistivity of the Metal.
+electrochemical_database,common_corrosion_products,object,text,chemical species,1618,Typical dissolved ionic or solid corrosion products.
+electrochemical_database,base_element,object,categorical,dimensionless,2009,Primary metallic element symbol for elemental descriptor lookup.
+electrochemical_database,pH_effective,float64,numeric,pH units,2012,Effective pH used for thermodynamic calculations (measured or inferred from acid/base molarity).
+electrochemical_database,pH_source,object,categorical,dimensionless,2012,"Provenance of pH_effective (measured_echem, inferred_strong_acid, inferred_neutral, etc.)."
+electrochemical_database,elem_atomic_number,float64,numeric,atomic number Z,2009,Atomic number (proton count) of the Metal element.
+electrochemical_database,elem_atomic_mass,float64,numeric,g/mol,2009,Standard atomic weight of the Metal element.
+electrochemical_database,elem_pauling_en,float64,numeric,Pauling scale,2009,Elemental Pauling electronegativity.
+electrochemical_database,elem_work_function_eV,float64,numeric,eV,2009,Polycrystalline elemental electronic work function in electron-volts.
+electrochemical_database,elem_standard_potential_V_SHE,float64,numeric,V vs. SHE,2009,Elemental standard reduction potential in V vs. SHE.
+electrochemical_database,elem_melting_point_K,float64,numeric,K,2009,Elemental melting temperature in Kelvin.
+electrochemical_database,elem_molar_volume_cm3,float64,numeric,cm³/mol,2009,Elemental molar volume in cubic centimeters per mole.
+electrochemical_database,mp_material_id,object,identifier,Materials Project ID,2009,Materials Project crystal structure identifier.
+electrochemical_database,mp_work_function_eV,float64,numeric,eV,1980,DFT-computed surface work function from Materials Project in electron-volts.
+electrochemical_database,mp_surface_energy_J_m2,float64,numeric,J/m²,1980,DFT-computed cleavage/surface energy in Joules per square meter.
+electrochemical_database,mp_formation_energy_eV_atom,float64,numeric,eV/atom,2009,DFT-computed formation enthalpy per atom in electron-volts.
+electrochemical_database,mp_band_gap_eV,float64,numeric,eV,2009,Electronic band gap energy in electron-volts (0.0 eV for metallic conductors).
+electrochemical_database,thermo_E_onset_V_SHE,float64,numeric,V vs. SHE,2009,Thermodynamic Pourbaix anodic dissolution or oxidation onset potential in V vs. SHE.
+electrochemical_database,thermo_corrosion_regime,object,categorical,Pourbaix regime,2009,"Thermodynamic Pourbaix stability regime (immunity, corrosion, passivation)."
+electrochemical_database,thermo_stable_phase,object,text,chemical phase,2009,Thermodynamically favored aqueous ion or solid oxide phase at the Exposure Condition.
+electrochemical_database,thermo_source,object,categorical,dimensionless,2012,"Provenance of the Pourbaix thermodynamic assessment (e.g., mp_pourbaix)."
+electrochemical_database,mp_pourbaix_E_onset_V_SHE,float64,numeric,V vs. SHE,2009,Materials Project Pourbaix oxidation onset potential at pH_effective in V vs. SHE.
+electrochemical_database,mp_stable_phase_at_Ecorr,object,text,chemical phase,2009,"Materials Project Pourbaix stable phase evaluated at (pH_effective, Ecorr_V_SHE)."
+electrochemical_database,mp_corrosion_regime,object,categorical,Pourbaix regime,2009,"Materials Project Pourbaix stability classification at Ecorr_V_SHE (immunity, corrosion, passivation)."
+electrochemical_database,mp_delta_G_pbx_eV_atom,float64,numeric,eV/atom,2009,Pourbaix decomposition free energy (driving force above convex hull) at Ecorr_V_SHE in eV/atom.
+electrochemical_database,delta_E_overpotential_V,float64,numeric,V,2009,Anodic overpotential above thermodynamic oxidation onset (Ecorr_V_SHE - thermo_E_onset_V_SHE) in Volts.
+electrochemical_database,icorr_source,object,categorical,dimensionless,2012,"Provenance of icorr_uA_cm2 (measured, derived_from_CR via Faraday law, or derived_from_Rp via Stern-Geary)."
+electrochemical_database,log10_icorr_uA_cm2,float64,numeric,log10(µA/cm²),2012,Base-10 logarithm of standardized Corrosion Current Density i_corr in µA/cm².
+electrochemical_database,has_complete_pair,bool,boolean_flag,boolean,2012,True when both Ecorr_V_SHE and icorr_uA_cm2 are present and valid for full polarization and lookup.
+electrochemical_database,beta_a_imputed,bool,boolean_flag,boolean,2012,True if anodic Tafel slope beta_a was missing and imputed via group median or 60 mV/dec fallback.
+electrochemical_database,beta_c_imputed,bool,boolean_flag,boolean,2012,True if cathodic Tafel slope beta_c was missing and imputed via group median or 120 mV/dec fallback.
+electrochemical_database,is_imputed,bool,boolean_flag,boolean,2012,Quality flag indicating whether either Tafel slope (beta_a or beta_c) was imputed.
+electrochemical_database,quality_score,float64,quality_metric,"score [0, 1]",2012,"Data reliability score in [0, 1], automatically decremented when is_imputed is True."
+material_properties,metal,object,categorical,dimensionless,25,"Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."
+material_properties,material_id,object,identifier,dimensionless,25,Canonical Metal identifier matching symbol.
+material_properties,material_name,object,text,dimensionless,25,Full English name of the Metal.
+material_properties,symbol,object,categorical,dimensionless,25,Chemical symbol of the Metal.
+material_properties,category,object,categorical,dimensionless,25,"Semiconductor film functional category (metal, barrier, liner, semiconductor)."
+material_properties,density_g_cm3,float64,numeric,g/cm³,25,Bulk mass density of the Metal film.
+material_properties,molar_mass_g_mol,float64,numeric,g/mol,25,Atomic or molar mass of the Metal.
+material_properties,valence,float64,numeric,e⁻/atom,25,Dissolution Valence (z): electrons transferred per dissolved Metal atom in Faraday's law.
+material_properties,equivalent_weight_g_eq,float64,numeric,g/eq,25,Electrochemical equivalent weight (molar_mass_g_mol / valence).
+material_properties,standard_potential_V_SHE,float64,numeric,V vs. SHE,25,Standard reduction potential E° of the Metal in V vs. SHE.
+material_properties,melting_point_C,float64,numeric,°C,13,Melting temperature of the Metal at 1 atm in degrees Celsius.
+material_properties,electronegativity_pauling,float64,numeric,Pauling scale,25,Pauling electronegativity of the Metal.
+material_properties,work_function_eV,float64,numeric,eV,25,Electronic work function of the Metal surface in electron-volts.
+material_properties,oxide_type,object,text,chemical formula,13,Primary surface oxide formulas formed on the Metal.
+material_properties,oxide_stability,object,categorical,tier,13,"Qualitative thermodynamic stability tier of the native oxide (low, medium, high)."
+material_properties,passivation_tendency,float64,numeric,"index [0, 1]",25,Dimensionless tendency of the Metal to form a self-limiting passive oxide film.
+material_properties,pourbaix_stable_pH_min,float64,numeric,pH units,25,Lower pH boundary of the Metal's passive oxide stability window.
+material_properties,pourbaix_stable_pH_max,float64,numeric,pH units,25,Upper pH boundary of the Metal's passive oxide stability window.
+material_properties,crystal_structure,object,categorical,lattice type,13,"Room-temperature crystal structure (FCC, BCC, HCP)."
+material_properties,thermal_conductivity_W_mK,float64,numeric,W/(m·K),13,Bulk thermal conductivity of the Metal.
+material_properties,electrical_resistivity_ohm_cm,float64,numeric,Ω·cm,13,Bulk electrical resistivity of the Metal.
+material_properties,common_corrosion_products,object,text,chemical species,13,Typical dissolved ionic or solid corrosion products.
+material_properties,notes,object,text,dimensionless,2,Curator annotations or supplementary notes.
+material_properties,base_element,object,categorical,dimensionless,25,Primary metallic element symbol for elemental descriptor lookup.
+material_properties,tier,object,categorical,dimensionless,25,Material catalog tier (core semiconductor metal vs. extended material).
+material_properties,has_faraday_properties,bool,boolean,dimensionless,25,True when density and equivalent weight are available for Faraday corrosion-rate conversion.
+solution_properties,solution_id,object,identifier,dimensionless,852,Unique Solution formulation identifier.
+solution_properties,solution_name,object,text,dimensionless,851,Human-readable chemical formulation summary for the Solution.
+solution_properties,solution_category,object,categorical,dimensionless,851,"pH regime category of the Solution (acidic, neutral, alkaline, etc.)."
+solution_properties,materials,object,text,dimensionless,851,Semicolon-delimited list of Metals evaluated with this Solution.
+solution_properties,base_solvent,object,categorical,dimensionless,851,Primary liquid solvent (typically DI water).
+solution_properties,pH,float64,numeric,pH units,839,Hydrogen ion activity (-log10[H+]) of the Solution.
+solution_properties,oxidizer_type,object,categorical,dimensionless,852,"Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."
+solution_properties,oxidizer_concentration,float64,numeric,wt% or M,852,Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None).
+solution_properties,oxidizer_concentration_unit,object,categorical,unit string,118,"Concentration unit for oxidizer_concentration (e.g., wt%, M, mM)."
+solution_properties,acid_type,object,categorical,dimensionless,318,"Acid component in the Solution formulation (e.g., H2SO4, HCl, HF, HClO4, citric acid)."
+solution_properties,acid_concentration,float64,numeric,M or wt%,318,Concentration of the acid component.
+solution_properties,acid_concentration_unit,object,categorical,unit string,318,Concentration unit for acid_concentration.
+solution_properties,base_type,object,categorical,dimensionless,129,"Alkaline base component in the Solution formulation (e.g., KOH, NaOH, TMAH)."
+solution_properties,base_concentration,float64,numeric,M or wt%,129,Concentration of the alkaline base component.
+solution_properties,base_concentration_unit,object,categorical,unit string,129,Concentration unit for base_concentration.
+solution_properties,HF_concentration_wt_pct,float64,numeric,wt%,38,Hydrofluoric acid (HF) weight percent concentration in the Solution.
+solution_properties,chelating_agent_type,object,categorical,dimensionless,54,"Complexing or chelating agent (e.g., citric acid, glycine, oxalic acid, EDTA)."
+solution_properties,chelating_agent_concentration,float64,numeric,mM or wt%,54,Concentration of the complexing/chelating agent.
+solution_properties,chelating_agent_concentration_unit,object,categorical,unit string,54,Concentration unit for chelating_agent_concentration.
+solution_properties,inhibitor_type,object,categorical,dimensionless,92,"Corrosion inhibitor chemical species (e.g., BTA)."
+solution_properties,inhibitor_concentration,float64,numeric,mM or wt%,92,Concentration of the corrosion inhibitor.
+solution_properties,inhibitor_concentration_unit,object,categorical,unit string,92,Concentration unit for inhibitor_concentration.
 solution_properties,organic_solvent_type,object,categorical,dimensionless,3,"Co-solvent organic species in the Solution (e.g., ethylene glycol, IPA)."
 solution_properties,organic_solvent_concentration,float64,numeric,wt% or mM,3,Concentration of the organic co-solvent.
-solution_properties,supporting_salt_type,object,categorical,dimensionless,355,"Supporting ionic salt species in the Solution (e.g., NaCl, Na2SO4, KNO3, KCl)."
-solution_properties,supporting_salt_concentration,float64,numeric,M or wt%,355,Concentration of the supporting ionic salt.
-solution_properties,supporting_salt_concentration_unit,object,categorical,unit string,355,Concentration unit for supporting_salt_concentration.
+solution_properties,supporting_salt_type,object,categorical,dimensionless,524,"Supporting ionic salt species in the Solution (e.g., NaCl, Na2SO4, KNO3, KCl)."
+solution_properties,supporting_salt_concentration,float64,numeric,M or wt%,524,Concentration of the supporting ionic salt.
+solution_properties,supporting_salt_concentration_unit,object,categorical,unit string,524,Concentration unit for supporting_salt_concentration.
 solution_properties,dissolved_oxygen_ppm,float64,numeric,ppm,0,Dissolved oxygen concentration in parts per million.
 solution_properties,conductivity_mS_cm,float64,numeric,mS/cm,0,Ionic electrical conductivity of the Solution in millisiemens per centimeter.
 solution_properties,ionic_strength_mol_L,float64,numeric,mol/L,0,Total molar ionic strength of the Solution.
 solution_properties,ORP_mV,float64,numeric,mV,0,Solution Oxidation-Reduction Potential in millivolts.
-solution_properties,deaerated,object,boolean_flag,boolean,626,True if the Solution was explicitly purged of dissolved oxygen prior to measurement.
-solution_properties,components_json,object,text,json,626,Structured JSON breakdown of Solution chemical components and concentrations.
-solution_properties,source,object,text,DOI / ID,626,Aggregated publication DOI and table row provenance identifiers.
+solution_properties,deaerated,object,boolean_flag,boolean,851,True if the Solution was explicitly purged of dissolved oxygen prior to measurement.
+solution_properties,components_json,object,text,json,851,Structured JSON breakdown of Solution chemical components and concentrations.
+solution_properties,source,object,text,DOI / ID,851,Aggregated publication DOI and table row provenance identifiers.
 solution_properties,notes,float64,text,dimensionless,0,Curator annotations or supplementary notes.
-galvanic_series,solution_id,object,identifier,dimensionless,385,Unique Solution formulation identifier.
-galvanic_series,metal,object,categorical,dimensionless,385,"Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."
-galvanic_series,solution_name,object,text,dimensionless,364,Human-readable chemical formulation summary for the Solution.
-galvanic_series,pH,float64,numeric,pH units,385,Hydrogen ion activity (-log10[H+]) of the Solution.
-galvanic_series,oxidizer_type,object,categorical,dimensionless,385,"Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."
-galvanic_series,oxidizer_concentration,float64,numeric,wt% or M,385,Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None).
-galvanic_series,temperature_C,float64,numeric,°C,385,Operating temperature of the Exposure Condition in degrees Celsius.
-galvanic_series,Ecorr_V_SHE,float64,numeric,V vs. SHE,385,Standardized Corrosion Potential (E_corr) converted to Volts vs. Standard Hydrogen Electrode.
-galvanic_series,icorr_uA_cm2,float64,numeric,µA/cm²,385,Standardized Corrosion Current Density (i_corr) at E_corr in microamperes per square centimeter.
-galvanic_series,beta_a_mV_dec,float64,numeric,mV/dec,385,Strictly positive anodic Tafel Slope (beta_a) in millivolts per decade of current density.
-galvanic_series,beta_c_mV_dec,float64,numeric,mV/dec,385,Strictly positive cathodic Tafel Slope (beta_c) in millivolts per decade of current density.
-galvanic_series,record_count,int64,numeric,count,385,"Number of harmonized experimental records aggregated for that (Solution, Metal) pair."
-galvanic_series,galvanic_rank,int64,numeric,integer rank (1..N),385,"Monotonic Galvanic Series rank within a Solution (1 = most Active Metal, N = most Noble Metal)."
-galvanic_series,metals_in_solution,int64,numeric,count,385,Total distinct Metals evaluated in that Solution within the Galvanic Series.
-galvanic_series,relative_nobility,object,categorical,role label,385,"Qualitative galvanic role within the Solution (Most Active, Intermediate, Most Noble)."
+galvanic_series,solution_id,object,identifier,dimensionless,495,Unique Solution formulation identifier.
+galvanic_series,metal,object,categorical,dimensionless,495,"Conductive metallic element, compound, or alloy film identifier (e.g., Cu, Co, W, Ru, Ti, Ta, Al, Mo, TiN, Fe, Ni)."
+galvanic_series,solution_name,object,text,dimensionless,481,Human-readable chemical formulation summary for the Solution.
+galvanic_series,pH,float64,numeric,pH units,495,Hydrogen ion activity (-log10[H+]) of the Solution.
+galvanic_series,oxidizer_type,object,categorical,dimensionless,495,"Primary oxidizing agent in the Solution (e.g., H2O2, HNO3, None)."
+galvanic_series,oxidizer_concentration,float64,numeric,wt% or M,495,Numerical concentration of the oxidizing agent (0.0 when oxidizer_type is None).
+galvanic_series,temperature_C,float64,numeric,°C,495,Operating temperature of the Exposure Condition in degrees Celsius.
+galvanic_series,Ecorr_V_SHE,float64,numeric,V vs. SHE,495,Standardized Corrosion Potential (E_corr) converted to Volts vs. Standard Hydrogen Electrode.
+galvanic_series,icorr_uA_cm2,float64,numeric,µA/cm²,495,Standardized Corrosion Current Density (i_corr) at E_corr in microamperes per square centimeter.
+galvanic_series,beta_a_mV_dec,float64,numeric,mV/dec,495,Strictly positive anodic Tafel Slope (beta_a) in millivolts per decade of current density.
+galvanic_series,beta_c_mV_dec,float64,numeric,mV/dec,495,Strictly positive cathodic Tafel Slope (beta_c) in millivolts per decade of current density.
+galvanic_series,record_count,int64,numeric,count,495,"Number of harmonized experimental records aggregated for that (Solution, Metal) pair."
+galvanic_series,galvanic_rank,int64,numeric,integer rank (1..N),495,"Monotonic Galvanic Series rank within a Solution (1 = most Active Metal, N = most Noble Metal)."
+galvanic_series,metals_in_solution,int64,numeric,count,495,Total distinct Metals evaluated in that Solution within the Galvanic Series.
+galvanic_series,relative_nobility,object,categorical,role label,495,"Qualitative galvanic role within the Solution (Most Active, Intermediate, Most Noble)."
