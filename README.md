@@ -251,8 +251,7 @@
 - **跨平台限制**：PyInstaller **不支援跨系統交叉編譯**。請務必在 **64 位元 Windows（Win 10 / 11）** 環境下執行打包（在 macOS 僅能產出 macOS 執行檔，無法產出 `.exe`）。
 - **一鍵自動打包（推薦）**：
   ```bat
-  .venv\Scripts\pip.exe install -r requirements.txt pyinstaller
-  build_exe.bat
+  .venv\Scripts\pip install -r requirements.txt pyinstaller && build_exe.bat
   ```
   腳本會依序執行：(1) 預建最新 Parquet 與全部 6 個 `.joblib` 模型 → (2) 以 PyInstaller 封裝程式與相依套件 → (3) 自動將外部 `data\raw` 與 `data\processed` 複製到 `dist\CorrosionSimulator\data\`（與 `.exe` 同層）。
 - **關鍵打包與入口設計要點**：
