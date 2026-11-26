@@ -28,6 +28,12 @@ from corrosion_simulator.ml_predictor import (
     plot_tafel_uncertainty_band,
     propagate_uncertainty_monte_carlo,
 )
+from corrosion_simulator.solvent_constants import (
+    DEFAULT_UNKNOWN_ORGANIC_SOLVENT,
+    WATER_PROPERTIES,
+    compute_mixture_solvent_descriptors,
+    lookup_solvent_properties,
+)
 
 
 class TestFeatureExtractionAndApplicabilityDomain(unittest.TestCase):
@@ -434,6 +440,175 @@ class TestPartialTargetMLTraining(unittest.TestCase):
         cv_map = {m.target: m for m in cv}
         self.assertEqual(cv_map["Ecorr_V_SHE"].n_samples, len(db.electrochemical_database) + 4)
         self.assertEqual(cv_map["log10_icorr_uA_cm2"].n_samples, len(db.electrochemical_database) + 3)
+
+
+class TestSolventDescriptorsAndWaterWeightedFeatures(unittest.TestCase):
+    """Issue 02: solvent lookup, continuous solvent descriptors, water-weighted Pourbaix features, and AD."""
+
+    def test_solvent_lookup_covers_common_wet_clean_solvents_and_unseen_fallback(self) -> None:
+        self.assertEqual(lookup_solvent_properties("DI water"), WATER_PROPERTIES)
+        for name, expected_family, expected_protic in (
+            ("EG", "glycol", 1.0),
+            ("PG", "glycol", 1.0),
+            ("IPA", "alcohol", 1.0),
+            ("EtOH", "alcohol", 1.0),
+            ("MeOH", "alcohol", 1.0),
+            ("DMSO", "polar_aprotic", 0.0),
+            ("NMP", "polar_aprotic", 0.0),
+            ("DMF", "polar_aprotic", 0.0),
+            ("acetone", "polar_aprotic", 0.0),
+        ):
+            props = lookup_solvent_properties(name)
+            self.assertEqual(props.solvent_family, expected_family)
+            self.assertEqual(props.is_protic, expected_protic)
+            self.assertGreater(props.dielectric_constant, 0.0)
+            self.assertGreater(props.polarity_index, 0.0)
+
+        unseen = lookup_solvent_properties("exotic_novel_solvent_xyz")
+        self.assertEqual(unseen, DEFAULT_UNKNOWN_ORGANIC_SOLVENT)
+
+    def test_feature_extractor_solvent_descriptors_pourbaix_scaling_and_fold_median_imputation(self) -> None:
+        seed_db = HarmonizedDatabase.from_seed()
+        extractor = ElectrochemicalFeatureExtractor(material_properties=seed_db.material_properties)
+        extractor.fit(seed_db.electrochemical_database)
+        names = extractor.feature_names
+
+        for col in (
+            "water_content_wt_pct",
+            "effective_dielectric_constant",
+            "solvent_polarity_index",
+            "is_protic_solvent",
+        ):
+            self.assertIn(col, names)
+
+        # Cu Pourbaix passive oxide window is [7.0, 12.0] -> pH=9.0 has indicator=1.0, pH=4.0 has distance=3.0
+        x_aq_pass = extractor.transform_query(
+            MLFeatureQuery(metal="Cu", pH=9.0, water_content_wt_pct=100.0)
+        )
+        x_semi_pass = extractor.transform_query(
+            MLFeatureQuery(
+                metal="Cu",
+                pH=9.0,
+                organic_solvent_type="DMSO",
+                water_content_wt_pct=50.0,
+                base_solvent="DI water",
+            )
+        )
+        x_nonaq_pass = extractor.transform_query(
+            MLFeatureQuery(
+                metal="Cu",
+                pH=9.0,
+                organic_solvent_type="DMSO",
+                water_content_wt_pct=0.0,
+                base_solvent="DMSO",
+            )
+        )
+
+        idx_water = names.index("water_content_wt_pct")
+        idx_eps = names.index("effective_dielectric_constant")
+        idx_pol = names.index("solvent_polarity_index")
+        idx_prot = names.index("is_protic_solvent")
+        idx_pb_ind = names.index("pourbaix_passivation_indicator")
+        idx_pb_dist = names.index("pourbaix_pH_distance")
+
+        self.assertAlmostEqual(float(x_aq_pass[0, idx_water]), 100.0, places=6)
+        self.assertAlmostEqual(float(x_aq_pass[0, idx_eps]), WATER_PROPERTIES.dielectric_constant, places=4)
+        self.assertAlmostEqual(float(x_aq_pass[0, idx_pb_ind]), 1.0, places=6)
+
+        exp_eps_50, exp_pol_50, exp_prot_50 = compute_mixture_solvent_descriptors(50.0, "DMSO")
+        self.assertAlmostEqual(float(x_semi_pass[0, idx_water]), 50.0, places=6)
+        self.assertAlmostEqual(float(x_semi_pass[0, idx_eps]), exp_eps_50, places=6)
+        self.assertAlmostEqual(float(x_semi_pass[0, idx_pol]), exp_pol_50, places=6)
+        self.assertAlmostEqual(float(x_semi_pass[0, idx_prot]), exp_prot_50, places=6)
+        self.assertAlmostEqual(float(x_semi_pass[0, idx_pb_ind]), 0.5, places=6)
+
+        dmso_props = lookup_solvent_properties("DMSO")
+        self.assertAlmostEqual(float(x_nonaq_pass[0, idx_water]), 0.0, places=6)
+        self.assertAlmostEqual(float(x_nonaq_pass[0, idx_eps]), dmso_props.dielectric_constant, places=6)
+        self.assertAlmostEqual(float(x_nonaq_pass[0, idx_prot]), 0.0, places=6)
+        self.assertAlmostEqual(float(x_nonaq_pass[0, idx_pb_ind]), 0.0, places=6)
+
+        x_aq_acid = extractor.transform_query(
+            MLFeatureQuery(metal="Cu", pH=4.0, water_content_wt_pct=100.0)
+        )
+        x_semi_acid = extractor.transform_query(
+            MLFeatureQuery(metal="Cu", pH=4.0, organic_solvent_type="DMSO", water_content_wt_pct=40.0)
+        )
+        self.assertAlmostEqual(float(x_aq_acid[0, idx_pb_dist]), 3.0, places=6)
+        self.assertAlmostEqual(float(x_semi_acid[0, idx_pb_dist]), 3.0 * 0.4, places=6)
+
+        # Leak-free fold median imputation: two training folds with different water medians produce different imputed values
+        fold_a = pd.DataFrame(
+            [
+                {"metal": "Cu", "pH": 4.0, "temperature_C": 25.0, "water_content_wt_pct": 80.0},
+                {"metal": "Cu", "pH": 5.0, "temperature_C": 25.0, "water_content_wt_pct": 80.0},
+            ]
+        )
+        fold_b = pd.DataFrame(
+            [
+                {"metal": "Cu", "pH": 4.0, "temperature_C": 25.0, "water_content_wt_pct": 30.0},
+                {"metal": "Cu", "pH": 5.0, "temperature_C": 25.0, "water_content_wt_pct": 30.0},
+            ]
+        )
+        ext_a = ElectrochemicalFeatureExtractor(seed_db.material_properties).fit(fold_a)
+        ext_b = ElectrochemicalFeatureExtractor(seed_db.material_properties).fit(fold_b)
+        nan_query = MLFeatureQuery(metal="Cu", pH=4.5, water_content_wt_pct=float("nan"))
+        val_a = float(ext_a.transform_query(nan_query)[0, ext_a.feature_names.index("water_content_wt_pct")])
+        val_b = float(ext_b.transform_query(nan_query)[0, ext_b.feature_names.index("water_content_wt_pct")])
+        self.assertAlmostEqual(val_a, 80.0, places=6)
+        self.assertAlmostEqual(val_b, 30.0, places=6)
+
+    def test_applicability_domain_checks_water_content_and_organic_solvent_type(self) -> None:
+        seed_db = HarmonizedDatabase.from_seed()
+        checker = ApplicabilityDomainChecker(k=3).fit(seed_db.electrochemical_database)
+
+        # Seed is 100% aqueous with organic_solvent_type="None"; semi-aqueous DMSO query must trigger AD warnings
+        ood_solvent = checker.evaluate(
+            MLFeatureQuery(
+                metal="Cu",
+                pH=4.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                temperature_C=25.0,
+                organic_solvent_type="DMSO",
+                water_content_wt_pct=50.0,
+            )
+        )
+        self.assertFalse(ood_solvent.in_bounding_box)
+        self.assertEqual(ood_solvent.confidence_tier, "Low")
+        self.assertIn("water_content_wt_pct", ood_solvent.out_of_box_features)
+        self.assertIn("organic_solvent_type=DMSO", ood_solvent.unseen_categories)
+
+    def test_all_six_model_families_train_save_load_and_predict_with_solvent_features(self) -> None:
+        from corrosion_simulator.ml_predictor import SUPPORTED_MODEL_FAMILIES
+
+        seed_db = HarmonizedDatabase.from_seed()
+        semi_query = MLFeatureQuery(
+            metal="Cu",
+            pH=4.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            temperature_C=25.0,
+            organic_solvent_type="EG",
+            water_content_wt_pct=60.0,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for family in SUPPORTED_MODEL_FAMILIES:
+                predictor = HybridMLPredictor(
+                    model_family=family,
+                    random_state=42,
+                    n_estimators=15,
+                    n_bootstrap=4,
+                ).fit(seed_db)
+                self.assertIn("effective_dielectric_constant", predictor.feature_extractor.feature_names)
+                pred = predictor.predict(semi_query)
+                self.assertTrue(np.isfinite(pred.Ecorr_V_SHE.mean))
+                self.assertGreater(pred.icorr_uA_cm2_median, 0.0)
+                bundle_path = Path(tmpdir) / f"{family}.joblib"
+                predictor.save(bundle_path)
+                loaded = HybridMLPredictor.load(bundle_path)
+                pred_loaded = loaded.predict(semi_query)
+                self.assertAlmostEqual(pred.Ecorr_V_SHE.mean, pred_loaded.Ecorr_V_SHE.mean, places=10)
 
 
 if __name__ == "__main__":

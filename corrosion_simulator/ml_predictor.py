@@ -38,6 +38,7 @@ from corrosion_simulator.physics import (
     calculate_faraday_corrosion_rate,
 )
 from corrosion_simulator.seed_data import SEED_MATERIAL_PROPERTIES
+from corrosion_simulator.solvent_constants import compute_mixture_solvent_descriptors
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -111,12 +112,14 @@ _APPLICABILITY_NUMERIC_COLS: Final[tuple[str, ...]] = (
     "oxidizer_concentration",
     "acid_concentration",
     "inhibitor_concentration",
+    "water_content_wt_pct",
 )
 
 _APPLICABILITY_CATEGORICAL_COLS: Final[tuple[str, ...]] = (
     "oxidizer_type",
     "acid_type",
     "inhibitor_type",
+    "organic_solvent_type",
 )
 
 _SEED_MATERIAL_MAP: Final[dict[str, dict[str, Any]]] = {
@@ -138,6 +141,9 @@ class MLFeatureQuery:
     inhibitor_type: str = "None"
     inhibitor_concentration: float = 0.0
     ORP_mV: float | None = None
+    organic_solvent_type: str = "None"
+    water_content_wt_pct: float = 100.0
+    base_solvent: str = "DI water"
 
     @classmethod
     def from_exposure_condition(cls, condition: ExposureCondition | MLFeatureQuery) -> MLFeatureQuery:
@@ -156,6 +162,12 @@ class MLFeatureQuery:
         )
 
     def to_record_dict(self) -> dict[str, Any]:
+        base_label = _clean_category(self.base_solvent)
+        water_val = (
+            np.nan
+            if (self.water_content_wt_pct is None or not math.isfinite(float(self.water_content_wt_pct)))
+            else float(self.water_content_wt_pct)
+        )
         return {
             "metal": str(self.metal).strip(),
             "pH": float(self.pH),
@@ -167,6 +179,9 @@ class MLFeatureQuery:
             "inhibitor_type": _clean_category(self.inhibitor_type),
             "inhibitor_concentration": float(self.inhibitor_concentration),
             "ORP_mV": np.nan if self.ORP_mV is None else float(self.ORP_mV),
+            "organic_solvent_type": _clean_category(self.organic_solvent_type),
+            "water_content_wt_pct": water_val,
+            "base_solvent": "DI water" if base_label == "None" else base_label,
         }
 
 
@@ -221,11 +236,18 @@ class ElectrochemicalFeatureExtractor:
         work = df.copy()
         work["metal"] = work["metal"].astype(str).str.strip()
 
-        for col in ("oxidizer_type", "acid_type", "inhibitor_type"):
+        for col in ("oxidizer_type", "acid_type", "inhibitor_type", "organic_solvent_type"):
             if col in work.columns:
                 work[col] = work[col].apply(_clean_category)
             else:
                 work[col] = "None"
+
+        if "base_solvent" in work.columns:
+            work["base_solvent"] = work["base_solvent"].apply(
+                lambda v: "DI water" if _clean_category(v) == "None" else _clean_category(v)
+            )
+        else:
+            work["base_solvent"] = "DI water"
 
         for col in (
             "pH",
@@ -234,6 +256,7 @@ class ElectrochemicalFeatureExtractor:
             "acid_concentration",
             "inhibitor_concentration",
             "ORP_mV",
+            "water_content_wt_pct",
         ):
             if col in work.columns:
                 work[col] = pd.to_numeric(work[col], errors="coerce")
@@ -265,7 +288,7 @@ class ElectrochemicalFeatureExtractor:
         work = self._enrich_dataframe(df)
 
         # Learn training-only medians for numeric columns (falling back to physical defaults only if all NaN)
-        fallback_defaults = {"pH": 7.0, "temperature_C": 25.0}
+        fallback_defaults = {"pH": 7.0, "temperature_C": 25.0, "water_content_wt_pct": 100.0}
         self._numeric_medians = {}
         for col in (
             *_MATERIAL_DESCRIPTOR_COLS,
@@ -275,6 +298,7 @@ class ElectrochemicalFeatureExtractor:
             "acid_concentration",
             "inhibitor_concentration",
             "ORP_mV",
+            "water_content_wt_pct",
         ):
             default_val = fallback_defaults.get(col, 0.0)
             med = float(work[col].median()) if work[col].notna().any() else default_val
@@ -302,6 +326,10 @@ class ElectrochemicalFeatureExtractor:
             "log1p_inhibitor_conc",
             "pourbaix_passivation_indicator",
             "pourbaix_pH_distance",
+            "water_content_wt_pct",
+            "effective_dielectric_constant",
+            "solvent_polarity_index",
+            "is_protic_solvent",
         ]
         cat_names = [
             f"{col}__{cat}"
@@ -330,17 +358,34 @@ class ElectrochemicalFeatureExtractor:
         pb_min = work["pourbaix_stable_pH_min"].to_numpy(dtype=float)
         pb_max = work["pourbaix_stable_pH_max"].to_numpy(dtype=float)
 
-        # Engineered physicochemical interaction features
+        # Engineered physicochemical interaction features & water-weighted Pourbaix passivation
+        water_pct = np.clip(work["water_content_wt_pct"].to_numpy(dtype=float), 0.0, 100.0)
+        water_frac = np.clip(water_pct / 100.0, 0.0, 1.0)
+        solvent_desc = [
+            compute_mixture_solvent_descriptors(w_val, org_val, base_val)
+            for w_val, org_val, base_val in zip(
+                water_pct,
+                work["organic_solvent_type"].tolist(),
+                work["base_solvent"].tolist(),
+            )
+        ]
+        eff_dielectric = np.array([d[0] for d in solvent_desc], dtype=float)
+        polarity_idx = np.array([d[1] for d in solvent_desc], dtype=float)
+        is_protic = np.array([d[2] for d in solvent_desc], dtype=float)
+
         ph_x_t = ph * temp
         e0_minus_orp = e0 - (orp_mv / 1000.0)
         log1p_ox = np.log10(1.0 + ox_c)
         log1p_acid = np.log10(1.0 + acid_c)
         log1p_inh = np.log10(1.0 + inh_c)
-        pb_indicator = ((ph >= pb_min) & (ph <= pb_max)).astype(float)
-        pb_dist = np.where(
-            ph < pb_min,
-            pb_min - ph,
-            np.where(ph > pb_max, ph - pb_max, 0.0),
+        pb_indicator = ((ph >= pb_min) & (ph <= pb_max)).astype(float) * water_frac
+        pb_dist = (
+            np.where(
+                ph < pb_min,
+                pb_min - ph,
+                np.where(ph > pb_max, ph - pb_max, 0.0),
+            )
+            * water_frac
         )
 
         numeric_cols: list[np.ndarray] = [
@@ -359,6 +404,10 @@ class ElectrochemicalFeatureExtractor:
             log1p_inh,
             pb_indicator,
             pb_dist,
+            water_pct,
+            eff_dielectric,
+            polarity_idx,
+            is_protic,
         ]
 
         cat_cols: list[np.ndarray] = []
@@ -421,13 +470,17 @@ class ApplicabilityDomainChecker:
     def fit(self, df: pd.DataFrame) -> ApplicabilityDomainChecker:
         work = df.copy()
         work["metal"] = work["metal"].astype(str).str.strip()
+        ad_numeric_defaults = {
+            "temperature_C": 25.0,
+            "pH": 7.0,
+            "water_content_wt_pct": 100.0,
+        }
         for col in _APPLICABILITY_NUMERIC_COLS:
+            default_val = ad_numeric_defaults.get(col, 0.0)
             if col in work.columns:
-                work[col] = pd.to_numeric(work[col], errors="coerce").fillna(
-                    25.0 if col == "temperature_C" else (7.0 if col == "pH" else 0.0)
-                )
+                work[col] = pd.to_numeric(work[col], errors="coerce").fillna(default_val)
             else:
-                work[col] = 25.0 if col == "temperature_C" else (7.0 if col == "pH" else 0.0)
+                work[col] = default_val
         for col in _APPLICABILITY_CATEGORICAL_COLS:
             if col in work.columns:
                 work[col] = work[col].apply(_clean_category)

@@ -1,35 +1,35 @@
 {
   "schema_version": 1,
-  "built_at_utc": "2026-11-25T04:05:57.808484+00:00",
+  "built_at_utc": "2026-11-26T20:13:45.763411+00:00",
   "raw_fingerprint": {
     "raw_dir": "/Users/mark/Documents/python/Corrosion simulator/data/raw",
-    "combined_sha256": "e322489054d8818f25e4c81d5a8d5cb029c6d2ed3ea0f883fc3d6df4210ffb3e",
+    "combined_sha256": "7492fe93e429dbe1572491be02cdb4a87b714e25af4b77665d7aee4fdf2e435a",
     "file_count": 3,
     "files": {
       "material_properties.csv": {
-        "sha256": "7e6cb4eff91b38784110c244a0c77f73a02b7d93e16828147a13d00bf5cf3a69",
-        "size_bytes": 2405
+        "sha256": "eb33597362403a0c4229fbb08a41142b9988479c8fe3924799b9263d1072bfb6",
+        "size_bytes": 2370
       },
       "ml_training_dataset.csv": {
-        "sha256": "9512321e39956b44a1571d2697e20efd856d2f043bd8dfd4da984e873e6f81ca",
-        "size_bytes": 8237991
+        "sha256": "2435c0d58eb6fc90e77be72e9ddeff96eddac125530e0d60274cf589466997bf",
+        "size_bytes": 16013786
       },
       "solution_properties.csv": {
-        "sha256": "e17df476516859f020635a14c2bb243aab874462a1fbf8a9d0055e0d89c61cba",
-        "size_bytes": 472262
+        "sha256": "ba76faa393eb888899714dbaa3fe983bccaf8bae60bcd4f6ccac2433ad272c17",
+        "size_bytes": 760392
       }
     }
   },
   "filter_to_core_metals": false,
   "supplement_missing_core_metals": false,
-  "n_records": 2012,
-  "n_complete_pairs": 2012,
-  "n_partial_records": 1792,
-  "n_derived_icorr_cr": 108,
-  "n_derived_icorr_rp": 107,
-  "n_rejected": 188,
-  "n_solutions": 852,
-  "n_materials": 19,
+  "n_records": 3182,
+  "n_complete_pairs": 3182,
+  "n_partial_records": 2830,
+  "n_derived_icorr_cr": 146,
+  "n_derived_icorr_rp": 131,
+  "n_rejected": 334,
+  "n_solutions": 1300,
+  "n_materials": 21,
   "available_metals": [
     "Cu",
     "Co",
@@ -42,14 +42,16 @@
     "Fe",
     "Ni",
     "Cr",
-    "TiN",
     "Zn",
+    "TiN",
+    "Ag",
     "Mg",
     "Sn",
-    "Ag",
+    "Mn",
     "Pt",
     "Au",
-    "Pd"
+    "Pd",
+    "WN"
   ],
   "core_metals_present": [
     "Cu",
@@ -65,35 +67,39 @@
     "Fe",
     "Ni",
     "Cr",
-    "TiN",
     "Zn",
+    "TiN",
+    "Ag",
     "Mg",
     "Sn",
-    "Ag",
+    "Mn",
     "Pt",
     "Au",
-    "Pd"
+    "Pd",
+    "WN"
   ],
   "metal_sample_counts": {
-    "Ti": 630,
-    "Cu": 446,
-    "Fe": 187,
-    "Co": 172,
-    "Al": 97,
-    "Mo": 96,
-    "W": 85,
-    "Ni": 75,
-    "Cr": 57,
-    "TiN": 48,
-    "Ta": 29,
-    "Zn": 28,
-    "Mg": 17,
+    "Cu": 956,
+    "Ti": 653,
+    "Fe": 465,
+    "W": 232,
+    "Co": 188,
+    "Al": 157,
+    "Ni": 104,
+    "Mo": 98,
+    "Cr": 74,
+    "Zn": 66,
+    "TiN": 51,
+    "Ta": 35,
+    "Ag": 25,
+    "Mg": 23,
+    "Sn": 15,
     "Ru": 15,
-    "Sn": 11,
-    "Ag": 9,
-    "Pt": 4,
+    "Mn": 12,
+    "Pt": 5,
     "Pd": 3,
-    "Au": 3
+    "Au": 3,
+    "WN": 2
   },
   "missing_faraday_materials": [],
   "tables": {
@@ -108,66 +114,66 @@
     "random_forest": {
       "path": "models/random_forest.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 3042,
-        "log10_icorr_uA_cm2": 2774,
-        "beta_a_mV_dec": 821,
-        "beta_c_mV_dec": 756
+        "Ecorr_V_SHE": 4777,
+        "log10_icorr_uA_cm2": 4417,
+        "beta_a_mV_dec": 1559,
+        "beta_c_mV_dec": 1461
       },
       "gp_subsampled": false
     },
     "extra_trees": {
       "path": "models/extra_trees.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 3042,
-        "log10_icorr_uA_cm2": 2774,
-        "beta_a_mV_dec": 821,
-        "beta_c_mV_dec": 756
+        "Ecorr_V_SHE": 4777,
+        "log10_icorr_uA_cm2": 4417,
+        "beta_a_mV_dec": 1559,
+        "beta_c_mV_dec": 1461
       },
       "gp_subsampled": false
     },
     "gaussian_process": {
       "path": "models/gaussian_process.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 3042,
-        "log10_icorr_uA_cm2": 2774,
-        "beta_a_mV_dec": 821,
-        "beta_c_mV_dec": 756
+        "Ecorr_V_SHE": 4777,
+        "log10_icorr_uA_cm2": 4417,
+        "beta_a_mV_dec": 1559,
+        "beta_c_mV_dec": 1461
       },
       "gp_subsampled": true
     },
     "rf_gp_ensemble": {
       "path": "models/rf_gp_ensemble.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 3042,
-        "log10_icorr_uA_cm2": 2774,
-        "beta_a_mV_dec": 821,
-        "beta_c_mV_dec": 756
+        "Ecorr_V_SHE": 4777,
+        "log10_icorr_uA_cm2": 4417,
+        "beta_a_mV_dec": 1559,
+        "beta_c_mV_dec": 1461
       },
       "gp_subsampled": true
     },
     "hist_gradient_boosting": {
       "path": "models/hist_gradient_boosting.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 3042,
-        "log10_icorr_uA_cm2": 2774,
-        "beta_a_mV_dec": 821,
-        "beta_c_mV_dec": 756
+        "Ecorr_V_SHE": 4777,
+        "log10_icorr_uA_cm2": 4417,
+        "beta_a_mV_dec": 1559,
+        "beta_c_mV_dec": 1461
       },
       "gp_subsampled": false
     },
     "gradient_boosting": {
       "path": "models/gradient_boosting.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 3042,
-        "log10_icorr_uA_cm2": 2774,
-        "beta_a_mV_dec": 821,
-        "beta_c_mV_dec": 756
+        "Ecorr_V_SHE": 4777,
+        "log10_icorr_uA_cm2": 4417,
+        "beta_a_mV_dec": 1559,
+        "beta_c_mV_dec": 1461
       },
       "gp_subsampled": false
     }
   },
   "warnings": [
-    "Quarantined 188 invalid/incomplete raw record(s) to rejected_rows.csv.",
+    "Quarantined 334 invalid/incomplete raw record(s) to rejected_rows.csv.",
     "Model 'gaussian_process' subsampled GP training set to 2500 samples for scalability.",
     "Model 'rf_gp_ensemble' subsampled GP training set to 2500 samples for scalability."
   ]

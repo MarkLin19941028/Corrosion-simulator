@@ -7,13 +7,20 @@ import unittest
 import pandas as pd
 
 from corrosion_simulator.database import (
+    AQUEOUS_SOLVENT_SUBCLASSES,
     CORE_METALS,
+    INFERRED_REGIME_DEFAULT_WATER_WEIGHT_FACTOR,
+    ORGANIC_SOLVENT_SUBCLASSES,
+    SOLVENT_REGIMES,
     ExposureCondition,
     ExposureLookupResult,
     HarmonizedDatabase,
+    classify_solvent_regime,
+    classify_solvent_subclass,
     convert_potential_to_she,
     derive_icorr_from_cr,
     derive_icorr_from_rp,
+    infer_water_content_and_regime,
     normalize_current_density_to_uA_cm2,
     normalize_tafel_slope_to_mV_dec,
 )
@@ -723,6 +730,611 @@ class TestFilteringOptimizationAndPhysicalDerivation(unittest.TestCase):
         self.assertIn("EXTREME_ICORR", rej.index)
         self.assertIn("icorr_out_of_physical_bounds", str(rej.loc["EXTREME_ICORR", "rejection_reason"]))
         self.assertIn("MISSING_BOTH", rej.index)
+
+
+class TestSolventRegimeClassificationAndWaterInference(unittest.TestCase):
+    """Issue 01: solvent_regime thresholds, solvent_subclass taxonomy, 3-tier water inference, and quality discount."""
+
+    def test_water_content_regime_thresholds_and_boundaries(self) -> None:
+        self.assertEqual(classify_solvent_regime(100.0), "aqueous")
+        self.assertEqual(classify_solvent_regime(90.0), "aqueous")
+        self.assertEqual(classify_solvent_regime(89.99), "semi_aqueous")
+        self.assertEqual(classify_solvent_regime(50.0), "semi_aqueous")
+        self.assertEqual(classify_solvent_regime(1.0), "semi_aqueous")
+        self.assertEqual(classify_solvent_regime(0.99), "non_aqueous")
+        self.assertEqual(classify_solvent_regime(0.0), "non_aqueous")
+        with self.assertRaises(ValueError):
+            classify_solvent_regime(float("nan"))
+
+        raw_echem = pd.DataFrame(
+            [
+                {
+                    "record_id": f"B_{idx}",
+                    "metal": "Cu",
+                    "solution_id": f"SOL_B_{idx}",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.25,
+                    "icorr_uA_cm2": 2.0 + idx,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "water_content_wt_pct": water_pct,
+                    "organic_solvent_type": "EG" if water_pct < 100.0 else "None",
+                }
+                for idx, water_pct in enumerate((100.0, 90.0, 89.99, 1.0, 0.99, 0.0))
+            ]
+        )
+        db = HarmonizedDatabase.from_raw_tables(raw_echem, supplement_missing_core_metals=False)
+        expected = ["aqueous", "aqueous", "semi_aqueous", "semi_aqueous", "non_aqueous", "non_aqueous"]
+        sol = db.solution_properties.set_index("solution_id")
+        echem = db.electrochemical_database.set_index("record_id")
+        for idx, expected_regime in enumerate(expected):
+            self.assertEqual(sol.loc[f"SOL_B_{idx}", "solvent_regime"], expected_regime)
+            self.assertEqual(echem.loc[f"B_{idx}", "solvent_regime"], expected_regime)
+
+    def test_solvent_subclass_taxonomy_for_aqueous_and_organic_regimes(self) -> None:
+        # Aqueous pH and buffer subclasses
+        self.assertEqual(classify_solvent_subclass("aqueous", pH=2.5), "acidic")
+        self.assertEqual(classify_solvent_subclass("aqueous", pH=7.0), "neutral")
+        self.assertEqual(classify_solvent_subclass("aqueous", pH=10.5), "alkaline")
+        self.assertEqual(
+            classify_solvent_subclass("aqueous", pH=7.4, solution_category="buffered"),
+            "buffered",
+        )
+        self.assertEqual(
+            classify_solvent_subclass("aqueous", pH=7.2, solution_name="Phosphate buffer"),
+            "buffered",
+        )
+
+        # Semi-aqueous & non-aqueous chemical families
+        for regime in ("semi_aqueous", "non_aqueous"):
+            self.assertEqual(classify_solvent_subclass(regime, organic_solvent_type="EG"), "glycol")
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="propylene glycol"),
+                "glycol",
+            )
+            self.assertEqual(classify_solvent_subclass(regime, organic_solvent_type="IPA"), "alcohol")
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="ethanol"), "alcohol"
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="DMSO"), "polar_aprotic"
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="NMP"), "polar_aprotic"
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="DMF"), "polar_aprotic"
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="acetone"),
+                "polar_aprotic",
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, base_solvent="glacial acetic acid"),
+                "organic_acid",
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="glycolic acid"),
+                "organic_acid",
+            )
+            self.assertEqual(
+                classify_solvent_subclass(regime, organic_solvent_type="BMIM-BF4 ionic liquid"),
+                "other_organic",
+            )
+            self.assertEqual(
+                classify_solvent_subclass(
+                    regime,
+                    organic_solvent_type="BMIM-BF4",
+                    acid_type="citric acid",
+                ),
+                "other_organic",
+            )
+
+    def test_three_tier_water_fallback_and_quality_penalty(self) -> None:
+        # Direct helper checks for the 3 provenance tiers
+        self.assertEqual(
+            infer_water_content_and_regime(organic_solvent_type="DMSO", organic_solvent_concentration=30.0),
+            (70.0, "reported", "semi_aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="DI water"),
+            (100.0, "inferred_aqueous", "aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="DI-water"),
+            (100.0, "inferred_aqueous", "aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="ultrapure DI water"),
+            (100.0, "inferred_aqueous", "aqueous"),
+        )
+        for aq_label in ("ultra-pure water", "de-ionized water", "double-distilled water"):
+            self.assertEqual(
+                infer_water_content_and_regime(base_solvent=aq_label),
+                (100.0, "inferred_aqueous", "aqueous"),
+            )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="water-EG"),
+            (50.0, "inferred_regime_default", "semi_aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(
+                base_solvent="DMSO",
+                organic_solvent_type="DMSO",
+                organic_solvent_concentration=100.0,
+            ),
+            (0.0, "reported", "non_aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="DI water", organic_solvent_type="EG"),
+            (50.0, "inferred_regime_default", "semi_aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="DMSO"),
+            (0.0, "inferred_regime_default", "non_aqueous"),
+        )
+        self.assertEqual(
+            infer_water_content_and_regime(base_solvent="non-aqueous"),
+            (0.0, "inferred_regime_default", "non_aqueous"),
+        )
+        zero_org_nonaq = infer_water_content_and_regime(
+            base_solvent="DMSO",
+            organic_solvent_type="None",
+            organic_solvent_concentration=0.0,
+        )
+        self.assertEqual(zero_org_nonaq, (0.0, "inferred_regime_default", "non_aqueous"))
+        self.assertEqual(zero_org_nonaq.water_content_source, "inferred_regime_default")
+        # Non-aqueous base_solvent + organic co-solvent concentration must NOT assume water = 100 - org_pct
+        self.assertEqual(
+            infer_water_content_and_regime(
+                base_solvent="DMSO",
+                organic_solvent_type="EG",
+                organic_solvent_concentration=10.0,
+            ),
+            (0.0, "inferred_regime_default", "non_aqueous"),
+        )
+
+        raw_echem = pd.DataFrame(
+            [
+                # Tier 1a: explicit water_content_wt_pct -> reported, no penalty
+                {
+                    "record_id": "TIER1_WATER",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T1W",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.20,
+                    "icorr_uA_cm2": 1.0,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "IPA",
+                    "water_content_wt_pct": 65.0,
+                    "data_quality_score": 0.90,
+                },
+                # Tier 1b: explicit organic concentration (wt%) -> 100 - 30 = 70 wt%, reported, no penalty
+                {
+                    "record_id": "TIER1_ORG_PCT",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T1O",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.21,
+                    "icorr_uA_cm2": 1.1,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "DMSO",
+                    "organic_solvent_concentration": 30.0,
+                    "organic_solvent_concentration_unit": "wt%",
+                    "data_quality_score": 0.90,
+                },
+                # Tier 1b: fraction unit (0.4 -> 40 wt% organic -> 60 wt% water), reported
+                {
+                    "record_id": "TIER1_FRACTION",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T1F",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.215,
+                    "icorr_uA_cm2": 1.15,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "NMP",
+                    "organic_solvent_concentration": 0.4,
+                    "organic_solvent_concentration_unit": "fraction",
+                    "data_quality_score": 0.90,
+                },
+                # Tier 2: DI water without organic co-solvent -> 100.0, inferred_aqueous, no penalty
+                {
+                    "record_id": "TIER2_AQ",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T2",
+                    "pH": 3.5,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.22,
+                    "icorr_uA_cm2": 1.2,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "data_quality_score": 0.90,
+                },
+                # Tier 3: organic co-solvent without numeric % concentration -> 50.0, inferred_regime_default, x0.85
+                {
+                    "record_id": "TIER3_SEMI",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T3S",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.23,
+                    "icorr_uA_cm2": 1.3,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "EG",
+                    "organic_solvent_concentration": None,
+                    "data_quality_score": 0.90,
+                },
+                # Tier 3: mM concentration unit is not wt% -> falls back to 50.0, inferred_regime_default, x0.85
+                {
+                    "record_id": "TIER3_MM",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T3M",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.235,
+                    "icorr_uA_cm2": 1.35,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "EG",
+                    "organic_solvent_concentration": 10.0,
+                    "organic_solvent_concentration_unit": "mM",
+                    "data_quality_score": 0.90,
+                },
+                # Tier 3: non-aqueous base_solvent without concentration -> 0.0, inferred_regime_default, x0.85
+                {
+                    "record_id": "TIER3_NONAQ",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T3N",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.24,
+                    "icorr_uA_cm2": 1.4,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DMSO",
+                    "data_quality_score": 0.90,
+                },
+                # Tier 3: floor clamping check at 0.05
+                {
+                    "record_id": "TIER3_FLOOR",
+                    "metal": "Cu",
+                    "solution_id": "SOL_T3F",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.245,
+                    "icorr_uA_cm2": 1.45,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "NMP",
+                    "data_quality_score": 0.05,
+                },
+            ]
+        )
+
+        db = HarmonizedDatabase.from_raw_tables(raw_echem, supplement_missing_core_metals=False)
+        echem = db.electrochemical_database.set_index("record_id")
+        sol = db.solution_properties.set_index("solution_id")
+
+        self.assertAlmostEqual(float(echem.loc["TIER1_WATER", "water_content_wt_pct"]), 65.0)
+        self.assertEqual(echem.loc["TIER1_WATER", "water_content_source"], "reported")
+        self.assertEqual(echem.loc["TIER1_WATER", "solvent_regime"], "semi_aqueous")
+        self.assertEqual(echem.loc["TIER1_WATER", "solvent_subclass"], "alcohol")
+        self.assertAlmostEqual(float(echem.loc["TIER1_WATER", "quality_score"]), 0.90, places=6)
+
+        self.assertAlmostEqual(float(echem.loc["TIER1_ORG_PCT", "water_content_wt_pct"]), 70.0)
+        self.assertEqual(echem.loc["TIER1_ORG_PCT", "water_content_source"], "reported")
+        self.assertEqual(echem.loc["TIER1_ORG_PCT", "solvent_subclass"], "polar_aprotic")
+        self.assertAlmostEqual(float(echem.loc["TIER1_ORG_PCT", "quality_score"]), 0.90, places=6)
+
+        self.assertAlmostEqual(float(echem.loc["TIER1_FRACTION", "water_content_wt_pct"]), 60.0)
+        self.assertEqual(echem.loc["TIER1_FRACTION", "water_content_source"], "reported")
+        self.assertEqual(echem.loc["TIER1_FRACTION", "solvent_subclass"], "polar_aprotic")
+
+        self.assertAlmostEqual(float(echem.loc["TIER2_AQ", "water_content_wt_pct"]), 100.0)
+        self.assertEqual(echem.loc["TIER2_AQ", "water_content_source"], "inferred_aqueous")
+        self.assertEqual(echem.loc["TIER2_AQ", "solvent_regime"], "aqueous")
+        self.assertEqual(echem.loc["TIER2_AQ", "solvent_subclass"], "acidic")
+        self.assertAlmostEqual(float(echem.loc["TIER2_AQ", "quality_score"]), 0.90, places=6)
+
+        expected_discounted = 0.90 * INFERRED_REGIME_DEFAULT_WATER_WEIGHT_FACTOR
+        for rid, sid, exp_water, exp_regime, exp_sub in (
+            ("TIER3_SEMI", "SOL_T3S", 50.0, "semi_aqueous", "glycol"),
+            ("TIER3_MM", "SOL_T3M", 50.0, "semi_aqueous", "glycol"),
+            ("TIER3_NONAQ", "SOL_T3N", 0.0, "non_aqueous", "polar_aprotic"),
+        ):
+            self.assertAlmostEqual(float(echem.loc[rid, "water_content_wt_pct"]), exp_water)
+            self.assertEqual(echem.loc[rid, "water_content_source"], "inferred_regime_default")
+            self.assertEqual(echem.loc[rid, "solvent_regime"], exp_regime)
+            self.assertEqual(echem.loc[rid, "solvent_subclass"], exp_sub)
+            self.assertAlmostEqual(float(echem.loc[rid, "quality_score"]), expected_discounted, places=6)
+            self.assertEqual(sol.loc[sid, "water_content_source"], "inferred_regime_default")
+            self.assertAlmostEqual(float(sol.loc[sid, "water_content_wt_pct"]), exp_water)
+
+        self.assertAlmostEqual(float(echem.loc["TIER3_FLOOR", "quality_score"]), 0.05, places=6)
+
+    def test_data_dictionary_seed_and_raw_database_solvent_coverage(self) -> None:
+        required_cols = {"solvent_regime", "solvent_subclass", "water_content_wt_pct", "water_content_source"}
+
+        for label, db in (
+            ("seed", HarmonizedDatabase.from_seed()),
+            ("raw", HarmonizedDatabase.from_directory("data/raw")),
+        ):
+            with self.subTest(dataset=label):
+                self.assertTrue(required_cols.issubset(db.solution_properties.columns))
+                self.assertTrue(required_cols.issubset(db.electrochemical_database.columns))
+                self.assertFalse(
+                    db.data_dictionary["description"].str.startswith("Harmonized attribute").any()
+                )
+                for tbl in ("solution_properties", "electrochemical_database"):
+                    tbl_dd = db.data_dictionary[db.data_dictionary["table_name"] == tbl]
+                    self.assertTrue(required_cols.issubset(set(tbl_dd["column_name"])))
+                    water_row = tbl_dd[tbl_dd["column_name"] == "water_content_wt_pct"].iloc[0]
+                    self.assertEqual(water_row["unit"], "wt%")
+                for df in (db.solution_properties, db.electrochemical_database):
+                    self.assertTrue(set(df["solvent_regime"]).issubset(SOLVENT_REGIMES))
+                    self.assertTrue(df["water_content_wt_pct"].between(0.0, 100.0).all())
+                    self.assertTrue(
+                        set(df["water_content_source"]).issubset(
+                            {"reported", "inferred_aqueous", "inferred_regime_default"}
+                        )
+                    )
+                    aq_subs = set(df.loc[df["solvent_regime"] == "aqueous", "solvent_subclass"])
+                    self.assertTrue(aq_subs.issubset(AQUEOUS_SOLVENT_SUBCLASSES))
+                    org_subs = set(df.loc[df["solvent_regime"] != "aqueous", "solvent_subclass"])
+                    self.assertTrue(org_subs.issubset(ORGANIC_SOLVENT_SUBCLASSES))
+            if label == "raw":
+                raw_sol = db.solution_properties.set_index("solution_id")
+                # SOL_eba7525a: 10 mM EG (unit="mM" in components_json) -> regime default 50 wt%, glycol
+                self.assertEqual(raw_sol.loc["SOL_eba7525a", "water_content_source"], "inferred_regime_default")
+                self.assertAlmostEqual(float(raw_sol.loc["SOL_eba7525a", "water_content_wt_pct"]), 50.0)
+                self.assertEqual(raw_sol.loc["SOL_eba7525a", "solvent_regime"], "semi_aqueous")
+                self.assertEqual(raw_sol.loc["SOL_eba7525a", "solvent_subclass"], "glycol")
+                # SOL_5d8cf280: 10 % DMSO -> reported 90 wt% water
+                self.assertEqual(raw_sol.loc["SOL_5d8cf280", "water_content_source"], "reported")
+                self.assertAlmostEqual(float(raw_sol.loc["SOL_5d8cf280", "water_content_wt_pct"]), 90.0)
+                # SOL_5cef03ca: 70 % IPA -> reported 30 wt% water
+                self.assertEqual(raw_sol.loc["SOL_5cef03ca", "water_content_source"], "reported")
+                self.assertAlmostEqual(float(raw_sol.loc["SOL_5cef03ca", "water_content_wt_pct"]), 30.0)
+
+    def test_components_json_unit_fallback_and_row_level_solvent_override(self) -> None:
+        raw_sol = pd.DataFrame(
+            [
+                {
+                    "solution_id": "SOL_AQ_BASE",
+                    "solution_name": "DI water pH 7",
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "None",
+                    "pH": 7.0,
+                },
+                {
+                    "solution_id": "SOL_DMSO_30",
+                    "solution_name": "30% DMSO",
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "DMSO",
+                    "organic_solvent_concentration": 30.0,
+                    "organic_solvent_concentration_unit": "wt%",
+                    "pH": 7.0,
+                },
+                {
+                    "solution_id": "SOL_ACID_NO_PH",
+                    "solution_name": "Acidic solution without measured pH",
+                    "solution_category": "acidic",
+                    "base_solvent": "DI water",
+                    "pH": None,
+                },
+                {
+                    "solution_id": "SOL_NONAQ_BASE",
+                    "solution_name": "Neat DMSO",
+                    "base_solvent": "DMSO",
+                    "organic_solvent_type": "DMSO",
+                    "pH": 7.0,
+                },
+            ]
+        )
+        raw_echem = pd.DataFrame(
+            [
+                # Overrides non-aqueous Solution (with organic_solvent_type="DMSO") via DI water -> must NOT inherit DMSO
+                {
+                    "record_id": "ROW_NONAQ_OVERRIDE_AQ",
+                    "metal": "Cu",
+                    "solution_id": "SOL_NONAQ_BASE",
+                    "base_solvent": "DI water",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.205,
+                    "icorr_uA_cm2": 1.05,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # Explicitly overrides 30% DMSO Solution with organic_solvent_type="None" -> aqueous, no penalty
+                {
+                    "record_id": "ROW_DMSO_OVERRIDE_NONE",
+                    "metal": "Cu",
+                    "solution_id": "SOL_DMSO_30",
+                    "organic_solvent_type": "None",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.207,
+                    "icorr_uA_cm2": 1.07,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # Overrides non-aqueous DMSO Solution with methanol -> alcohol (not polar_aprotic)
+                {
+                    "record_id": "ROW_DMSO_OVERRIDE_MEOH",
+                    "metal": "Cu",
+                    "solution_id": "SOL_NONAQ_BASE",
+                    "base_solvent": "methanol",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.208,
+                    "icorr_uA_cm2": 1.08,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # pH_effective only (no pH column value) with acidic value -> acidic in both tables
+                {
+                    "record_id": "ROW_PH_EFF_ONLY",
+                    "metal": "Cu",
+                    "solution_id": "SOL_PH_EFF_ONLY",
+                    "pH_effective": 2.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.209,
+                    "icorr_uA_cm2": 1.09,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # Matches SOL_AQ_BASE with no override -> inferred_aqueous, no penalty
+                {
+                    "record_id": "ROW_AQ_PLAIN",
+                    "metal": "Cu",
+                    "solution_id": "SOL_AQ_BASE",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.20,
+                    "icorr_uA_cm2": 1.0,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # Same solution_id, but row specifies organic_solvent_type="EG" without conc -> must override to 50 wt%, x0.85
+                {
+                    "record_id": "ROW_AQ_OVERRIDE_EG",
+                    "metal": "Cu",
+                    "solution_id": "SOL_AQ_BASE",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.22,
+                    "icorr_uA_cm2": 1.5,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "organic_solvent_type": "EG",
+                    "data_quality_score": 0.90,
+                },
+                # Overrides organic_solvent_type against 30% DMSO solution -> must NOT inherit 30.0 conc
+                {
+                    "record_id": "ROW_DMSO_OVERRIDE_EG",
+                    "metal": "Cu",
+                    "solution_id": "SOL_DMSO_30",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.23,
+                    "icorr_uA_cm2": 1.7,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "organic_solvent_type": "EG",
+                    "data_quality_score": 0.90,
+                },
+                # Missing pH with solution_category="acidic" -> must stay "acidic" in both tables
+                {
+                    "record_id": "ROW_ACID_NO_PH",
+                    "metal": "Cu",
+                    "solution_id": "SOL_ACID_NO_PH",
+                    "pH": None,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.235,
+                    "icorr_uA_cm2": 1.8,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "data_quality_score": 0.90,
+                },
+                # Missing organic_solvent_concentration_unit column, unit="mM" inside components_json -> must NOT do 100 - 10
+                {
+                    "record_id": "ROW_COMP_MM",
+                    "metal": "Cu",
+                    "solution_id": "SOL_COMP_MM",
+                    "pH": 7.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.24,
+                    "icorr_uA_cm2": 2.0,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                    "base_solvent": "DI water",
+                    "organic_solvent_type": "EG",
+                    "organic_solvent_concentration": 10.0,
+                    "components_json": '[{"species": "EG", "conc": "10", "unit": "mM", "role": "organic_solvent"}]',
+                    "data_quality_score": 0.90,
+                },
+            ]
+        )
+
+        db = HarmonizedDatabase.from_raw_tables(
+            raw_echem, solution_df=raw_sol, supplement_missing_core_metals=False
+        )
+        echem = db.electrochemical_database.set_index("record_id")
+        sol = db.solution_properties.set_index("solution_id")
+
+        self.assertEqual(echem.loc["ROW_AQ_PLAIN", "water_content_source"], "inferred_aqueous")
+        self.assertAlmostEqual(float(echem.loc["ROW_AQ_PLAIN", "water_content_wt_pct"]), 100.0)
+        self.assertAlmostEqual(float(echem.loc["ROW_AQ_PLAIN", "quality_score"]), 0.90, places=6)
+
+        for rid in ("ROW_NONAQ_OVERRIDE_AQ", "ROW_DMSO_OVERRIDE_NONE"):
+            self.assertEqual(echem.loc[rid, "water_content_source"], "inferred_aqueous")
+            self.assertAlmostEqual(float(echem.loc[rid, "water_content_wt_pct"]), 100.0)
+            self.assertEqual(echem.loc[rid, "solvent_regime"], "aqueous")
+            self.assertAlmostEqual(float(echem.loc[rid, "quality_score"]), 0.90, places=6)
+
+        self.assertEqual(sol.loc["SOL_ACID_NO_PH", "solvent_subclass"], "acidic")
+        self.assertEqual(echem.loc["ROW_ACID_NO_PH", "solvent_subclass"], "acidic")
+        self.assertEqual(sol.loc["SOL_PH_EFF_ONLY", "solvent_subclass"], "acidic")
+        self.assertEqual(echem.loc["ROW_PH_EFF_ONLY", "solvent_subclass"], "acidic")
+
+        self.assertEqual(echem.loc["ROW_DMSO_OVERRIDE_MEOH", "water_content_source"], "inferred_regime_default")
+        self.assertEqual(echem.loc["ROW_DMSO_OVERRIDE_MEOH", "solvent_regime"], "non_aqueous")
+        self.assertEqual(echem.loc["ROW_DMSO_OVERRIDE_MEOH", "solvent_subclass"], "alcohol")
+        self.assertAlmostEqual(
+            float(echem.loc["ROW_DMSO_OVERRIDE_MEOH", "quality_score"]),
+            0.90 * INFERRED_REGIME_DEFAULT_WATER_WEIGHT_FACTOR,
+            places=6,
+        )
+
+        # Verify pH_effective-only DataFrame (no pH column) agrees on acidic subclass in both tables
+        db_ph_eff = HarmonizedDatabase.from_raw_tables(
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": "R_PHEFF",
+                        "metal": "Cu",
+                        "solution_id": "SOL_PHEFF",
+                        "pH_effective": 2.0,
+                        "temperature_C": 25.0,
+                        "Ecorr_V_SHE": 0.21,
+                        "icorr_uA_cm2": 1.1,
+                        "beta_a_mV_dec": 60.0,
+                        "beta_c_mV_dec": 120.0,
+                    }
+                ]
+            ),
+            supplement_missing_core_metals=False,
+        )
+        self.assertEqual(db_ph_eff.solution_properties.iloc[0]["solvent_subclass"], "acidic")
+        self.assertEqual(db_ph_eff.electrochemical_database.iloc[0]["solvent_subclass"], "acidic")
+
+        expected_discounted = 0.90 * INFERRED_REGIME_DEFAULT_WATER_WEIGHT_FACTOR
+        for rid in ("ROW_AQ_OVERRIDE_EG", "ROW_DMSO_OVERRIDE_EG", "ROW_COMP_MM"):
+            self.assertEqual(echem.loc[rid, "water_content_source"], "inferred_regime_default")
+            self.assertAlmostEqual(float(echem.loc[rid, "water_content_wt_pct"]), 50.0)
+            self.assertEqual(echem.loc[rid, "solvent_regime"], "semi_aqueous")
+            self.assertEqual(echem.loc[rid, "solvent_subclass"], "glycol")
+            self.assertAlmostEqual(float(echem.loc[rid, "quality_score"]), expected_discounted, places=6)
 
 
 if __name__ == "__main__":

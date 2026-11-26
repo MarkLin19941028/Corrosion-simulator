@@ -38,7 +38,7 @@ from corrosion_simulator.paths import (
 
 ArtifactFreshnessStatus = Literal["fresh", "stale", "missing"]
 ProgressCallback = Callable[[int, int, str], None]
-MANIFEST_SCHEMA_VERSION: Final[int] = 1
+MANIFEST_SCHEMA_VERSION: Final[int] = 2
 DEFAULT_PREBUILT_MODELS: Final[tuple[ModelFamily, ...]] = (
     "random_forest",
     "extra_trees",
@@ -99,6 +99,12 @@ def check_artifacts_freshness(
         return (
             "missing",
             f"Prebuilt artifacts not found in '{proc_path}'.",
+        )
+
+    if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
+        return (
+            "stale",
+            f"Artifact schema version mismatch in '{proc_path}' (expected v{MANIFEST_SCHEMA_VERSION}); rebuild required.",
         )
 
     if not iter_raw_csv_files(raw_path):

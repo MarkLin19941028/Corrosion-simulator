@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
+import json
 import math
 from pathlib import Path
-from typing import Any, Final
+import re
+from typing import Any, Final, Literal, NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -46,6 +48,169 @@ IMPUTATION_QUALITY_PENALTY: Final[float] = 0.15
 CR_DERIVED_QUALITY_PENALTY: Final[float] = 0.15
 RP_DERIVED_QUALITY_PENALTY: Final[float] = 0.25
 INFERRED_NEUTRAL_PH_WEIGHT_FACTOR: Final[float] = 0.75
+SOLVENT_REGIMES: Final[tuple[str, ...]] = ("aqueous", "semi_aqueous", "non_aqueous")
+AQUEOUS_WATER_MIN_WT_PCT: Final[float] = 90.0
+SEMI_AQUEOUS_WATER_MIN_WT_PCT: Final[float] = 1.0
+DEFAULT_SEMI_AQUEOUS_WATER_WT_PCT: Final[float] = 50.0
+DEFAULT_NON_AQUEOUS_WATER_WT_PCT: Final[float] = 0.0
+INFERRED_REGIME_DEFAULT_WATER_WEIGHT_FACTOR: Final[float] = 0.85
+AQUEOUS_SOLVENT_SUBCLASSES: Final[tuple[str, ...]] = ("acidic", "neutral", "alkaline", "buffered")
+ORGANIC_SOLVENT_SUBCLASSES: Final[tuple[str, ...]] = (
+    "glycol",
+    "alcohol",
+    "polar_aprotic",
+    "organic_acid",
+    "other_organic",
+)
+VALID_WATER_CONTENT_SOURCES: Final[frozenset[str]] = frozenset(
+    {"reported", "inferred_aqueous", "inferred_regime_default"}
+)
+BaseSolventKind = Literal["unspecified", "aqueous", "mixed", "non_aqueous"]
+SolventRegime = Literal["aqueous", "semi_aqueous", "non_aqueous"]
+WaterContentSource = Literal["reported", "inferred_aqueous", "inferred_regime_default"]
+SolventSubclass = Literal[
+    "acidic",
+    "neutral",
+    "alkaline",
+    "buffered",
+    "glycol",
+    "alcohol",
+    "polar_aprotic",
+    "organic_acid",
+    "other_organic",
+]
+
+_AQUEOUS_BASE_SOLVENT_TOKENS: Final[frozenset[str]] = frozenset(
+    {
+        "di water",
+        "di-water",
+        "water",
+        "h2o",
+        "aqueous",
+        "deionized water",
+        "deionized-water",
+        "deionised water",
+        "deionised-water",
+        "ultrapure water",
+        "upw",
+        "distilled water",
+        "pure water",
+        "millipore water",
+        "milli-q water",
+        "milliq water",
+    }
+)
+_PERCENT_CONCENTRATION_UNITS: Final[frozenset[str]] = frozenset(
+    {"", "%", "wt%", "wt %", "vol%", "vol %", "w/w%", "v/v%", "w/w %", "v/v %", "percent", "pct"}
+)
+_FRACTION_CONCENTRATION_UNITS: Final[frozenset[str]] = frozenset(
+    {"fraction", "wt_fraction", "vol_fraction", "w/w", "v/v"}
+)
+_ORGANIC_SOLVENT_ABBREV_FAMILY: Final[dict[str, SolventSubclass]] = {
+    "eg": "glycol",
+    "pg": "glycol",
+    "deg": "glycol",
+    "teg": "glycol",
+    "bdg": "glycol",
+    "pgme": "glycol",
+    "pgmea": "glycol",
+    "dpm": "glycol",
+    "ipa": "alcohol",
+    "etoh": "alcohol",
+    "meoh": "alcohol",
+    "dmso": "polar_aprotic",
+    "nmp": "polar_aprotic",
+    "dmf": "polar_aprotic",
+    "dmac": "polar_aprotic",
+    "dma": "polar_aprotic",
+    "acn": "polar_aprotic",
+    "mecn": "polar_aprotic",
+    "thf": "polar_aprotic",
+    "pc": "polar_aprotic",
+    "ec": "polar_aprotic",
+    "dmc": "polar_aprotic",
+    "gbl": "polar_aprotic",
+    "mek": "polar_aprotic",
+    "msa": "organic_acid",
+    "tfa": "organic_acid",
+}
+_ORGANIC_SOLVENT_FAMILY_SUBSTRINGS: Final[tuple[tuple[str, SolventSubclass], ...]] = (
+    # Organic acids must be matched before generic "glycol" / "alcohol" substrings (e.g. glycolic acid)
+    ("acetic acid", "organic_acid"),
+    ("formic acid", "organic_acid"),
+    ("citric acid", "organic_acid"),
+    ("oxalic acid", "organic_acid"),
+    ("lactic acid", "organic_acid"),
+    ("malic acid", "organic_acid"),
+    ("tartaric acid", "organic_acid"),
+    ("propionic acid", "organic_acid"),
+    ("methanesulfonic acid", "organic_acid"),
+    ("trifluoroacetic acid", "organic_acid"),
+    ("glycolic acid", "organic_acid"),
+    ("organic acid", "organic_acid"),
+    ("ethylene glycol", "glycol"),
+    ("propylene glycol", "glycol"),
+    ("diethylene glycol", "glycol"),
+    ("triethylene glycol", "glycol"),
+    ("polyethylene glycol", "glycol"),
+    ("butyl diglycol", "glycol"),
+    ("butoxyethanol", "glycol"),
+    ("cellosolve", "glycol"),
+    ("1,2-propanediol", "glycol"),
+    ("ethanediol", "glycol"),
+    ("glycerol", "glycol"),
+    ("glycerin", "glycol"),
+    ("glycol", "glycol"),
+    ("isopropanol", "alcohol"),
+    ("isopropyl alcohol", "alcohol"),
+    ("2-propanol", "alcohol"),
+    ("ethyl alcohol", "alcohol"),
+    ("methyl alcohol", "alcohol"),
+    ("ethanol", "alcohol"),
+    ("methanol", "alcohol"),
+    ("propanol", "alcohol"),
+    ("butanol", "alcohol"),
+    ("alcohol", "alcohol"),
+    ("dimethyl sulfoxide", "polar_aprotic"),
+    ("dimethylsulfoxide", "polar_aprotic"),
+    ("methyl-2-pyrrolidone", "polar_aprotic"),
+    ("methylpyrrolidone", "polar_aprotic"),
+    ("dimethylformamide", "polar_aprotic"),
+    ("dimethylacetamide", "polar_aprotic"),
+    ("acetonitrile", "polar_aprotic"),
+    ("acetone", "polar_aprotic"),
+    ("propanone", "polar_aprotic"),
+    ("sulfolane", "polar_aprotic"),
+    ("tetrahydrofuran", "polar_aprotic"),
+    ("propylene carbonate", "polar_aprotic"),
+    ("ethylene carbonate", "polar_aprotic"),
+    ("butyrolactone", "polar_aprotic"),
+    ("ethyl acetate", "polar_aprotic"),
+)
+_AMBIGUOUS_WORD_BOUNDARY_CODES: Final[frozenset[str]] = frozenset({"pc", "ec", "dma", "dmc"})
+_ORGANIC_SOLVENT_WORD_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b("
+    + "|".join(
+        re.escape(code)
+        for code in _ORGANIC_SOLVENT_ABBREV_FAMILY
+        if code not in _AMBIGUOUS_WORD_BOUNDARY_CODES
+    )
+    + r")\b"
+)
+_AQUEOUS_BUFFER_WORD_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(pbs|borate|tris|hepes|mes|mops)\b"
+)
+_SOLVENT_REGIME_ALIASES: Final[dict[str, SolventRegime]] = {
+    "aqueous": "aqueous",
+    "semi_aqueous": "semi_aqueous",
+    "semi-aqueous": "semi_aqueous",
+    "semiaqueous": "semi_aqueous",
+    "non_aqueous": "non_aqueous",
+    "non-aqueous": "non_aqueous",
+    "nonaqueous": "non_aqueous",
+    "anhydrous": "non_aqueous",
+    "neat": "non_aqueous",
+}
 _FARADAY_CONSTANT_C_MOL: Final[float] = 96485.33212
 
 _CR_TO_NM_MIN: Final[dict[str, float]] = {
@@ -320,6 +485,337 @@ def normalize_category_label(value: Any) -> str:
 
 
 _normalize_oxidizer_label = normalize_category_label
+
+
+def _coerce_finite_float(value: Any) -> float | None:
+    """Convert scalar input to a finite float, returning None for nulls, booleans, or non-numeric values."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    return num if math.isfinite(num) else None
+
+
+def _clamp_water_pct(value: float) -> float:
+    """Clamp a finite water mass percentage to [0.0, 100.0]."""
+    return float(min(100.0, max(0.0, value)))
+
+
+def _normalize_solvent_regime(value: Any) -> SolventRegime | None:
+    """Normalize a solvent regime string alias to a canonical regime name, or None if unrecognized."""
+    label = normalize_category_label(value)
+    if label == "None":
+        return None
+    return _SOLVENT_REGIME_ALIASES.get(label.lower().replace(" ", "_"))
+
+
+def _classify_base_solvent(value: Any) -> BaseSolventKind:
+    """Classify a base_solvent label into 'unspecified', 'aqueous', 'mixed', or 'non_aqueous'."""
+    label = normalize_category_label(value)
+    if label == "None":
+        return "unspecified"
+    norm = " ".join(label.lower().split())
+    if norm in _AQUEOUS_BASE_SOLVENT_TOKENS:
+        return "aqueous"
+    alias_regime = _normalize_solvent_regime(norm)
+    if alias_regime == "non_aqueous":
+        return "non_aqueous"
+    if alias_regime == "semi_aqueous" or any(
+        tok in norm for tok in ("semi_aqueous", "semi-aqueous", "semiaqueous")
+    ):
+        return "mixed"
+    if alias_regime == "aqueous":
+        return "aqueous"
+    is_non_aq_prefix = norm.startswith(("non-", "non ", "anhydrous"))
+    has_water_word = bool(re.search(r"\b(water|h2o|aqueous)\b", norm))
+    has_org_hyphen_part = "-" in norm and (
+        "organic" in norm
+        or any(_match_organic_solvent_family(part.strip()) is not None for part in norm.split("-"))
+    )
+    has_mix_sep = any(sep in norm for sep in ("/", "+", " and ", "&", ",")) or has_org_hyphen_part
+    if has_water_word and has_mix_sep and not is_non_aq_prefix:
+        return "mixed"
+    if (
+        (bool(re.search(r"\b(water|h2o)\b", norm)) and not is_non_aq_prefix)
+        or norm.startswith("aqueous")
+    ):
+        return "aqueous"
+    return "non_aqueous"
+
+
+def classify_solvent_regime(water_content_wt_pct: float) -> SolventRegime:
+    """Classify a Solution's solvent regime from its water content in weight percent.
+
+    Thresholds:
+    - ``aqueous``: ``water_content_wt_pct >= 90.0``
+    - ``semi_aqueous``: ``1.0 <= water_content_wt_pct < 90.0``
+    - ``non_aqueous``: ``water_content_wt_pct < 1.0``
+    """
+    val = _coerce_finite_float(water_content_wt_pct)
+    if val is None:
+        raise ValueError(f"water_content_wt_pct must be finite, got {water_content_wt_pct!r}")
+    if val >= AQUEOUS_WATER_MIN_WT_PCT:
+        return "aqueous"
+    if val >= SEMI_AQUEOUS_WATER_MIN_WT_PCT:
+        return "semi_aqueous"
+    return "non_aqueous"
+
+
+class WaterContentInference(NamedTuple):
+    """Structured result of 3-tier water-content and solvent-regime inference."""
+
+    water_content_wt_pct: float
+    water_content_source: WaterContentSource
+    solvent_regime: SolventRegime
+
+
+def _match_organic_solvent_family(value: Any) -> SolventSubclass | None:
+    """Map an organic solvent name or phrase to a chemical family, or None if aqueous/unmatched."""
+    label = normalize_category_label(value)
+    if label == "None":
+        return None
+    norm = " ".join(label.lower().split())
+    if norm in _AQUEOUS_BASE_SOLVENT_TOKENS:
+        return None
+    if norm in _ORGANIC_SOLVENT_ABBREV_FAMILY:
+        return _ORGANIC_SOLVENT_ABBREV_FAMILY[norm]
+    for substr, family in _ORGANIC_SOLVENT_FAMILY_SUBSTRINGS:
+        if substr in norm:
+            return family
+    word_match = _ORGANIC_SOLVENT_WORD_RE.search(norm)
+    if word_match:
+        return _ORGANIC_SOLVENT_ABBREV_FAMILY[word_match.group(1)]
+    return None
+
+
+def classify_solvent_subclass(
+    solvent_regime: str,
+    *,
+    pH: Any = None,
+    solution_category: Any = None,
+    solution_name: Any = None,
+    organic_solvent_type: Any = None,
+    base_solvent: Any = None,
+    acid_type: Any = None,
+) -> SolventSubclass:
+    """Assign a chemical-family ``solvent_subclass`` conditioned on ``solvent_regime``.
+
+    - For ``aqueous``: ``acidic``, ``neutral``, ``alkaline``, or ``buffered``.
+    - For ``semi_aqueous`` / ``non_aqueous``: ``glycol``, ``alcohol``, ``polar_aprotic``,
+      ``organic_acid``, or ``other_organic``.
+    """
+    regime = _normalize_solvent_regime(solvent_regime)
+    if regime is None:
+        raise ValueError(f"Unsupported solvent_regime: {solvent_regime!r}")
+
+    if regime == "aqueous":
+        cat_norm = normalize_category_label(solution_category).lower()
+        name_norm = normalize_category_label(solution_name).lower()
+        if "buffer" in cat_norm or "buffer" in name_norm or _AQUEOUS_BUFFER_WORD_RE.search(name_norm):
+            return "buffered"
+        ph_val = _coerce_finite_float(pH)
+        if ph_val is not None:
+            if ph_val < 6.0:
+                return "acidic"
+            if ph_val <= 8.0:
+                return "neutral"
+            return "alkaline"
+        if "acid" in cat_norm:
+            return "acidic"
+        if "alkal" in cat_norm or "basic" in cat_norm:
+            return "alkaline"
+        return "neutral"
+
+    if normalize_category_label(organic_solvent_type) != "None":
+        return _match_organic_solvent_family(organic_solvent_type) or "other_organic"
+
+    candidates: list[Any] = []
+    if _classify_base_solvent(base_solvent) != "aqueous":
+        candidates.append(base_solvent)
+    candidates.extend([acid_type, solution_name])
+    for candidate in candidates:
+        family = _match_organic_solvent_family(candidate)
+        if family is not None:
+            return family
+    return "other_organic"
+
+
+def infer_water_content_and_regime(
+    *,
+    water_content_wt_pct: Any = None,
+    organic_solvent_type: Any = None,
+    organic_solvent_concentration: Any = None,
+    organic_solvent_concentration_unit: Any = None,
+    base_solvent: Any = None,
+    solvent_regime_hint: Any = None,
+) -> WaterContentInference:
+    """Infer ``(water_content_wt_pct, water_content_source, solvent_regime)`` using the 3-tier fallback.
+
+    Tier 1 (``reported``): explicit ``water_content_wt_pct``, or explicit positive percentage/fraction
+    ``organic_solvent_concentration`` converted via ``100 - organic_pct``.
+    Tier 2 (``inferred_aqueous``): aqueous/DI-water or unspecified baseline without organic co-solvent
+    (``100.0`` wt%, no quality penalty).
+    Tier 3 (``inferred_regime_default``): organic co-solvent or semi/non-aqueous indication without
+    numeric percentage concentration (``50.0`` wt% for ``semi_aqueous``, ``0.0`` wt% for ``non_aqueous``).
+    """
+    explicit_water = _coerce_finite_float(water_content_wt_pct)
+    if explicit_water is not None:
+        clamped = _clamp_water_pct(explicit_water)
+        return WaterContentInference(clamped, "reported", classify_solvent_regime(clamped))
+
+    org_type = normalize_category_label(organic_solvent_type)
+    org_conc = _coerce_finite_float(organic_solvent_concentration)
+    base_kind = _classify_base_solvent(base_solvent)
+    unit_label = normalize_category_label(organic_solvent_concentration_unit)
+    unit_norm = "" if unit_label == "None" else " ".join(unit_label.lower().split())
+
+    org_pct: float | None = None
+    if org_conc is not None:
+        if unit_norm in _FRACTION_CONCENTRATION_UNITS and 0.0 <= org_conc <= 1.0:
+            org_pct = org_conc * 100.0
+        elif unit_norm in _PERCENT_CONCENTRATION_UNITS and 0.0 <= org_conc <= 100.0:
+            org_pct = org_conc
+
+    if org_pct is not None and org_pct > 0.0 and (base_kind != "non_aqueous" or org_pct == 100.0):
+        water_val = _clamp_water_pct(100.0 - org_pct)
+        return WaterContentInference(water_val, "reported", classify_solvent_regime(water_val))
+
+    regime_hint = _normalize_solvent_regime(solvent_regime_hint)
+    if regime_hint == "non_aqueous" or (base_kind == "non_aqueous" and regime_hint != "semi_aqueous"):
+        return WaterContentInference(
+            DEFAULT_NON_AQUEOUS_WATER_WT_PCT, "inferred_regime_default", "non_aqueous"
+        )
+    if regime_hint == "semi_aqueous" or base_kind == "mixed" or org_type != "None":
+        return WaterContentInference(
+            DEFAULT_SEMI_AQUEOUS_WATER_WT_PCT, "inferred_regime_default", "semi_aqueous"
+        )
+
+    return WaterContentInference(100.0, "inferred_aqueous", "aqueous")
+
+
+def _extract_organic_unit_from_components_json(
+    components_json: Any,
+    organic_solvent_type: Any = None,
+) -> str | None:
+    """Extract the organic co-solvent concentration unit from serialized ``components_json`` when available."""
+    raw = normalize_category_label(components_json)
+    if raw == "None":
+        return None
+    try:
+        items = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(items, list):
+        return None
+
+    target_species = normalize_category_label(organic_solvent_type).lower()
+    fallback_unit: str | None = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        unit_str = normalize_category_label(item.get("unit"))
+        if unit_str == "None":
+            continue
+        role = normalize_category_label(item.get("role")).lower()
+        species = normalize_category_label(item.get("species")).lower()
+        if role == "organic_solvent":
+            if target_species == "none" or species == target_species:
+                return unit_str
+            if fallback_unit is None:
+                fallback_unit = unit_str
+        elif target_species != "none" and species == target_species and fallback_unit is None:
+            fallback_unit = unit_str
+    return fallback_unit
+
+
+def _fill_organic_solvent_unit_from_components_json(df: pd.DataFrame) -> pd.DataFrame:
+    """Fill missing ``organic_solvent_concentration_unit`` entries from ``components_json`` if present."""
+    if df.empty or "components_json" not in df.columns:
+        return df
+    out = df.copy()
+    if "organic_solvent_concentration_unit" not in out.columns:
+        out["organic_solvent_concentration_unit"] = pd.Series(
+            [None] * len(out), index=out.index, dtype=object
+        )
+    else:
+        out["organic_solvent_concentration_unit"] = out["organic_solvent_concentration_unit"].astype(
+            object
+        )
+    org_col = (
+        out["organic_solvent_type"]
+        if "organic_solvent_type" in out.columns
+        else pd.Series(np.nan, index=out.index)
+    )
+    missing_mask = out["organic_solvent_concentration_unit"].apply(normalize_category_label).eq("None")
+    if not missing_mask.any():
+        return out
+    extracted = [
+        _extract_organic_unit_from_components_json(comp, org)
+        for comp, org in zip(out.loc[missing_mask, "components_json"], org_col.loc[missing_mask])
+    ]
+    if any(unit is not None for unit in extracted):
+        out.loc[missing_mask, "organic_solvent_concentration_unit"] = extracted
+    return out
+
+
+def _apply_solvent_classification(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize solvent inputs and populate regime, subclass, water content, and source columns."""
+    out = df.copy()
+    if "organic_solvent_type" in out.columns:
+        out["organic_solvent_type"] = out["organic_solvent_type"].apply(normalize_category_label)
+    else:
+        out["organic_solvent_type"] = "None"
+    out = _fill_organic_solvent_unit_from_components_json(out)
+    if out.empty:
+        for col in ("water_content_wt_pct", "water_content_source", "solvent_regime", "solvent_subclass"):
+            if col not in out.columns:
+                out[col] = pd.Series(dtype=float if col == "water_content_wt_pct" else object)
+        return out
+
+    water_vals: list[float] = []
+    water_sources: list[str] = []
+    regimes: list[str] = []
+    subclasses: list[str] = []
+
+    for row in out.to_dict(orient="records"):
+        existing_src = normalize_category_label(row.get("water_content_source"))
+        existing_water = _coerce_finite_float(row.get("water_content_wt_pct"))
+        if existing_src in VALID_WATER_CONTENT_SOURCES and existing_water is not None:
+            water_pct = _clamp_water_pct(existing_water)
+            source = existing_src
+            regime = classify_solvent_regime(water_pct)
+        else:
+            water_pct, source, regime = infer_water_content_and_regime(
+                water_content_wt_pct=row.get("water_content_wt_pct"),
+                organic_solvent_type=row.get("organic_solvent_type"),
+                organic_solvent_concentration=row.get("organic_solvent_concentration"),
+                organic_solvent_concentration_unit=row.get("organic_solvent_concentration_unit"),
+                base_solvent=row.get("base_solvent"),
+                solvent_regime_hint=row.get("solvent_regime"),
+            )
+        subclass = classify_solvent_subclass(
+            regime,
+            pH=row.get("pH"),
+            solution_category=row.get("solution_category"),
+            solution_name=row.get("solution_name"),
+            organic_solvent_type=row.get("organic_solvent_type"),
+            base_solvent=row.get("base_solvent"),
+            acid_type=row.get("acid_type"),
+        )
+        water_vals.append(water_pct)
+        water_sources.append(source)
+        regimes.append(regime)
+        subclasses.append(subclass)
+
+    out["water_content_wt_pct"] = water_vals
+    out["water_content_source"] = water_sources
+    out["solvent_regime"] = regimes
+    out["solvent_subclass"] = subclasses
+    return out
 
 
 def _coalesce_column(df: pd.DataFrame, candidates: list[str], default: Any = np.nan) -> pd.Series:
@@ -867,19 +1363,30 @@ class HarmonizedDatabase:
                 and str(sid).strip().lower() != "nan"
             ):
                 return str(sid).strip()
-            key = "|".join(
-                str(row.get(k, ""))
-                for k in (
-                    "solution_name",
-                    "solution_description",
-                    "oxidizer_type",
-                    "oxidizer_concentration",
-                    "acid_type",
-                    "acid_concentration",
-                    "pH",
-                    "pH_effective",
-                )
+            solvent_fields = (
+                "base_solvent",
+                "organic_solvent_type",
+                "organic_solvent_concentration",
+                "water_content_wt_pct",
+                "solvent_regime",
             )
+            has_solvent_spec = any(
+                row.get(k) is not None and not pd.isna(row.get(k)) and str(row.get(k)).strip() != ""
+                for k in solvent_fields
+            )
+            key_fields = [
+                "solution_name",
+                "solution_description",
+                "oxidizer_type",
+                "oxidizer_concentration",
+                "acid_type",
+                "acid_concentration",
+                "pH",
+                "pH_effective",
+            ]
+            if has_solvent_spec:
+                key_fields.extend(solvent_fields)
+            key = "|".join(str(row.get(k, "")) for k in key_fields)
             digest = hashlib.md5(key.encode("utf-8")).hexdigest()[:8]
             return f"SOL_{digest}"
 
@@ -910,6 +1417,12 @@ class HarmonizedDatabase:
             "inhibitor_concentration_unit",
             "organic_solvent_type",
             "organic_solvent_concentration",
+            "organic_solvent_concentration_unit",
+            "components_json",
+            "water_content_wt_pct",
+            "water_content_source",
+            "solvent_regime",
+            "solvent_subclass",
             "supporting_salt_type",
             "supporting_salt_concentration",
             "supporting_salt_concentration_unit",
@@ -937,8 +1450,11 @@ class HarmonizedDatabase:
             e_sol = echem[present_cols].copy()
             if "solution_name" not in e_sol.columns and "solution_description" in echem.columns:
                 e_sol["solution_name"] = echem["solution_description"]
-            if "pH" in e_sol.columns and "pH_effective" in echem.columns:
-                e_sol["pH"] = e_sol["pH"].fillna(echem["pH_effective"])
+            if "pH_effective" in echem.columns:
+                if "pH" in e_sol.columns:
+                    e_sol["pH"] = e_sol["pH"].fillna(echem["pH_effective"])
+                else:
+                    e_sol["pH"] = echem["pH_effective"]
             frames.append(e_sol)
 
         if not frames:
@@ -950,6 +1466,10 @@ class HarmonizedDatabase:
                         "pH",
                         "oxidizer_type",
                         "oxidizer_concentration",
+                        "solvent_regime",
+                        "solvent_subclass",
+                        "water_content_wt_pct",
+                        "water_content_source",
                     ]
                 ),
                 echem,
@@ -973,6 +1493,7 @@ class HarmonizedDatabase:
             ).fillna(0.0)
         else:
             deduped["oxidizer_concentration"] = 0.0
+        deduped = _apply_solvent_classification(deduped)
         return deduped.reset_index(drop=True), echem
 
     @staticmethod
@@ -1017,26 +1538,105 @@ class HarmonizedDatabase:
                 f"REC_AUTO_{i + 1:05d}" for i in range(int(missing_id.sum()))
             ]
 
-        # Join all key Solution formulation attributes if missing on echem rows
+        # Detect row-level solvent/water specifications or overrides prior to joining Solution defaults
         sol_lookup = solutions.set_index("solution_id") if not solutions.empty else pd.DataFrame()
-        for col in (
-            "pH",
-            "oxidizer_type",
-            "oxidizer_concentration",
-            "acid_type",
-            "acid_concentration",
-            "inhibitor_type",
-            "inhibitor_concentration",
-            "chelating_agent_type",
-            "chelating_agent_concentration",
-            "ORP_mV",
-            "solution_name",
-        ):
+        has_row_water = (
+            pd.to_numeric(df["water_content_wt_pct"], errors="coerce").notna()
+            if "water_content_wt_pct" in df.columns
+            else pd.Series(False, index=df.index)
+        )
+        has_row_water_source = (
+            df["water_content_source"].astype(str).str.strip().isin(VALID_WATER_CONTENT_SOURCES)
+            if "water_content_source" in df.columns
+            else pd.Series(False, index=df.index)
+        )
+        has_row_org_conc = (
+            pd.to_numeric(df["organic_solvent_concentration"], errors="coerce").gt(0.0).fillna(False)
+            if "organic_solvent_concentration" in df.columns
+            else pd.Series(False, index=df.index)
+        )
+        has_row_regime = (
+            df["solvent_regime"].notna() & (df["solvent_regime"].astype(str).str.strip() != "")
+            if "solvent_regime" in df.columns
+            else pd.Series(False, index=df.index)
+        )
+
+        def _apply_col(col: str, fn: Any, default_val: Any) -> pd.Series:
             if col not in df.columns:
-                df[col] = np.nan
-            if not sol_lookup.empty and col in sol_lookup.columns:
-                mapped = df["solution_id"].map(sol_lookup[col])
-                df[col] = df[col].where(df[col].notna(), mapped)
+                return pd.Series(default_val, index=df.index)
+            return df[col].apply(fn)
+
+        def _map_sol_col(col: str, fn: Any, default_val: Any) -> pd.Series:
+            if sol_lookup.empty or col not in sol_lookup.columns:
+                return pd.Series(default_val, index=df.index)
+            return df["solution_id"].map(sol_lookup[col]).apply(fn)
+
+        row_org_type = _apply_col("organic_solvent_type", normalize_category_label, "None")
+        row_base_label = _apply_col(
+            "base_solvent", lambda v: normalize_category_label(v).lower(), "none"
+        )
+        sol_org_type = _map_sol_col("organic_solvent_type", normalize_category_label, "None")
+        sol_base_label = _map_sol_col(
+            "base_solvent", lambda v: normalize_category_label(v).lower(), "none"
+        )
+        row_explicit_org_none = (
+            df["organic_solvent_type"].notna() & row_org_type.eq("None") & sol_org_type.ne("None")
+            if "organic_solvent_type" in df.columns
+            else pd.Series(False, index=df.index)
+        )
+        has_row_solvent_conflict = (
+            (row_org_type.ne("None") & row_org_type.ne(sol_org_type))
+            | row_explicit_org_none
+            | (row_base_label.ne("none") & row_base_label.ne(sol_base_label))
+        )
+        has_row_solvent_override = (
+            has_row_water
+            | has_row_water_source
+            | has_row_org_conc
+            | has_row_regime
+            | has_row_solvent_conflict
+        )
+
+        # Join all key Solution formulation attributes if missing on echem rows
+        def _join_from_sol_lookup(cols: tuple[str, ...], row_guard: pd.Series | None = None) -> None:
+            for col in cols:
+                if col not in df.columns:
+                    df[col] = np.nan
+                if not sol_lookup.empty and col in sol_lookup.columns:
+                    mapped = df["solution_id"].map(sol_lookup[col])
+                    fill_mask = df[col].isna() if row_guard is None else (row_guard & df[col].isna())
+                    df[col] = df[col].where(~fill_mask, mapped)
+
+        _join_from_sol_lookup(
+            (
+                "pH",
+                "oxidizer_type",
+                "oxidizer_concentration",
+                "acid_type",
+                "acid_concentration",
+                "inhibitor_type",
+                "inhibitor_concentration",
+                "chelating_agent_type",
+                "chelating_agent_concentration",
+                "ORP_mV",
+                "solution_name",
+                "solution_category",
+            )
+        )
+        _join_from_sol_lookup(
+            (
+                "base_solvent",
+                "organic_solvent_type",
+                "organic_solvent_concentration",
+                "organic_solvent_concentration_unit",
+                "components_json",
+            ),
+            ~has_row_solvent_conflict,
+        )
+        _join_from_sol_lookup(
+            ("water_content_wt_pct", "water_content_source", "solvent_regime"),
+            ~has_row_solvent_override,
+        )
 
         # Synchronize canonical material properties (including valence and equivalent_weight_g_eq) onto echem records
         if not materials.empty:
@@ -1051,6 +1651,8 @@ class HarmonizedDatabase:
             )
         else:
             df["pH"] = pd.to_numeric(df["pH"], errors="coerce")
+        # Classify solvent regime/subclass before defaulting missing pH to 7.0 so solution_category fallback stays consistent
+        df = _apply_solvent_classification(df)
         df["pH"] = df["pH"].fillna(7.0)
 
         df["temperature_C"] = pd.to_numeric(
@@ -1317,13 +1919,20 @@ class HarmonizedDatabase:
             df["icorr_source"] == "derived_from_Rp", RP_DERIVED_QUALITY_PENALTY, 0.0
         )
         q_score = np.clip(base_quality - penalty, 0.05, 1.0)
+        def _apply_quality_factor(scores: np.ndarray, mask: pd.Series, factor: float) -> np.ndarray:
+            return np.where(mask, np.clip(scores * factor, 0.05, 1.0), scores)
+
         if "pH_source" in df.columns:
             inferred_neutral_mask = df["pH_source"].astype(str).str.strip().eq("inferred_neutral")
-            q_score = np.where(
-                inferred_neutral_mask,
-                np.clip(q_score * INFERRED_NEUTRAL_PH_WEIGHT_FACTOR, 0.05, 1.0),
-                q_score,
+            q_score = _apply_quality_factor(
+                q_score, inferred_neutral_mask, INFERRED_NEUTRAL_PH_WEIGHT_FACTOR
             )
+        inferred_water_default_mask = (
+            df["water_content_source"].astype(str).str.strip().eq("inferred_regime_default")
+        )
+        q_score = _apply_quality_factor(
+            q_score, inferred_water_default_mask, INFERRED_REGIME_DEFAULT_WATER_WEIGHT_FACTOR
+        )
         df["quality_score"] = q_score
 
         # Split complete pairs vs. partial-target records and deduplicate by physical content (not record_id)
@@ -1551,6 +2160,11 @@ class HarmonizedDatabase:
             "inhibitor_concentration_unit": ("categorical", "unit string", "Concentration unit for inhibitor_concentration."),
             "organic_solvent_type": ("categorical", "dimensionless", "Co-solvent organic species in the Solution (e.g., ethylene glycol, IPA)."),
             "organic_solvent_concentration": ("numeric", "wt% or mM", "Concentration of the organic co-solvent."),
+            "organic_solvent_concentration_unit": ("categorical", "unit string", "Concentration unit for organic_solvent_concentration (e.g., wt%, vol%, mM)."),
+            "solvent_regime": ("categorical", "dimensionless", "Water-content solvent regime classification (aqueous >= 90 wt%, semi_aqueous 1-90 wt%, non_aqueous < 1 wt%)."),
+            "solvent_subclass": ("categorical", "dimensionless", "Chemical-family or pH subclass of the Solution (acidic/neutral/alkaline/buffered for aqueous; glycol/alcohol/polar_aprotic/organic_acid/other_organic otherwise)."),
+            "water_content_wt_pct": ("numeric", "wt%", "Water mass percentage in the Solution solvent system in [0, 100]."),
+            "water_content_source": ("categorical", "dimensionless", "Provenance of water_content_wt_pct (reported, inferred_aqueous, or inferred_regime_default)."),
             "supporting_salt_type": ("categorical", "dimensionless", "Supporting ionic salt species in the Solution (e.g., NaCl, Na2SO4, KNO3, KCl)."),
             "supporting_salt_concentration": ("numeric", "M or wt%", "Concentration of the supporting ionic salt."),
             "supporting_salt_concentration_unit": ("categorical", "unit string", "Concentration unit for supporting_salt_concentration."),
