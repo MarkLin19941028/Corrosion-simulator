@@ -6,7 +6,11 @@
 
 **Status:** ready-for-agent
 
-- [ ] A built-in solvent property lookup covers water and common semiconductor wet-clean organic solvents (e.g., EG, PG, IPA, EtOH, MeOH, DMSO, NMP, DMF, acetone) with dielectric constant, polarity index, and protic indicator, plus safe fallback for unseen organic solvents.
-- [ ] `MLFeatureQuery` and `ElectrochemicalFeatureExtractor` compute the 4 continuous solvent descriptors and scale Pourbaix passivation features by `clip(water_content_wt_pct / 100, 0, 1)`, fitting all medians and category vocabularies strictly on training folds during cross-validation.
-- [ ] `ApplicabilityDomainChecker` incorporates `water_content_wt_pct` and `organic_solvent_type` so queries outside training water-content ranges or with unseen co-solvents trigger clear warnings and appropriate Confidence Tiers.
-- [ ] Offline artifact rebuilds and all 6 ML model families train, save, load, and predict cleanly with the extended feature schema, verified by automated ML and artifact tests.
+- [x] A built-in solvent property lookup covers water and common semiconductor wet-clean organic solvents (e.g., EG, PG, IPA, EtOH, MeOH, DMSO, NMP, DMF, acetone) with dielectric constant, polarity index, and protic indicator, plus safe fallback for unseen organic solvents.
+- [x] `MLFeatureQuery` and `ElectrochemicalFeatureExtractor` compute the 4 continuous solvent descriptors and scale Pourbaix passivation features by `clip(water_content_wt_pct / 100, 0, 1)`, fitting all medians and category vocabularies strictly on training folds during cross-validation.
+- [x] `ApplicabilityDomainChecker` incorporates `water_content_wt_pct` and `organic_solvent_type` so queries outside training water-content ranges or with unseen co-solvents trigger clear warnings and appropriate Confidence Tiers.
+- [x] Offline artifact rebuilds and all 6 ML model families train, save, load, and predict cleanly with the extended feature schema, verified by automated ML and artifact tests.
+
+## Comments
+
+Implemented in `corrosion_simulator/solvent_constants.py`, `corrosion_simulator/ml_predictor.py`, and `corrosion_simulator/build_artifacts.py`; rebuilt `data/processed/` across all 6 ML model families (`3,182` records, `21` materials) and verified via `tests/test_ml_predictor.py` (`12/12`) and `tests/test_extensibility_and_artifacts.py` (`11/11`).

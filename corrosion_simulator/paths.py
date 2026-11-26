@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+import hashlib
 import os
 from pathlib import Path
 import sys
-from typing import Final
+from typing import Any, Final
 
 DATA_DIR_ENV_VAR: Final[str] = "CORROSION_SIMULATOR_DATA_DIR"
 _IGNORED_RAW_CSV_NAMES: Final[frozenset[str]] = frozenset({"rejected_rows.csv"})
@@ -54,7 +56,7 @@ def get_external_data_dir(data_dir: str | Path | None = None) -> Path:
 
 
 def iter_raw_csv_files(raw_dir: str | Path) -> list[Path]:
-    """Recursively list raw CSV files under ``raw_dir``, excluding ``processed/`` artifacts."""
+    """Recursively list raw CSV files under ``raw_dir``, excluding ``processed/`` and ``lab/``."""
     base = Path(raw_dir)
     if not base.exists() or not base.is_dir():
         return []
@@ -63,7 +65,7 @@ def iter_raw_csv_files(raw_dir: str | Path) -> list[Path]:
         if not csv_path.is_file():
             continue
         rel_parts = {part.lower() for part in csv_path.relative_to(base).parts[:-1]}
-        if "processed" in rel_parts:
+        if rel_parts & {"processed", "lab"}:
             continue
         if csv_path.name.lower() in _IGNORED_RAW_CSV_NAMES:
             continue
@@ -81,7 +83,7 @@ def resolve_raw_and_processed_dirs(
 
     Defaults to ``(<data_dir>/raw, <data_dir>/processed)``. If ``<data_dir>/raw`` has no CSV
     files yet ``<data_dir>`` itself contains top-level ``*.csv`` files, ``raw_dir`` falls back
-    to ``<data_dir>`` (while ``iter_raw_csv_files`` automatically skips ``processed/``).
+    to ``<data_dir>`` (while ``iter_raw_csv_files`` automatically skips ``processed/`` and ``lab/``).
     """
     base = get_external_data_dir(data_dir)
     resolved_proc = Path(processed_dir) if processed_dir is not None else (base / "processed")
@@ -98,3 +100,97 @@ def resolve_raw_and_processed_dirs(
         else:
             resolved_raw = candidate_raw
     return resolved_raw, resolved_proc
+
+
+def resolve_lab_dir(
+    data_dir: str | Path | None = None,
+    *,
+    lab_dir: str | Path | None = None,
+) -> Path:
+    """Resolve the external ``data/lab/`` directory for small-sample laboratory datasets."""
+    if lab_dir is not None:
+        return Path(lab_dir).expanduser().resolve()
+    return get_external_data_dir(data_dir) / "lab"
+
+
+def resolve_data_dirs(
+    data_dir: str | Path | None = None,
+    *,
+    raw_dir: str | Path | None = None,
+    processed_dir: str | Path | None = None,
+    lab_dir: str | Path | None = None,
+) -> tuple[Path, Path, Path]:
+    """Resolve ``(raw_dir, processed_dir, lab_dir)`` under the external data directory."""
+    resolved_raw, resolved_proc = resolve_raw_and_processed_dirs(
+        data_dir,
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+    )
+    resolved_lab = resolve_lab_dir(data_dir, lab_dir=lab_dir)
+    return resolved_raw, resolved_proc, resolved_lab
+
+
+def discover_lab_projects(
+    lab_dir: str | Path | None = None,
+    *,
+    data_dir: str | Path | None = None,
+) -> dict[str, list[Path]]:
+    """Enumerate named laboratory projects and their CSV files under ``data/lab/<project>/``.
+
+    Top-level CSV files placed directly under ``data/lab/`` (outside subdirectories) map to
+    the ``"default"`` project name.
+    """
+    base = resolve_lab_dir(data_dir, lab_dir=lab_dir)
+    if not base.exists() or not base.is_dir():
+        return {}
+
+    projects: dict[str, list[Path]] = {}
+    top_level = [
+        p
+        for p in sorted(base.glob("*.csv"))
+        if p.is_file() and p.name.lower() not in _IGNORED_RAW_CSV_NAMES
+    ]
+    if top_level:
+        projects["default"] = top_level
+
+    for sub in sorted(base.iterdir()):
+        if not sub.is_dir() or sub.name.startswith(".") or sub.name.lower() == "processed":
+            continue
+        csvs = iter_raw_csv_files(sub)
+        if not csvs:
+            continue
+        if sub.name in projects:
+            merged = sorted({*projects[sub.name], *csvs})
+            projects[sub.name] = merged
+        else:
+            projects[sub.name] = csvs
+    return projects
+
+
+def compute_csv_fingerprint(
+    csv_files: Sequence[Path],
+    base_path: Path,
+) -> dict[str, Any]:
+    """Compute a deterministic SHA-256 fingerprint across a sorted collection of CSV files."""
+    files_info: dict[str, dict[str, Any]] = {}
+    combined_hasher = hashlib.sha256()
+    for csv_path in sorted(csv_files):
+        try:
+            rel = str(csv_path.relative_to(base_path)).replace("\\", "/")
+        except ValueError:
+            rel = csv_path.name
+        data = csv_path.read_bytes()
+        file_sha = hashlib.sha256(data).hexdigest()
+        files_info[rel] = {
+            "sha256": file_sha,
+            "size_bytes": len(data),
+        }
+        combined_hasher.update(rel.encode("utf-8"))
+        combined_hasher.update(b":")
+        combined_hasher.update(file_sha.encode("utf-8"))
+        combined_hasher.update(b"\n")
+    return {
+        "combined_sha256": combined_hasher.hexdigest(),
+        "file_count": len(files_info),
+        "files": files_info,
+    }

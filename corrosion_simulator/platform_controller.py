@@ -6,6 +6,7 @@ from collections.abc import Callable, Sequence
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+import time
 from typing import Any, Literal
 
 import numpy as np
@@ -36,6 +37,12 @@ from corrosion_simulator.kinetics import (
     propagate_kinetics_uncertainty_monte_carlo,
     simulate_time_resolved_kinetics,
 )
+from corrosion_simulator.lab_data import (
+    LabProjectDataset,
+    compute_lab_project_fingerprint,
+    discover_and_load_lab_projects,
+    load_lab_project,
+)
 from corrosion_simulator.ml_predictor import (
     SUPPORTED_MODEL_FAMILIES,
     ApplicabilityDomainResult,
@@ -47,7 +54,9 @@ from corrosion_simulator.ml_predictor import (
     propagate_uncertainty_monte_carlo,
 )
 from corrosion_simulator.paths import (
+    discover_lab_projects,
     iter_raw_csv_files,
+    resolve_data_dirs,
     resolve_raw_and_processed_dirs,
 )
 from corrosion_simulator.physics import (
@@ -64,6 +73,21 @@ from corrosion_simulator.physics import (
 ParameterSource = Literal["database", "ml", "manual"]
 KineticsSelection = Literal["auto", "linear", "passivation", "power_law"]
 ArtifactStatus = Literal["fresh", "rebuilt", "stale", "live_fallback", "live", "seed"]
+LabReloadStatus = Literal["none", "fresh", "reloaded"]
+
+
+@dataclass(frozen=True)
+class ExternalDataReloadSummary:
+    """Structured result of dual-fingerprint Reload External Data."""
+
+    raw_rebuilt: bool
+    raw_status: ArtifactStatus
+    lab_status: LabReloadStatus
+    lab_projects: tuple[str, ...]
+    lab_added_or_updated: tuple[str, ...]
+    lab_removed: tuple[str, ...]
+    lab_cache_invalidated: bool
+    elapsed_s: float
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 _CONFIDENCE_BY_RANK = {0: "Low", 1: "Medium", 2: "High"}
@@ -818,12 +842,40 @@ class CorrosionPlatformController:
         artifact_dir: str | Path | None = None,
         artifact_status: ArtifactStatus = "live",
         artifact_warning: str | None = None,
+        lab_dir: str | Path | None = None,
+        raw_fingerprint: dict[str, Any] | None = None,
+        lab_projects: dict[str, LabProjectDataset] | None = None,
     ) -> None:
         self.database = database
         self.raw_dir: Path | None = Path(raw_dir) if raw_dir is not None else None
         self.artifact_dir: Path | None = Path(artifact_dir) if artifact_dir is not None else None
         self.artifact_status: ArtifactStatus = artifact_status
         self.artifact_warning: str | None = artifact_warning
+        self.lab_dir: Path | None = Path(lab_dir) if lab_dir is not None else None
+        if raw_fingerprint is not None:
+            self.raw_fingerprint: dict[str, Any] | None = raw_fingerprint
+        elif self.raw_dir is not None and iter_raw_csv_files(self.raw_dir):
+            self.raw_fingerprint = HarmonizedDatabase.compute_raw_directory_fingerprint(self.raw_dir)
+        else:
+            self.raw_fingerprint = None
+
+        if lab_projects is not None:
+            self.lab_projects: dict[str, LabProjectDataset] = dict(lab_projects)
+        elif self.lab_dir is not None:
+            self.lab_projects = discover_and_load_lab_projects(self.lab_dir)
+        else:
+            self.lab_projects = {}
+        self.lab_fingerprints: dict[str, dict[str, Any]] = {
+            name: ds.fingerprint for name, ds in self.lab_projects.items()
+        }
+        self.lab_status: LabReloadStatus = "fresh" if self.lab_projects else "none"
+        self.lab_status_message: str | None = (
+            f"Loaded {len(self.lab_projects)} lab project(s)."
+            if self.lab_projects
+            else None
+        )
+        self._lab_calibration_cache: dict[str, Any] = {}
+
         if predictor is None:
             self.predictor = self._load_or_fit_predictor("random_forest")
         else:
@@ -895,6 +947,7 @@ class CorrosionPlatformController:
         raw_dir: str | Path | None = None,
         *,
         processed_dir: str | Path | None = None,
+        lab_dir: str | Path | None = None,
         data_dir: str | Path | None = None,
         model_family: ModelFamily = "random_forest",
         auto_rebuild: bool = True,
@@ -907,12 +960,19 @@ class CorrosionPlatformController:
             check_artifacts_freshness,
         )
 
-        raw_path, proc_path = resolve_raw_and_processed_dirs(
+        raw_path, proc_path, lab_path = resolve_data_dirs(
             data_dir,
             raw_dir=raw_dir,
             processed_dir=processed_dir,
+            lab_dir=lab_dir,
         )
         has_raw_csvs = bool(iter_raw_csv_files(raw_path))
+        raw_fp = (
+            HarmonizedDatabase.compute_raw_directory_fingerprint(raw_path)
+            if has_raw_csvs
+            else None
+        )
+        loaded_lab_projects = discover_and_load_lab_projects(lab_path)
         status, warning_msg = check_artifacts_freshness(raw_path, proc_path)
 
         if status == "fresh" or (status == "stale" and not auto_rebuild):
@@ -925,6 +985,9 @@ class CorrosionPlatformController:
                     artifact_dir=proc_path,
                     artifact_status=status,
                     artifact_warning=warning_msg,
+                    lab_dir=lab_path,
+                    raw_fingerprint=raw_fp,
+                    lab_projects=loaded_lab_projects,
                 )
                 if model_family != ctrl.predictor.model_family:
                     ctrl.predictor = ctrl.get_predictor(model_family)
@@ -957,6 +1020,9 @@ class CorrosionPlatformController:
                     artifact_dir=proc_path,
                     artifact_status="rebuilt",
                     artifact_warning=rebuilt_msg,
+                    lab_dir=lab_path,
+                    raw_fingerprint=raw_fp,
+                    lab_projects=loaded_lab_projects,
                 )
                 if model_family != ctrl.predictor.model_family:
                     ctrl.predictor = ctrl.get_predictor(model_family)
@@ -989,7 +1055,175 @@ class CorrosionPlatformController:
             artifact_dir=None,
             artifact_status=live_status,
             artifact_warning=live_warning,
+            lab_dir=lab_path,
+            raw_fingerprint=raw_fp,
+            lab_projects=loaded_lab_projects,
         )
+
+    def _invalidate_lab_cache_for_project(self, project_name: str) -> bool:
+        keys_to_drop = [
+            key
+            for key in self._lab_calibration_cache
+            if key == project_name or str(key).startswith(f"{project_name}:")
+        ]
+        for key in keys_to_drop:
+            del self._lab_calibration_cache[key]
+        return bool(keys_to_drop)
+
+    def reload_external_data(
+        self,
+        *,
+        rebuild_models: Sequence[str] = ("all",),
+        progress_callback: Callable[[int, int, str], None] | None = None,
+    ) -> ExternalDataReloadSummary:
+        """Check independent ``data/raw/`` and ``data/lab/`` fingerprints and reload only what changed."""
+        from corrosion_simulator.build_artifacts import (
+            build_processed_artifacts,
+            check_artifacts_freshness,
+        )
+
+        start_time = time.perf_counter()
+        raw_path = self.raw_dir
+        proc_path = self.artifact_dir
+        has_raw_csvs = bool(raw_path is not None and iter_raw_csv_files(raw_path))
+        current_raw_fp = (
+            HarmonizedDatabase.compute_raw_directory_fingerprint(raw_path)
+            if has_raw_csvs
+            else None
+        )
+        prev_sha = self.raw_fingerprint.get("combined_sha256") if self.raw_fingerprint else None
+        curr_sha = current_raw_fp.get("combined_sha256") if current_raw_fp else None
+
+        raw_changed = prev_sha != curr_sha
+        if not raw_changed and has_raw_csvs and proc_path is not None:
+            disk_status, _ = check_artifacts_freshness(raw_path, proc_path)
+            if disk_status in ("stale", "missing"):
+                raw_changed = True
+
+        active_family = self.predictor.model_family
+        raw_rebuilt = False
+        lab_cache_invalidated = False
+        added_or_updated: list[str] = []
+        removed: list[str] = []
+
+        if raw_changed:
+            if has_raw_csvs and raw_path is not None:
+                target_proc = proc_path or (
+                    raw_path.parent / "processed" if raw_path.name == "raw" else None
+                )
+                if target_proc is not None:
+                    try:
+                        summary = build_processed_artifacts(
+                            raw_dir=raw_path,
+                            output_dir=target_proc,
+                            models=rebuild_models,
+                            export_csv=False,
+                            progress_callback=progress_callback,
+                        )
+                        self.database = HarmonizedDatabase.from_processed_directory(target_proc)
+                        self.artifact_dir = target_proc
+                        self.artifact_status = "rebuilt"
+                        self.artifact_warning = (
+                            f"Detected updated CSV data in '{raw_path}' — rebuilt database "
+                            f"({summary.n_records} records across {summary.n_materials} materials) "
+                            f"and trained {len(summary.trained_models)} ML model(s)."
+                        )
+                        raw_rebuilt = True
+                    except OSError as exc:
+                        self.database = HarmonizedDatabase.from_directory(raw_path)
+                        self.artifact_dir = None
+                        self.artifact_status = "live_fallback"
+                        self.artifact_warning = (
+                            f"Could not write prebuilt cache ({exc}); loaded '{raw_path}' in memory."
+                        )
+                else:
+                    self.database = HarmonizedDatabase.from_directory(raw_path)
+                    self.artifact_status = "live_fallback"
+            else:
+                self.database = HarmonizedDatabase.from_seed()
+                self.artifact_dir = None
+                self.artifact_status = "seed"
+                self.artifact_warning = (
+                    f"No CSV training files were found in '{raw_path}'. Running on built-in seed data."
+                )
+
+            self.raw_fingerprint = current_raw_fp
+            self._predictors.clear()
+            self.predictor = self._load_or_fit_predictor(active_family)
+            self._predictors[active_family] = self.predictor
+
+            # Clear all cached lab calibration models so they re-anchor to the rebuilt prior
+            self._lab_calibration_cache.clear()
+            lab_cache_invalidated = True
+
+            if self.lab_dir is not None:
+                reloaded_projects = discover_and_load_lab_projects(self.lab_dir)
+                added_or_updated = sorted(reloaded_projects.keys())
+                removed = sorted(set(self.lab_projects) - set(reloaded_projects))
+                self.lab_projects = reloaded_projects
+                self.lab_fingerprints = {
+                    name: ds.fingerprint for name, ds in reloaded_projects.items()
+                }
+            self.lab_status = "reloaded" if self.lab_projects else "none"
+            self.lab_status_message = (
+                f"Re-anchored {len(self.lab_projects)} lab project(s) to updated literature prior."
+                if self.lab_projects
+                else None
+            )
+        else:
+            # Fast path (< 1 s): literature prior unchanged -> skip base rebuild and rescan data/lab/ only
+            if self.lab_dir is not None:
+                discovered = discover_lab_projects(self.lab_dir)
+                removed = sorted(set(self.lab_projects) - set(discovered))
+                for name in removed:
+                    self.lab_projects.pop(name, None)
+                    self.lab_fingerprints.pop(name, None)
+                    if self._invalidate_lab_cache_for_project(name):
+                        lab_cache_invalidated = True
+
+                for name, files in discovered.items():
+                    new_fp = compute_lab_project_fingerprint(name, files, self.lab_dir)
+                    old_sha = self.lab_fingerprints.get(name, {}).get("combined_sha256")
+                    if old_sha != new_fp["combined_sha256"]:
+                        self.lab_projects[name] = load_lab_project(
+                            name, files, lab_dir=self.lab_dir
+                        )
+                        self.lab_fingerprints[name] = new_fp
+                        added_or_updated.append(name)
+                        if self._invalidate_lab_cache_for_project(name):
+                            lab_cache_invalidated = True
+
+            if added_or_updated or removed:
+                self.lab_status = "reloaded"
+                self.lab_status_message = (
+                    f"Reloaded {len(added_or_updated)} lab project(s), removed {len(removed)}."
+                )
+            elif self.lab_projects:
+                self.lab_status = "fresh"
+                self.lab_status_message = f"{len(self.lab_projects)} lab project(s) up to date."
+            else:
+                self.lab_status = "none"
+                self.lab_status_message = None
+
+        elapsed = time.perf_counter() - start_time
+        return ExternalDataReloadSummary(
+            raw_rebuilt=raw_rebuilt,
+            raw_status=self.artifact_status,
+            lab_status=self.lab_status,
+            lab_projects=tuple(sorted(self.lab_projects.keys())),
+            lab_added_or_updated=tuple(sorted(added_or_updated)),
+            lab_removed=tuple(sorted(removed)),
+            lab_cache_invalidated=lab_cache_invalidated,
+            elapsed_s=elapsed,
+        )
+
+    def get_lab_project(self, project_name: str | None = None) -> LabProjectDataset | None:
+        """Return a loaded lab project dataset by name (or the first sorted project if omitted)."""
+        if not self.lab_projects:
+            return None
+        if project_name is None:
+            return self.lab_projects[sorted(self.lab_projects)[0]]
+        return self.lab_projects.get(project_name)
 
     def available_options(self) -> dict[str, Any]:
         """Return sidebar selector options dynamically derived from the harmonized database."""
@@ -1035,6 +1269,7 @@ class CorrosionPlatformController:
             "kinetics_models": ["auto", "linear", "passivation", "power_law"],
             "parameter_sources": ["ml", "database", "manual"],
             "ml_model_families": list(SUPPORTED_MODEL_FAMILIES),
+            "lab_projects": sorted(self.lab_projects.keys()),
         }
 
     def _build_ml_query(self, request: SimulationRequest, metal: str) -> MLFeatureQuery:

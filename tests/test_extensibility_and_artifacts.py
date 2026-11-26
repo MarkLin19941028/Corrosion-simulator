@@ -521,5 +521,255 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
         self.assertGreaterEqual(port, 18501)
 
 
+class TestLabDirectoryAndDualFingerprintReload(unittest.TestCase):
+    """Issue 04: external data/lab/<project>/ harmonization and dual-fingerprint Reload External Data."""
+
+    def test_lab_path_resolution_in_dev_and_frozen_modes_excludes_lab_from_raw(self) -> None:
+        import os
+        import sys
+        from unittest.mock import patch
+
+        from corrosion_simulator.paths import (
+            DATA_DIR_ENV_VAR,
+            discover_lab_projects,
+            iter_raw_csv_files,
+            resolve_data_dirs,
+            resolve_lab_dir,
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dist_app = Path(tmpdir).resolve() / "dist" / "CorrosionSimulator"
+            exe_path = dist_app / "CorrosionSimulator.exe"
+            dist_app.mkdir(parents=True)
+            exe_path.write_text("", encoding="utf-8")
+
+            env_clean = {k: v for k, v in os.environ.items() if k != DATA_DIR_ENV_VAR}
+            with (
+                patch.dict(os.environ, env_clean, clear=True),
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "_MEIPASS", str(dist_app / "_internal"), create=True),
+                patch.object(sys, "executable", str(exe_path)),
+            ):
+                self.assertEqual(resolve_lab_dir(), dist_app / "data" / "lab")
+                raw_d, proc_d, lab_d = resolve_data_dirs()
+                self.assertEqual(raw_d, dist_app / "data" / "raw")
+                self.assertEqual(proc_d, dist_app / "data" / "processed")
+                self.assertEqual(lab_d, dist_app / "data" / "lab")
+
+            # Development data_dir with top-level raw CSV + data/lab/<project>/ + top-level data/lab/*.csv
+            data_dir = Path(tmpdir).resolve() / "workspace_data"
+            (data_dir / "lab" / "study_dmso").mkdir(parents=True)
+            (data_dir / "raw").mkdir(parents=True)
+            (data_dir / "raw" / "lit.csv").write_text(
+                "metal,Ecorr_V_SHE,icorr_uA_cm2\nCu,0.25,2.0\n", encoding="utf-8"
+            )
+            (data_dir / "lab" / "study_dmso" / "tafel.csv").write_text(
+                "metal,Ecorr_V_SHE,icorr_uA_cm2\nCu,0.10,5.0\n", encoding="utf-8"
+            )
+            (data_dir / "lab" / "quick.csv").write_text(
+                "metal,Ecorr_V_SHE,icorr_uA_cm2\nCo,-0.10,12.0\n", encoding="utf-8"
+            )
+
+            # iter_raw_csv_files scanning data_dir must skip lab/ completely
+            raw_discovered = iter_raw_csv_files(data_dir)
+            self.assertEqual([p.name for p in raw_discovered], ["lit.csv"])
+
+            projects = discover_lab_projects(data_dir=data_dir)
+            self.assertEqual(set(projects.keys()), {"default", "study_dmso"})
+            self.assertEqual([p.name for p in projects["default"]], ["quick.csv"])
+            self.assertEqual([p.name for p in projects["study_dmso"]], ["tafel.csv"])
+
+    def test_lab_projects_harmonize_standalone_through_standard_pipeline(self) -> None:
+        from corrosion_simulator.lab_data import discover_and_load_lab_projects
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lab_dir = Path(tmpdir) / "lab"
+            (lab_dir / "study_semoaq").mkdir(parents=True)
+            (lab_dir / "study_invalid").mkdir(parents=True)
+
+            # Ag/AgCl (+0.197 V), mA/cm2 -> uA/cm2, negative beta_c -> positive, 30 wt% DMSO -> 70 wt% water
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": "LAB_1",
+                        "metal": "Cu",
+                        "solution_id": "SOL_LAB_DMSO",
+                        "pH": 5.5,
+                        "temperature_C": 30.0,
+                        "reference_electrode": "Ag/AgCl",
+                        "Ecorr_V_original": 0.103,
+                        "icorr": 0.005,
+                        "icorr_unit": "mA/cm2",
+                        "beta_a": 55.0,
+                        "beta_c": -115.0,
+                        "organic_solvent_type": "DMSO",
+                        "organic_solvent_concentration": 30.0,
+                    },
+                    {
+                        "record_id": "LAB_BAD",
+                        "metal": "Cu",
+                        "solution_id": "SOL_LAB_DMSO",
+                        "Ecorr_V_SHE": 0.2,
+                        "icorr_uA_cm2": 1e9,
+                    },
+                ]
+            ).to_csv(lab_dir / "study_semoaq" / "measurements.csv", index=False)
+
+            # All-invalid lab project must stay empty (never fall back to seed dataset)
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": "ALL_BAD",
+                        "metal": "Cu",
+                        "Ecorr_V_SHE": None,
+                        "icorr_uA_cm2": -5.0,
+                    }
+                ]
+            ).to_csv(lab_dir / "study_invalid" / "bad.csv", index=False)
+
+            loaded = discover_and_load_lab_projects(lab_dir)
+            self.assertEqual(set(loaded.keys()), {"study_semoaq", "study_invalid"})
+
+            ds = loaded["study_semoaq"]
+            self.assertEqual(ds.n_records, 1)
+            self.assertEqual(ds.n_rejected, 1)
+            row = ds.database.electrochemical_database.iloc[0]
+            self.assertAlmostEqual(float(row["Ecorr_V_SHE"]), 0.300, places=6)
+            self.assertAlmostEqual(float(row["icorr_uA_cm2"]), 5.0, places=6)
+            self.assertAlmostEqual(float(row["beta_c_mV_dec"]), 115.0, places=6)
+            self.assertAlmostEqual(float(row["water_content_wt_pct"]), 70.0, places=6)
+            self.assertEqual(row["solvent_regime"], "semi_aqueous")
+            self.assertEqual(row["solvent_subclass"], "polar_aprotic")
+
+            empty_ds = loaded["study_invalid"]
+            self.assertEqual(empty_ds.n_records, 0)
+            self.assertEqual(empty_ds.n_rejected, 1)
+
+    def test_dual_fingerprint_reload_skips_raw_rebuild_when_only_lab_changes_and_invalidates_on_raw_change(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            raw_dir = data_dir / "raw"
+            lab_dir = data_dir / "lab"
+            raw_dir.mkdir(parents=True)
+            (lab_dir / "study_a").mkdir(parents=True)
+            (lab_dir / "study_b").mkdir(parents=True)
+
+            raw_rows = [
+                {
+                    "record_id": f"RAW_{i}",
+                    "metal": "Cu" if i % 2 == 0 else "Co",
+                    "solution_id": f"SOL_{i % 2}",
+                    "pH": 3.0 + (i % 4) * 0.5,
+                    "temperature_C": 25.0 + (i % 2) * 10.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "Ecorr_V_SHE": 0.25 if i % 2 == 0 else -0.10,
+                    "icorr_uA_cm2": 3.0 + i * 0.2,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                }
+                for i in range(12)
+            ]
+            raw_csv = raw_dir / "lit.csv"
+            pd.DataFrame(raw_rows).to_csv(raw_csv, index=False)
+
+            lab_a_csv = lab_dir / "study_a" / "lab_a.csv"
+            lab_a_rows = [
+                {
+                    "record_id": "LA_1",
+                    "metal": "Cu",
+                    "solution_id": "SOL_LAB_A",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "Ecorr_V_SHE": 0.28,
+                    "icorr_uA_cm2": 2.5,
+                    "beta_a_mV_dec": 62.0,
+                    "beta_c_mV_dec": 118.0,
+                }
+            ]
+            pd.DataFrame(lab_a_rows).to_csv(lab_a_csv, index=False)
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": "LB_1",
+                        "metal": "Co",
+                        "solution_id": "SOL_LAB_B",
+                        "pH": 4.0,
+                        "temperature_C": 25.0,
+                        "Ecorr_V_SHE": -0.09,
+                        "icorr_uA_cm2": 15.0,
+                        "beta_a_mV_dec": 65.0,
+                        "beta_c_mV_dec": 122.0,
+                    }
+                ]
+            ).to_csv(lab_dir / "study_b" / "lab_b.csv", index=False)
+
+            ctrl = CorrosionPlatformController.from_default_data(
+                data_dir=data_dir,
+                rebuild_models=["random_forest"],
+            )
+            self.assertEqual(set(ctrl.available_options()["lab_projects"]), {"study_a", "study_b"})
+            self.assertEqual(ctrl.get_lab_project("study_a").n_records, 1)
+            base_pred_before = ctrl.predictor
+
+            # Populate lab calibration cache entries
+            ctrl._lab_calibration_cache["study_a:Cu"] = "cached_a"
+            ctrl._lab_calibration_cache["study_b:Co"] = "cached_b"
+
+            # 1. Modify only data/lab/study_a/ -> fast < 1 s reload, skips base rebuild, preserves base predictor
+            lab_a_rows.append(
+                {
+                    "record_id": "LA_2",
+                    "metal": "Cu",
+                    "solution_id": "SOL_LAB_A",
+                    "pH": 5.0,
+                    "temperature_C": 35.0,
+                    "Ecorr_V_SHE": 0.24,
+                    "icorr_uA_cm2": 4.1,
+                    "beta_a_mV_dec": 64.0,
+                    "beta_c_mV_dec": 120.0,
+                }
+            )
+            pd.DataFrame(lab_a_rows).to_csv(lab_a_csv, index=False)
+
+            reload_lab_only = ctrl.reload_external_data(rebuild_models=["random_forest"])
+            self.assertFalse(reload_lab_only.raw_rebuilt)
+            self.assertEqual(reload_lab_only.lab_status, "reloaded")
+            self.assertEqual(reload_lab_only.lab_added_or_updated, ("study_a",))
+            self.assertLess(reload_lab_only.elapsed_s, 1.0)
+            self.assertIs(ctrl.predictor, base_pred_before)
+            self.assertEqual(ctrl.get_lab_project("study_a").n_records, 2)
+            self.assertNotIn("study_a:Cu", ctrl._lab_calibration_cache)
+            self.assertIn("study_b:Co", ctrl._lab_calibration_cache)
+
+            # 2. Modify data/raw/ -> rebuilds literature artifacts and clears all cached lab calibrations
+            raw_rows.append(
+                {
+                    "record_id": "RAW_NEW",
+                    "metal": "Cu",
+                    "solution_id": "SOL_0",
+                    "pH": 4.5,
+                    "temperature_C": 25.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "Ecorr_V_SHE": 0.26,
+                    "icorr_uA_cm2": 3.8,
+                    "beta_a_mV_dec": 60.0,
+                    "beta_c_mV_dec": 120.0,
+                }
+            )
+            pd.DataFrame(raw_rows).to_csv(raw_csv, index=False)
+
+            reload_raw = ctrl.reload_external_data(rebuild_models=["random_forest"])
+            self.assertTrue(reload_raw.raw_rebuilt)
+            self.assertEqual(reload_raw.raw_status, "rebuilt")
+            self.assertTrue(reload_raw.lab_cache_invalidated)
+            self.assertEqual(ctrl._lab_calibration_cache, {})
+            self.assertIsNot(ctrl.predictor, base_pred_before)
+            self.assertEqual(len(ctrl.database.electrochemical_database), 13)
+
+
 if __name__ == "__main__":
     unittest.main()

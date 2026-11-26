@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
@@ -30,6 +31,7 @@ from corrosion_simulator.ml_predictor import (
 )
 from corrosion_simulator.solvent_constants import (
     DEFAULT_UNKNOWN_ORGANIC_SOLVENT,
+    SOLVENT_PHYSICAL_PROPERTIES,
     WATER_PROPERTIES,
     compute_mixture_solvent_descriptors,
     lookup_solvent_properties,
@@ -467,6 +469,13 @@ class TestSolventDescriptorsAndWaterWeightedFeatures(unittest.TestCase):
         unseen = lookup_solvent_properties("exotic_novel_solvent_xyz")
         self.assertEqual(unseen, DEFAULT_UNKNOWN_ORGANIC_SOLVENT)
 
+        # Composite labels mixing water and organic co-solvents must match the organic co-solvent first
+        self.assertEqual(lookup_solvent_properties("50% DMSO / water"), SOLVENT_PHYSICAL_PROPERTIES["DMSO"])
+        self.assertEqual(lookup_solvent_properties("ethanol-water"), SOLVENT_PHYSICAL_PROPERTIES["EtOH"])
+        self.assertEqual(lookup_solvent_properties("IPA/water 30:70"), SOLVENT_PHYSICAL_PROPERTIES["IPA"])
+        self.assertEqual(lookup_solvent_properties("deionized water rinse"), WATER_PROPERTIES)
+        self.assertEqual(lookup_solvent_properties("negative_control_solvent"), DEFAULT_UNKNOWN_ORGANIC_SOLVENT)
+
     def test_feature_extractor_solvent_descriptors_pourbaix_scaling_and_fold_median_imputation(self) -> None:
         seed_db = HarmonizedDatabase.from_seed()
         extractor = ElectrochemicalFeatureExtractor(material_properties=seed_db.material_properties)
@@ -578,6 +587,24 @@ class TestSolventDescriptorsAndWaterWeightedFeatures(unittest.TestCase):
         self.assertEqual(ood_solvent.confidence_tier, "Low")
         self.assertIn("water_content_wt_pct", ood_solvent.out_of_box_features)
         self.assertIn("organic_solvent_type=DMSO", ood_solvent.unseen_categories)
+
+        # Non-finite / missing water_content_wt_pct must never silently report High confidence in-box
+        for bad_water in (float("nan"), None):
+            bad_res = checker.evaluate(
+                MLFeatureQuery(
+                    metal="Cu",
+                    pH=4.0,
+                    oxidizer_type="H2O2",
+                    oxidizer_concentration=1.0,
+                    temperature_C=25.0,
+                    water_content_wt_pct=bad_water,  # type: ignore[arg-type]
+                )
+            )
+            self.assertFalse(bad_res.in_bounding_box)
+            self.assertEqual(bad_res.confidence_tier, "Low")
+            self.assertIn("water_content_wt_pct", bad_res.out_of_box_features)
+            self.assertTrue(math.isfinite(bad_res.knn_mean_distance))
+            self.assertGreater(len(bad_res.warnings), 0)
 
     def test_all_six_model_families_train_save_load_and_predict_with_solvent_features(self) -> None:
         from corrosion_simulator.ml_predictor import SUPPORTED_MODEL_FAMILIES

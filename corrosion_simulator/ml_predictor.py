@@ -127,6 +127,12 @@ _SEED_MATERIAL_MAP: Final[dict[str, dict[str, Any]]] = {
 }
 
 
+def _clean_base_solvent(value: Any) -> str:
+    """Normalize a base-solvent string, defaulting blank or `'None'` entries to `'DI water'`."""
+    label = _clean_category(value)
+    return "DI water" if label == "None" else label
+
+
 @dataclass(frozen=True)
 class MLFeatureQuery:
     """Complete Exposure Condition descriptor input for ML parameter prediction and Applicability Domain checks."""
@@ -162,7 +168,6 @@ class MLFeatureQuery:
         )
 
     def to_record_dict(self) -> dict[str, Any]:
-        base_label = _clean_category(self.base_solvent)
         water_val = (
             np.nan
             if (self.water_content_wt_pct is None or not math.isfinite(float(self.water_content_wt_pct)))
@@ -181,7 +186,7 @@ class MLFeatureQuery:
             "ORP_mV": np.nan if self.ORP_mV is None else float(self.ORP_mV),
             "organic_solvent_type": _clean_category(self.organic_solvent_type),
             "water_content_wt_pct": water_val,
-            "base_solvent": "DI water" if base_label == "None" else base_label,
+            "base_solvent": _clean_base_solvent(self.base_solvent),
         }
 
 
@@ -243,9 +248,7 @@ class ElectrochemicalFeatureExtractor:
                 work[col] = "None"
 
         if "base_solvent" in work.columns:
-            work["base_solvent"] = work["base_solvent"].apply(
-                lambda v: "DI water" if _clean_category(v) == "None" else _clean_category(v)
-            )
+            work["base_solvent"] = work["base_solvent"].apply(_clean_base_solvent)
         else:
             work["base_solvent"] = "DI water"
 
@@ -561,10 +564,25 @@ class ApplicabilityDomainChecker:
         out_of_box: list[str] = []
         warnings: list[str] = []
         recommendations: list[str] = []
+        q_numeric_vals: list[float] = []
 
         for col in _APPLICABILITY_NUMERIC_COLS:
-            val = float(rec[col])
+            raw_val = rec[col]
+            val = float("nan") if raw_val is None else float(raw_val)
             lo, hi = bounds[col]
+            if not math.isfinite(val):
+                out_of_box.append(col)
+                warnings.append(
+                    f"{col} is missing or non-finite; applicability domain coverage cannot be "
+                    f"verified against the {metal} training range [{lo:.3g}, {hi:.3g}]."
+                )
+                recommendations.append(
+                    f"Provide a finite {col} value for {metal} (current training coverage: "
+                    f"[{lo:.3g}, {hi:.3g}])."
+                )
+                q_numeric_vals.append(0.5 * (lo + hi))
+                continue
+            q_numeric_vals.append(val)
             if val < lo - 1e-9 or val > hi + 1e-9:
                 out_of_box.append(col)
                 warnings.append(
@@ -589,7 +607,7 @@ class ApplicabilityDomainChecker:
                     f"at pH {q.pH:.1f} and {q.temperature_C:.1f} °C."
                 )
 
-        q_vec = np.array([float(rec[col]) for col in _APPLICABILITY_NUMERIC_COLS], dtype=float)
+        q_vec = np.array(q_numeric_vals, dtype=float)
         scale_vec = np.array([scales[col] for col in _APPLICABILITY_NUMERIC_COLS], dtype=float)
         diffs = (points - q_vec) / scale_vec
         num_sq_dists = np.sum(diffs**2, axis=1)

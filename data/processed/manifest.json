@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "built_at_utc": "2026-11-26T20:13:45.763411+00:00",
+  "schema_version": 2,
+  "built_at_utc": "2026-11-26T20:27:35.181195+00:00",
   "raw_fingerprint": {
     "raw_dir": "/Users/mark/Documents/python/Corrosion simulator/data/raw",
     "combined_sha256": "7492fe93e429dbe1572491be02cdb4a87b714e25af4b77665d7aee4fdf2e435a",

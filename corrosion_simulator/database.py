@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -18,6 +19,7 @@ from corrosion_simulator.element_constants import (
     infer_base_element,
 )
 from corrosion_simulator.paths import (
+    compute_csv_fingerprint,
     iter_raw_csv_files,
     resolve_raw_and_processed_dirs,
 )
@@ -1051,24 +1053,25 @@ class HarmonizedDatabase:
         )
 
     @classmethod
-    def from_directory(
+    def from_csv_files(
         cls,
-        raw_dir: str | Path | None = None,
+        csv_files: Sequence[Path],
         *,
+        base_path: Path | None = None,
         filter_to_core_metals: bool = False,
         supplement_missing_core_metals: bool = False,
+        fallback_to_seed: bool = True,
     ) -> HarmonizedDatabase:
-        """Ingest raw CSV tables from ``raw_dir`` (or fall back to the built-in seed dataset)."""
-        if raw_dir is None:
-            base_path, _ = resolve_raw_and_processed_dirs()
-        else:
-            base_path = Path(raw_dir)
-        if not base_path.exists():
-            return cls.from_seed()
-
-        csv_files = iter_raw_csv_files(base_path)
+        """Ingest and harmonize a specific list of raw CSV files."""
         if not csv_files:
-            return cls.from_seed()
+            if fallback_to_seed:
+                return cls.from_seed()
+            return cls.from_raw_tables(
+                pd.DataFrame(),
+                filter_to_core_metals=filter_to_core_metals,
+                supplement_missing_core_metals=supplement_missing_core_metals,
+                fallback_to_seed=False,
+            )
 
         echem_frames: list[pd.DataFrame] = []
         material_frames: list[pd.DataFrame] = []
@@ -1096,7 +1099,7 @@ class HarmonizedDatabase:
             )
             if has_echem_cols or "electrochemical" in name_lower or "ml_training" in name_lower:
                 if not (cols & {"metal", "symbol", "material_id"}):
-                    if csv_path.parent != base_path:
+                    if base_path is not None and csv_path.parent != base_path:
                         parent_name = csv_path.parent.name.strip()
                         if parent_name and (not filter_to_core_metals or parent_name in CORE_METALS):
                             df["metal"] = parent_name
@@ -1120,6 +1123,30 @@ class HarmonizedDatabase:
             solution_df=sol_combined,
             filter_to_core_metals=filter_to_core_metals,
             supplement_missing_core_metals=supplement_missing_core_metals,
+            fallback_to_seed=fallback_to_seed,
+        )
+
+    @classmethod
+    def from_directory(
+        cls,
+        raw_dir: str | Path | None = None,
+        *,
+        filter_to_core_metals: bool = False,
+        supplement_missing_core_metals: bool = False,
+        fallback_to_seed: bool = True,
+    ) -> HarmonizedDatabase:
+        """Ingest raw CSV tables from ``raw_dir`` (or fall back to the built-in seed dataset)."""
+        if raw_dir is None:
+            base_path, _ = resolve_raw_and_processed_dirs()
+        else:
+            base_path = Path(raw_dir)
+        csv_files = iter_raw_csv_files(base_path) if base_path.exists() else []
+        return cls.from_csv_files(
+            csv_files,
+            base_path=base_path,
+            filter_to_core_metals=filter_to_core_metals,
+            supplement_missing_core_metals=supplement_missing_core_metals,
+            fallback_to_seed=fallback_to_seed,
         )
 
     @classmethod
@@ -1131,18 +1158,19 @@ class HarmonizedDatabase:
         *,
         filter_to_core_metals: bool = False,
         supplement_missing_core_metals: bool = False,
+        fallback_to_seed: bool = True,
     ) -> HarmonizedDatabase:
         """Harmonize, deduplicate, normalize units, filter, and impute electrochemical tables."""
         echem_raw = _clean_column_names(electrochemical_df)
         mat_raw = _clean_column_names(material_df) if material_df is not None else pd.DataFrame()
         sol_raw = _clean_column_names(solution_df) if solution_df is not None else pd.DataFrame()
 
-        if echem_raw.empty:
+        if echem_raw.empty and fallback_to_seed:
             seed_echem, seed_mat, seed_sol = build_seed_tables()
             echem_raw = seed_echem
             mat_raw = pd.concat([mat_raw, seed_mat], ignore_index=True)
             sol_raw = pd.concat([sol_raw, seed_sol], ignore_index=True)
-        elif supplement_missing_core_metals:
+        elif not echem_raw.empty and supplement_missing_core_metals:
             # Determine which of the 8 core metals lack valid (Ecorr, icorr) records in echem_raw
             prelim_mat = cls._harmonize_materials(mat_raw, echem_raw, filter_to_core_metals=filter_to_core_metals)
             prelim_sol, prelim_echem_sol = cls._harmonize_solutions(sol_raw, echem_raw)
@@ -2468,25 +2496,10 @@ class HarmonizedDatabase:
             base_path, _ = resolve_raw_and_processed_dirs()
         else:
             base_path = Path(raw_dir)
-        files_info: dict[str, dict[str, Any]] = {}
-        combined_hasher = hashlib.sha256()
-        for csv_path in iter_raw_csv_files(base_path):
-            rel = str(csv_path.relative_to(base_path)).replace("\\", "/")
-            data = csv_path.read_bytes()
-            file_sha = hashlib.sha256(data).hexdigest()
-            files_info[rel] = {
-                "sha256": file_sha,
-                "size_bytes": len(data),
-            }
-            combined_hasher.update(rel.encode("utf-8"))
-            combined_hasher.update(b":")
-            combined_hasher.update(file_sha.encode("utf-8"))
-            combined_hasher.update(b"\n")
+        fp = compute_csv_fingerprint(iter_raw_csv_files(base_path), base_path)
         return {
             "raw_dir": str(base_path),
-            "combined_sha256": combined_hasher.hexdigest(),
-            "file_count": len(files_info),
-            "files": files_info,
+            **fp,
         }
 
     def export_to_directory(self, output_dir: str | Path = "data/processed") -> dict[str, Path]:

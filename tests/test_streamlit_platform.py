@@ -394,6 +394,127 @@ class TestStreamlitAppSmoke(unittest.TestCase):
         self.assertEqual(len(at.tabs), 4)
         self.assertGreaterEqual(len(at.metric), 4)
 
+    def test_streamlit_sidebar_displays_literature_and_lab_sync_statuses_and_reloads(self) -> None:
+        import os
+        from pathlib import Path
+        import tempfile
+        from unittest.mock import patch
+
+        import pandas as pd
+        import streamlit as st
+        from streamlit.testing.v1 import AppTest
+
+        from corrosion_simulator.build_artifacts import build_processed_artifacts
+        from corrosion_simulator.paths import DATA_DIR_ENV_VAR
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            raw_dir = data_dir / "raw"
+            proc_dir = data_dir / "processed"
+            lab_dir = data_dir / "lab" / "pilot_eg"
+            raw_dir.mkdir(parents=True)
+            lab_dir.mkdir(parents=True)
+
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": f"R_{i}",
+                        "metal": "Cu" if i % 2 == 0 else "Co",
+                        "solution_id": f"SOL_{i % 2}",
+                        "pH": 3.0 + (i % 4) * 0.5,
+                        "temperature_C": 25.0 + (i % 2) * 5.0,
+                        "oxidizer_type": "H2O2",
+                        "oxidizer_concentration": 1.0,
+                        "Ecorr_V_SHE": 0.25 if i % 2 == 0 else -0.10,
+                        "icorr_uA_cm2": 3.0 + i * 0.2,
+                        "beta_a_mV_dec": 60.0,
+                        "beta_c_mV_dec": 120.0,
+                    }
+                    for i in range(12)
+                ]
+            ).to_csv(raw_dir / "lit.csv", index=False)
+            build_processed_artifacts(
+                raw_dir=raw_dir,
+                output_dir=proc_dir,
+                models=["all"],
+                export_csv=False,
+            )
+
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": "L_1",
+                        "metal": "Cu",
+                        "solution_id": "SOL_EG",
+                        "pH": 6.5,
+                        "temperature_C": 25.0,
+                        "Ecorr_V_SHE": 0.18,
+                        "icorr_uA_cm2": 1.8,
+                        "beta_a_mV_dec": 60.0,
+                        "beta_c_mV_dec": 120.0,
+                        "organic_solvent_type": "EG",
+                        "organic_solvent_concentration": 20.0,
+                    }
+                ]
+            ).to_csv(lab_dir / "lab_eg.csv", index=False)
+
+            app_path = Path(__file__).resolve().parents[1] / "app.py"
+            st.cache_resource.clear()
+            try:
+                with patch.dict(os.environ, {DATA_DIR_ENV_VAR: str(data_dir)}, clear=False):
+                    at = AppTest.from_file(str(app_path), default_timeout=30)
+                    at.run()
+                    self.assertEqual(len(at.exception), 0, msg=f"App error: {at.exception}")
+                    sidebar_markdown = "\n".join(el.value for el in at.sidebar.markdown)
+                    sidebar_captions = "\n".join(el.value for el in at.sidebar.caption)
+                    self.assertIn("Literature Prior", sidebar_markdown)
+                    self.assertIn("Lab Data", sidebar_markdown)
+                    self.assertIn("pilot_eg", sidebar_captions)
+                    self.assertIn("`1` records", sidebar_captions)
+
+                    # Trigger Reload External Data button when only lab CSV changes
+                    pd.DataFrame(
+                        [
+                            {
+                                "record_id": "L_1",
+                                "metal": "Cu",
+                                "solution_id": "SOL_EG",
+                                "pH": 6.5,
+                                "temperature_C": 25.0,
+                                "Ecorr_V_SHE": 0.18,
+                                "icorr_uA_cm2": 1.8,
+                                "beta_a_mV_dec": 60.0,
+                                "beta_c_mV_dec": 120.0,
+                                "organic_solvent_type": "EG",
+                                "organic_solvent_concentration": 20.0,
+                            },
+                            {
+                                "record_id": "L_2",
+                                "metal": "Cu",
+                                "solution_id": "SOL_EG",
+                                "pH": 7.0,
+                                "temperature_C": 35.0,
+                                "Ecorr_V_SHE": 0.16,
+                                "icorr_uA_cm2": 2.4,
+                                "beta_a_mV_dec": 62.0,
+                                "beta_c_mV_dec": 124.0,
+                                "organic_solvent_type": "EG",
+                                "organic_solvent_concentration": 20.0,
+                            },
+                        ]
+                    ).to_csv(lab_dir / "lab_eg.csv", index=False)
+
+                    reload_btn = next(
+                        b for b in at.sidebar.button if "Reload External Data" in b.label
+                    )
+                    reload_btn.click().run()
+                    self.assertEqual(len(at.exception), 0, msg=f"Reload error: {at.exception}")
+                    updated_captions = "\n".join(el.value for el in at.sidebar.caption)
+                    self.assertIn("`reloaded`", updated_captions)
+                    self.assertIn("`2` records", updated_captions)
+            finally:
+                st.cache_resource.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

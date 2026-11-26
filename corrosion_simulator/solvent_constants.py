@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import re
 from typing import Any, Final
 
 from corrosion_simulator.database import normalize_category_label
@@ -150,6 +151,19 @@ _SOLVENT_ALIASES: Final[dict[str, str]] = {
     "msa": "methanesulfonic acid",
 }
 
+_ORGANIC_ALIASES_BY_LEN: Final[tuple[tuple[str, str], ...]] = tuple(
+    sorted(
+        ((alias, target) for alias, target in _SOLVENT_ALIASES.items() if target != "water"),
+        key=lambda item: (-len(item[0]), item[0]),
+    )
+)
+_WATER_ALIASES_BY_LEN: Final[tuple[tuple[str, str], ...]] = tuple(
+    sorted(
+        ((alias, target) for alias, target in _SOLVENT_ALIASES.items() if target == "water"),
+        key=lambda item: (-len(item[0]), item[0]),
+    )
+)
+
 
 def lookup_solvent_properties(solvent_name: Any) -> SolventPhysicalProperties:
     """Resolve physicochemical properties for water or an organic solvent with safe fallback."""
@@ -160,7 +174,13 @@ def lookup_solvent_properties(solvent_name: Any) -> SolventPhysicalProperties:
     canonical = _SOLVENT_ALIASES.get(norm)
     if canonical is not None:
         return SOLVENT_PHYSICAL_PROPERTIES[canonical]
-    for alias, target in _SOLVENT_ALIASES.items():
+    for alias, target in _ORGANIC_ALIASES_BY_LEN:
+        if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", norm):
+            return SOLVENT_PHYSICAL_PROPERTIES[target]
+    for alias, target in _ORGANIC_ALIASES_BY_LEN:
+        if len(alias) >= 4 and alias in norm:
+            return SOLVENT_PHYSICAL_PROPERTIES[target]
+    for alias, target in _WATER_ALIASES_BY_LEN:
         if len(alias) >= 4 and alias in norm:
             return SOLVENT_PHYSICAL_PROPERTIES[target]
     return DEFAULT_UNKNOWN_ORGANIC_SOLVENT
