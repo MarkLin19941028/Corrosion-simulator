@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 import tempfile
@@ -253,9 +254,9 @@ class TestLowSampleAndGPScaling(unittest.TestCase):
     def test_gp_model_respects_max_gp_samples_cap(self) -> None:
         db = HarmonizedDatabase.from_seed()
         predictor = HybridMLPredictor(
-            model_family="gaussian_process",
+            model_family="rf_gp_ensemble",
             random_state=42,
-            max_gp_samples=20,
+            max_gp_samples=4,
         )
         predictor.fit(db)
         self.assertTrue(any(m.gp_subsampled for m in predictor.models.values()))
@@ -339,6 +340,24 @@ class TestOfflineBuildPipelineAndStaleDetection(unittest.TestCase):
             # Freshness check + controller fast load
             status, _ = check_artifacts_freshness(raw_dir, out_dir)
             self.assertEqual(status, "fresh")
+            manifest = load_manifest(out_dir)
+            assert manifest is not None
+            self.assertEqual(manifest["schema_version"], 3)
+
+            # Legacy v2 manifest is flagged as stale under MANIFEST_SCHEMA_VERSION == 3
+            v2_manifest = dict(manifest)
+            v2_manifest["schema_version"] = 2
+            (out_dir / "manifest.json").write_text(
+                json.dumps(v2_manifest, indent=2), encoding="utf-8"
+            )
+            v2_status, v2_msg = check_artifacts_freshness(raw_dir, out_dir)
+            self.assertEqual(v2_status, "stale")
+            self.assertIn("schema version mismatch", v2_msg or "")
+            # Restore v3 manifest before controller load
+            (out_dir / "manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+
             ctrl = CorrosionPlatformController.from_default_data(
                 raw_dir=raw_dir, processed_dir=out_dir
             )
@@ -447,7 +466,7 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
             self.assertGreater(len(progress_events), len(SUPPORTED_MODEL_FAMILIES))
             self.assertEqual(progress_events[-1][0], progress_events[-1][1])
 
-            # Verify ALL 6 ML model families were built and saved
+            # Verify ALL 3 retained ML model families were built and saved
             for family in SUPPORTED_MODEL_FAMILIES:
                 self.assertTrue(
                     (proc_dir / "models" / f"{family}.joblib").exists(),
@@ -459,18 +478,18 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
             self.assertEqual(ctrl_second.artifact_status, "fresh")
 
             # Direct replacement of a model inside processed/models/ is used directly when raw/ is unchanged
-            custom_et = HybridMLPredictor(model_family="extra_trees", n_estimators=17, random_state=7)
-            custom_et.fit(ctrl_second.database)
-            custom_et.save(proc_dir / "models" / "extra_trees.joblib")
+            custom_hgb = HybridMLPredictor(model_family="hist_gradient_boosting", n_estimators=17, random_state=7)
+            custom_hgb.fit(ctrl_second.database)
+            custom_hgb.save(proc_dir / "models" / "hist_gradient_boosting.joblib")
             ctrl_custom = CorrosionPlatformController.from_default_data(data_dir=data_dir)
             self.assertEqual(ctrl_custom.artifact_status, "fresh")
-            self.assertEqual(ctrl_custom.get_predictor("extra_trees").n_estimators, 17)
+            self.assertEqual(ctrl_custom.get_predictor("hist_gradient_boosting").n_estimators, 17)
 
             # Corrupted .joblib auto-heals without crashing
-            (proc_dir / "models" / "gradient_boosting.joblib").write_bytes(b"corrupted-pickle-bytes")
+            (proc_dir / "models" / "rf_gp_ensemble.joblib").write_bytes(b"corrupted-pickle-bytes")
             ctrl_healed = CorrosionPlatformController.from_default_data(data_dir=data_dir)
-            healed_pred = ctrl_healed.get_predictor("gradient_boosting")
-            self.assertEqual(healed_pred.model_family, "gradient_boosting")
+            healed_pred = ctrl_healed.get_predictor("rf_gp_ensemble")
+            self.assertEqual(healed_pred.model_family, "rf_gp_ensemble")
             self.assertIn("automatically retrained", ctrl_healed.artifact_warning or "")
 
             # Updating CSV in data/raw/ automatically rebuilds models & ingests new metal on next startup

@@ -577,12 +577,16 @@ class MonteCarloKineticsResult:
     depth_mean_nm: np.ndarray
     depth_std_nm: np.ndarray
     depth_p05_nm: np.ndarray
+    depth_p25_nm: np.ndarray
     depth_p50_nm: np.ndarray
+    depth_p75_nm: np.ndarray
     depth_p95_nm: np.ndarray
     risk_mean: np.ndarray
     risk_std: np.ndarray
     risk_p05: np.ndarray
+    risk_p25: np.ndarray
     risk_p50: np.ndarray
+    risk_p75: np.ndarray
     risk_p95: np.ndarray
     median_risk_tiers: tuple[ThicknessLossRiskTier, ...]
     time_to_threshold_samples_s: np.ndarray
@@ -711,12 +715,16 @@ def propagate_kinetics_uncertainty_monte_carlo(
         depth_mean_nm=np.mean(depth_matrix, axis=0),
         depth_std_nm=np.std(depth_matrix, axis=0),
         depth_p05_nm=np.percentile(depth_matrix, 5.0, axis=0),
+        depth_p25_nm=np.percentile(depth_matrix, 25.0, axis=0),
         depth_p50_nm=depth_p50,
+        depth_p75_nm=np.percentile(depth_matrix, 75.0, axis=0),
         depth_p95_nm=np.percentile(depth_matrix, 95.0, axis=0),
         risk_mean=np.mean(risk_matrix, axis=0),
         risk_std=np.std(risk_matrix, axis=0),
         risk_p05=np.percentile(risk_matrix, 5.0, axis=0),
+        risk_p25=np.percentile(risk_matrix, 25.0, axis=0),
         risk_p50=np.percentile(risk_matrix, 50.0, axis=0),
+        risk_p75=np.percentile(risk_matrix, 75.0, axis=0),
         risk_p95=np.percentile(risk_matrix, 95.0, axis=0),
         median_risk_tiers=median_tiers,
         time_to_threshold_samples_s=t_crit_samples,
@@ -753,25 +761,35 @@ def plot_kinetics_and_risk(
     }
 
     if isinstance(result, MonteCarloKineticsResult):
-        color = model_colors.get(result.model, "#1f77b4")
+        depth_color = "#1f77b4"
+        risk_color = "#d95f02"
         ax_depth.fill_between(
             result.times_s,
             result.depth_p05_nm,
             result.depth_p95_nm,
-            color=color,
-            alpha=0.22,
-            label=f"90% Uncertainty Band (P05–P95, N={result.n_draws})",
+            color=depth_color,
+            alpha=0.14,
+            label=f"Depth 90% Band (P05–P95, N={result.n_draws})",
+        )
+        ax_depth.fill_between(
+            result.times_s,
+            result.depth_p25_nm,
+            result.depth_p75_nm,
+            color=depth_color,
+            alpha=0.28,
+            label="Depth 50% Band (P25–P75)",
         )
         ax_depth.plot(
             result.times_s,
             result.depth_p50_nm,
-            color=color,
+            color=depth_color,
+            linestyle="-",
             linewidth=2.2,
             label=f"{result.model.replace('_', ' ').title()} Median (P50)",
         )
         ax_depth.axhline(
             result.d_crit_nm,
-            color="#111111",
+            color="#475569",
             linestyle="--",
             linewidth=1.4,
             label=f"Critical Threshold d_crit = {result.d_crit_nm:.2g} nm",
@@ -780,7 +798,7 @@ def plot_kinetics_and_risk(
         if math.isfinite(t50) and t50 <= float(result.times_s[-1]):
             ax_depth.axvline(
                 t50,
-                color="#ff7f0e",
+                color="#d95f02",
                 linestyle=":",
                 linewidth=1.5,
                 label=f"Median Time to Threshold = {t50:.1f} s",
@@ -790,14 +808,23 @@ def plot_kinetics_and_risk(
             result.times_s,
             result.risk_p05,
             result.risk_p95,
-            color=color,
-            alpha=0.22,
-            label=f"90% Risk Band (P05–P95, N={result.n_draws})",
+            color=risk_color,
+            alpha=0.14,
+            label=f"Risk 90% Band (P05–P95, N={result.n_draws})",
+        )
+        ax_risk.fill_between(
+            result.times_s,
+            result.risk_p25,
+            result.risk_p75,
+            color=risk_color,
+            alpha=0.28,
+            label="Risk 50% Band (P25–P75)",
         )
         ax_risk.plot(
             result.times_s,
             result.risk_p50,
-            color=color,
+            color=risk_color,
+            linestyle="-.",
             linewidth=2.2,
             label="Median Risk R(t) (P50)",
         )
@@ -839,7 +866,7 @@ def plot_kinetics_and_risk(
         default_title = f"{metal_prefix}Time-Resolved Corrosion Depth & Thickness Loss Risk"
 
     # Risk tier reference line at R(d_crit) = 0.5
-    ax_risk.axhline(0.5, color="#111111", linestyle="--", linewidth=1.2, label="Threshold Risk R(d_crit) = 0.5")
+    ax_risk.axhline(0.5, color="#94a3b8", linestyle=":", linewidth=1.2, label="Threshold Risk R(d_crit) = 0.5")
     ax_risk.set_ylim(-0.02, 1.04)
 
     ax_depth.set_xlabel("Immersion Time [s]")

@@ -506,44 +506,87 @@ def _render_composite_figure(
 
     if single_payload.mc_propagation is not None and single_payload.mc_propagation.polarization_band is not None:
         band = single_payload.mc_propagation.polarization_band
+        e_band = curve.parameters.Ecorr_V_SHE + band.overpotential_V
+        p05 = np.maximum(band.eta_log10_abs_net_p05, cusp_floor)
+        p25 = np.maximum(band.eta_log10_abs_net_p25, cusp_floor)
+        p75 = np.maximum(band.eta_log10_abs_net_p75, cusp_floor)
+        p95 = np.maximum(band.eta_log10_abs_net_p95, cusp_floor)
         ax_tafel.fill_between(
-            band.potential_V_SHE,
-            band.log10_abs_net_p05,
-            band.log10_abs_net_p95,
+            e_band,
+            p05,
+            p95,
             color="#1f77b4",
-            alpha=0.18,
-            label="90% Band",
+            alpha=0.14,
+            edgecolor="#1f77b4",
+            linewidth=0.6,
+            label="Net |i_net| 90% Band (p05–p95)",
+        )
+        ax_tafel.fill_between(
+            e_band,
+            p25,
+            p75,
+            color="#1f77b4",
+            alpha=0.28,
+            edgecolor="#1f77b4",
+            linewidth=0.8,
+            label="Net |i_net| 50% Band (p25–p75)",
         )
     ax_tafel.plot(curve.potential_V_SHE, net_log10, color="#1f77b4", linewidth=2.0, label="Net |i_net|")
-    ax_tafel.scatter(
-        [curve.parameters.Ecorr_V_SHE],
-        [math.log10(curve.parameters.icorr_uA_cm2)],
-        color="#111111",
-        marker="D",
-        zorder=5,
-        label="E_corr, i_corr",
-    )
+    x_ecorr = float(curve.parameters.Ecorr_V_SHE)
+    y_icorr = float(math.log10(curve.parameters.icorr_uA_cm2))
+    if single_payload.mc_propagation is not None and single_payload.mc_propagation.polarization_band is not None:
+        band = single_payload.mc_propagation.polarization_band
+        ax_tafel.errorbar(
+            [x_ecorr],
+            [y_icorr],
+            xerr=[[max(0.0, x_ecorr - float(band.ecorr_p05_V_SHE))], [max(0.0, float(band.ecorr_p95_V_SHE) - x_ecorr)]],
+            yerr=[[max(0.0, y_icorr - float(band.log10_icorr_p05))], [max(0.0, float(band.log10_icorr_p95) - y_icorr)]],
+            fmt="D",
+            color="#111111",
+            ecolor="#111111",
+            elinewidth=1.2,
+            capsize=3,
+            zorder=5,
+            label="E_corr, i_corr (90% CI)",
+        )
+    else:
+        ax_tafel.scatter(
+            [x_ecorr],
+            [y_icorr],
+            color="#111111",
+            marker="D",
+            zorder=5,
+            label="E_corr, i_corr",
+        )
     ax_tafel.set_title(f"{single_payload.request.primary_metal} Polarization Curve ({single_payload.request.parameter_source.upper()})")
     ax_tafel.set_xlabel("Potential E (V vs. SHE)")
     ax_tafel.set_ylabel("log10(|i| / µA·cm⁻²)")
     ax_tafel.set_ylim(cusp_floor - 0.4, float(np.max(net_log10[finite_mask])) + 1.2 if np.any(finite_mask) else 4.0)
     ax_tafel.grid(True, alpha=0.3)
-    ax_tafel.legend(fontsize=8, loc="best")
+    ax_tafel.legend(fontsize=7.5, loc="best")
 
     ax_kin = fig.add_subplot(n_rows, 2, 2)
     kin = single_payload.kinetics_result
     if kin is not None:
-        ax_kin.plot(kin.times_s, kin.depth_nm, color="#1f77b4", linewidth=2.0, label=f"Depth ({kin.model})")
+        ax_kin.plot(kin.times_s, kin.depth_nm, color="#1f77b4", linestyle="-", linewidth=2.0, label=f"Depth ({kin.model}) (left)")
         if single_payload.mc_kinetics is not None:
             ax_kin.fill_between(
                 kin.times_s,
                 single_payload.mc_kinetics.depth_p05_nm,
                 single_payload.mc_kinetics.depth_p95_nm,
                 color="#1f77b4",
-                alpha=0.18,
-                label="Depth 90% Band",
+                alpha=0.14,
+                label="Depth 90% Band (left)",
             )
-        ax_kin.axhline(kin.d_crit_nm, color="#d62728", linestyle="--", linewidth=1.2, label=f"d_crit={kin.d_crit_nm:.2f} nm")
+            ax_kin.fill_between(
+                kin.times_s,
+                single_payload.mc_kinetics.depth_p25_nm,
+                single_payload.mc_kinetics.depth_p75_nm,
+                color="#1f77b4",
+                alpha=0.28,
+                label="Depth 50% Band (left)",
+            )
+        ax_kin.axhline(kin.d_crit_nm, color="#475569", linestyle="--", linewidth=1.2, label=f"d_crit={kin.d_crit_nm:.2f} nm (left)")
         ax_kin.set_title(f"{single_payload.request.primary_metal} Corrosion Depth & Risk")
         ax_kin.set_xlabel("Immersion Time (s)")
         ax_kin.set_ylabel("Corrosion Depth (nm)", color="#1f77b4")
@@ -551,10 +594,12 @@ def _render_composite_figure(
         ax_kin.grid(True, alpha=0.3)
 
         ax_risk = ax_kin.twinx()
-        ax_risk.plot(kin.times_s, kin.risk_score, color="#d62728", linestyle=":", linewidth=1.8, label="Risk R(t)")
-        ax_risk.set_ylabel("Thickness Loss Risk R(t)", color="#d62728")
+        ax_risk.plot(kin.times_s, kin.risk_score, color="#d95f02", linestyle="-.", linewidth=1.8, label="Risk R(t) (right)")
+        ax_risk.set_ylabel("Thickness Loss Risk R(t)", color="#d95f02")
         ax_risk.set_ylim(0.0, 1.05)
-        ax_kin.legend(fontsize=8, loc="upper left")
+        h_left, l_left = ax_kin.get_legend_handles_labels()
+        h_right, l_right = ax_risk.get_legend_handles_labels()
+        ax_kin.legend(h_left + h_right, l_left + l_right, fontsize=7.5, loc="upper left")
     else:
         ax_kin.axis("off")
         ax_kin.text(
@@ -601,9 +646,9 @@ def _render_composite_figure(
 
         ax_gd = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 2)
         if g.uncoupled_kinetics is not None and g.coupled_kinetics is not None:
-            ax_gd.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#1f77b4", label=f"{g.active_metal} Uncoupled")
-            ax_gd.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#d62728", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
-            ax_gd.axhline(g.request.d_crit_nm, color="#555555", linestyle=":", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
+            ax_gd.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#64748b", label=f"{g.active_metal} Uncoupled")
+            ax_gd.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#1f77b4", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
+            ax_gd.axhline(g.request.d_crit_nm, color="#475569", linestyle="--", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
             ax_gd.set_title(f"Galvanic Depth: Uncoupled vs. Coupled ({g.active_metal})")
             ax_gd.set_xlabel("Immersion Time (s)")
             ax_gd.set_ylabel("Corrosion Depth (nm)")

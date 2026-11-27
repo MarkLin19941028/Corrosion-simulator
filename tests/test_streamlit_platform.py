@@ -179,10 +179,27 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertIn("Potential", payload.polarization_figure.layout.xaxis.title.text)
         self.assertIn("log10", payload.polarization_figure.layout.yaxis.title.text)
         self.assertIsNotNone(payload.polarization_figure.layout.yaxis.range)
-        net_trace = [t for t in payload.polarization_figure.data if "Net |i_net|" in (t.name or "")][0]
+        net_trace = [t for t in payload.polarization_figure.data if (t.name or "").endswith("Net |i_net|")][0]
         self.assertTrue(all(math.isfinite(float(v)) for v in net_trace.y))
+        pol_names = {t.name for t in payload.polarization_figure.data}
+        self.assertIn("Net |i_net| 50% Band (p25–p75)", pol_names)
+        self.assertIn("Net |i_net| 90% Band (p05–p95)", pol_names)
+        marker_trace = [t for t in payload.polarization_figure.data if (t.name or "").startswith("(E_corr, i_corr)")][0]
+        self.assertIsNotNone(marker_trace.error_x.array)
+        self.assertIsNotNone(marker_trace.error_y.array)
+
         self.assertIsInstance(payload.kinetics_risk_figure, go.Figure)
         self.assertGreaterEqual(len(payload.kinetics_risk_figure.data), 2)
+        self.assertIsInstance(payload.depth_figure, go.Figure)
+        self.assertIsInstance(payload.risk_figure, go.Figure)
+        self.assertEqual(payload.depth_figure.layout.legend.orientation, "h")
+        self.assertEqual(payload.risk_figure.layout.legend.orientation, "h")
+        depth_line = [t for t in payload.depth_figure.data if "Depth (" in (t.name or "")][0]
+        self.assertEqual(depth_line.line.color, "#1f77b4")
+        self.assertEqual(depth_line.line.dash, "solid")
+        risk_line = [t for t in payload.risk_figure.data if (t.name or "") == "Thickness Loss Risk R(t)"][0]
+        self.assertEqual(risk_line.line.color, "#d95f02")
+        self.assertEqual(risk_line.line.dash, "dashdot")
 
         # Summary dict is JSON-friendly and contains core keys
         summary = payload.to_summary_dict()
@@ -315,6 +332,20 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
 
         self.assertIsInstance(payload.comparative_kinetics_figure, go.Figure)
         self.assertGreaterEqual(len(payload.comparative_kinetics_figure.data), 4)
+        self.assertIsInstance(payload.galvanic_depth_figure, go.Figure)
+        self.assertIsInstance(payload.galvanic_risk_figure, go.Figure)
+        self.assertEqual(payload.galvanic_depth_figure.layout.legend.orientation, "h")
+        self.assertEqual(payload.galvanic_risk_figure.layout.legend.orientation, "h")
+        galv_coupled_depth = [t for t in payload.galvanic_depth_figure.data if (t.name or "").endswith("Coupled Depth")][0]
+        self.assertEqual(galv_coupled_depth.line.color, "#1f77b4")
+        self.assertEqual(galv_coupled_depth.line.dash, "solid")
+        galv_uncoupled_depth = [t for t in payload.galvanic_depth_figure.data if (t.name or "").endswith("Uncoupled Depth")][0]
+        self.assertEqual(galv_uncoupled_depth.line.dash, "dash")
+        galv_coupled_risk = [t for t in payload.galvanic_risk_figure.data if (t.name or "").endswith("Coupled Risk")][0]
+        self.assertEqual(galv_coupled_risk.line.color, "#d95f02")
+        self.assertEqual(galv_coupled_risk.line.dash, "dashdot")
+        galv_uncoupled_risk = [t for t in payload.galvanic_risk_figure.data if (t.name or "").endswith("Uncoupled Risk")][0]
+        self.assertEqual(galv_uncoupled_risk.line.dash, "dot")
 
         summary = payload.to_summary_dict()
         self.assertEqual(summary["active_metal"], payload.active_metal)
@@ -453,11 +484,12 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
 
     def test_live_ml_model_family_switching_and_caching(self) -> None:
         options = self.controller.available_options()
-        self.assertIn("extra_trees", options["ml_model_families"])
-        self.assertIn("rf_gp_ensemble", options["ml_model_families"])
-        self.assertIn("hist_gradient_boosting", options["ml_model_families"])
+        self.assertEqual(
+            set(options["ml_model_families"]),
+            {"random_forest", "hist_gradient_boosting", "rf_gp_ensemble"},
+        )
 
-        for family in ("random_forest", "extra_trees", "rf_gp_ensemble"):
+        for family in ("random_forest", "hist_gradient_boosting", "rf_gp_ensemble"):
             req = SimulationRequest(
                 primary_metal="Cu",
                 pH=4.0,
@@ -475,8 +507,8 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
 
         # Calling get_predictor again returns the cached instance
         self.assertIs(
-            self.controller.get_predictor("extra_trees"),
-            self.controller.get_predictor("extra_trees"),
+            self.controller.get_predictor("hist_gradient_boosting"),
+            self.controller.get_predictor("hist_gradient_boosting"),
         )
 
     def test_controller_calibration_modes_end_to_end_physics_and_reload(self) -> None:
@@ -940,6 +972,255 @@ class TestStreamlitAppSmoke(unittest.TestCase):
                     self.assertIn("pilot_eg", lab_only_info)
             finally:
                 st.cache_resource.clear()
+
+    def test_auto_model_routing_override_and_cross_model_disagreement_downgrade(self) -> None:
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        from corrosion_simulator.ml_predictor import (
+            ApplicabilityDomainResult,
+            MLParameterPrediction,
+            ParameterEstimate,
+        )
+        from corrosion_simulator.platform_controller import (
+            CorrosionPlatformController,
+            SimulationRequest,
+            resolve_model_family_for_mode,
+        )
+
+        # 1. Deterministic Calibration Mode auto-routing & explicit override
+        self.assertEqual(resolve_model_family_for_mode("literature_only"), "rf_gp_ensemble")
+        self.assertEqual(resolve_model_family_for_mode("delta_learning"), "hist_gradient_boosting")
+        self.assertEqual(resolve_model_family_for_mode("lab_only_gp"), "lab_local_gp")
+        self.assertEqual(
+            resolve_model_family_for_mode("literature_only", "random_forest"),
+            "random_forest",
+        )
+        self.assertEqual(
+            resolve_model_family_for_mode("lab_only_gp", "random_forest"),
+            "lab_local_gp",
+        )
+
+        req_lit = SimulationRequest(primary_metal="Cu", calibration_mode="literature_only")
+        req_delta = SimulationRequest(primary_metal="Cu", calibration_mode="delta_learning")
+        req_override = SimulationRequest(
+            primary_metal="Cu",
+            calibration_mode="literature_only",
+            ml_model_family="random_forest",
+        )
+        self.assertEqual(req_lit.ml_model_family, "rf_gp_ensemble")
+        self.assertEqual(req_delta.ml_model_family, "hist_gradient_boosting")
+        self.assertEqual(req_override.ml_model_family, "random_forest")
+
+        # 2. Peer-absent no-op: when peer model is neither in memory nor on disk, never train it on the fly
+        ctrl = CorrosionPlatformController.from_default_data(model_family="rf_gp_ensemble")
+        ctrl._predictors = {"rf_gp_ensemble": ctrl.get_predictor("rf_gp_ensemble")}
+        ctrl.artifact_dir = None  # No disk artifacts available for peer
+        with patch.object(
+            ctrl,
+            "_load_or_fit_predictor",
+            side_effect=AssertionError("Must not train missing peer model during prediction"),
+        ):
+            payload_no_peer = ctrl.run_single_metal_analysis(
+                SimulationRequest(
+                    primary_metal="Cu",
+                    pH=4.0,
+                    temperature_C=25.0,
+                    calibration_mode="literature_only",
+                    mc_draws=60,
+                )
+            )
+        ad_no_peer = payload_no_peer.resolved_parameters.applicability
+        assert ad_no_peer is not None
+        self.assertIsNone(ad_no_peer.cross_model_disagreement_log10_icorr)
+        self.assertIsNone(ad_no_peer.cross_model_disagreement_ecorr_V)
+        self.assertFalse(ad_no_peer.disagreement_downgraded)
+
+        # 3. Threshold downgrades when peer is cached in memory
+        base_ad_high = ApplicabilityDomainResult(
+            metal="Cu",
+            confidence_tier="High",
+            in_bounding_box=True,
+            out_of_box_features=(),
+            unseen_categories=(),
+            knn_mean_distance=0.1,
+            knn_k=3,
+            n_metal_training_samples=20,
+            warnings=(),
+            experimental_recommendations=(),
+        )
+
+        def _make_stub_pred(
+            family: str,
+            ecorr: float,
+            log_i: float,
+            ad: ApplicabilityDomainResult = base_ad_high,
+        ) -> MLParameterPrediction:
+            return MLParameterPrediction(
+                metal="Cu",
+                Ecorr_V_SHE=ParameterEstimate(mean=ecorr, std=0.02),
+                log10_icorr_uA_cm2=ParameterEstimate(mean=log_i, std=0.1),
+                icorr_uA_cm2_median=10.0**log_i,
+                beta_a_mV_dec=ParameterEstimate(mean=60.0, std=5.0),
+                beta_c_mV_dec=ParameterEstimate(mean=120.0, std=5.0),
+                model_family=family,  # type: ignore[arg-type]
+                applicability=ad,
+            )
+
+        # Moderate |ΔE_corr| = 0.10 V (> 0.08 V) -> High downgrades to Medium
+        ctrl._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
+            model_family="rf_gp_ensemble",
+            predict=lambda q: _make_stub_pred("rf_gp_ensemble", 0.20, 0.50),
+        )
+        ctrl._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
+            model_family="hist_gradient_boosting",
+            predict=lambda q: _make_stub_pred("hist_gradient_boosting", 0.30, 0.55),
+        )
+        mod_payload = ctrl.run_single_metal_analysis(
+            SimulationRequest(primary_metal="Cu", calibration_mode="literature_only", mc_draws=60)
+        )
+        self.assertEqual(mod_payload.confidence_tier, "Medium")
+        assert mod_payload.resolved_parameters.applicability is not None
+        self.assertTrue(mod_payload.resolved_parameters.applicability.disagreement_downgraded)
+        self.assertAlmostEqual(
+            float(mod_payload.resolved_parameters.applicability.cross_model_disagreement_ecorr_V),
+            0.10,
+            places=6,
+        )
+        self.assertTrue(any("Cross-model disagreement" in w for w in mod_payload.warnings))
+
+        # Moderate |Δlog10(i_corr)| = 0.65 (> 0.5) on Medium tier -> Medium downgrades to Low
+        base_ad_med = replace(base_ad_high, confidence_tier="Medium")
+        ctrl._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
+            model_family="rf_gp_ensemble",
+            predict=lambda q: _make_stub_pred("rf_gp_ensemble", 0.20, 0.50, base_ad_med),
+        )
+        ctrl._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
+            model_family="hist_gradient_boosting",
+            predict=lambda q: _make_stub_pred("hist_gradient_boosting", 0.21, 1.15, base_ad_med),
+        )
+        med_to_low = ctrl.run_single_metal_analysis(
+            SimulationRequest(primary_metal="Cu", calibration_mode="literature_only", mc_draws=60)
+        )
+        self.assertEqual(med_to_low.confidence_tier, "Low")
+
+        # Severe |Δlog10(i_corr)| = 1.25 (> 1.0) on High tier -> forced directly to Low
+        ctrl._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
+            model_family="rf_gp_ensemble",
+            predict=lambda q: _make_stub_pred("rf_gp_ensemble", 0.20, 0.50, base_ad_high),
+        )
+        ctrl._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
+            model_family="hist_gradient_boosting",
+            predict=lambda q: _make_stub_pred("hist_gradient_boosting", 0.21, 1.75, base_ad_high),
+        )
+        severe_payload = ctrl.run_single_metal_analysis(
+            SimulationRequest(primary_metal="Cu", calibration_mode="literature_only", mc_draws=60)
+        )
+        self.assertEqual(severe_payload.confidence_tier, "Low")
+        assert severe_payload.resolved_parameters.applicability is not None
+        self.assertTrue(severe_payload.resolved_parameters.applicability.disagreement_downgraded)
+
+        # 4. random_forest override still compares cached HGB vs RF+RGP; unanchored delta_learning also downgrades
+        rf_override_payload = ctrl.run_single_metal_analysis(
+            SimulationRequest(
+                primary_metal="Cu",
+                calibration_mode="literature_only",
+                ml_model_family="random_forest",
+                mc_draws=60,
+            )
+        )
+        assert rf_override_payload.resolved_parameters.applicability is not None
+        self.assertTrue(rf_override_payload.resolved_parameters.applicability.disagreement_downgraded)
+
+        unanchored_ad = replace(
+            base_ad_high,
+            ad_mode="delta_learning",
+            lab_anchoring_status="Reverting to Literature Prior",
+            n_lab_samples=3,
+        )
+        unanchored_pred = _make_stub_pred("hist_gradient_boosting", 0.21, 1.75, unanchored_ad)
+        downgraded_delta = ctrl._evaluate_cross_model_disagreement(
+            SimulationRequest(primary_metal="Cu", calibration_mode="delta_learning"),
+            "Cu",
+            ctrl._build_ml_query(SimulationRequest(primary_metal="Cu"), "Cu"),
+            unanchored_pred,
+        )
+        self.assertEqual(downgraded_delta.applicability.confidence_tier, "Low")
+        self.assertTrue(downgraded_delta.applicability.disagreement_downgraded)
+
+        # 5. Exemptions: Lab-Anchored in delta_learning & lab_only_gp must NOT be downgraded
+        anchored_ad = replace(
+            base_ad_high,
+            ad_mode="delta_learning",
+            lab_anchoring_status="Lab-Anchored",
+            n_lab_samples=6,
+        )
+        anchored_pred = _make_stub_pred("hist_gradient_boosting", 0.21, 1.75, anchored_ad)
+        exempt_delta = ctrl._evaluate_cross_model_disagreement(
+            SimulationRequest(primary_metal="Cu", calibration_mode="delta_learning"),
+            "Cu",
+            ctrl._build_ml_query(SimulationRequest(primary_metal="Cu"), "Cu"),
+            anchored_pred,
+        )
+        self.assertEqual(exempt_delta.applicability.confidence_tier, "High")
+        self.assertFalse(exempt_delta.applicability.disagreement_downgraded)
+        self.assertIsNone(exempt_delta.applicability.cross_model_disagreement_log10_icorr)
+
+        lab_only_ad = replace(base_ad_high, ad_mode="lab_only_gp", lab_anchoring_status="Lab-Anchored")
+        exempt_lab_only = ctrl._evaluate_cross_model_disagreement(
+            SimulationRequest(primary_metal="Cu", calibration_mode="lab_only_gp"),
+            "Cu",
+            ctrl._build_ml_query(SimulationRequest(primary_metal="Cu"), "Cu"),
+            _make_stub_pred("lab_local_gp", 0.21, 1.75, lab_only_ad),
+        )
+        self.assertEqual(exempt_lab_only.applicability.confidence_tier, "High")
+        self.assertFalse(exempt_lab_only.applicability.disagreement_downgraded)
+
+    def test_streamlit_sidebar_auto_routes_models_and_hides_primary_model_dropdown(self) -> None:
+        from pathlib import Path
+        from streamlit.testing.v1 import AppTest
+
+        app_path = Path(__file__).resolve().parents[1] / "app.py"
+        at = AppTest.from_file(str(app_path), default_timeout=30)
+        at.run()
+        self.assertEqual(len(at.exception), 0, msg=f"Initial render failed: {at.exception}")
+
+        # Base Literature ML Model selectbox is removed from primary sidebar
+        sidebar_select_labels = [s.label for s in at.sidebar.selectbox]
+        self.assertNotIn("Base Literature ML Model", sidebar_select_labels)
+
+        # Read-only active model indicator and collapsed Advanced override expander exist
+        sidebar_captions = "\n".join(c.value for c in at.sidebar.caption)
+        self.assertIn("Active ML Architecture", sidebar_captions)
+        self.assertIn("RF + GP Hybrid Ensemble", sidebar_captions)
+        adv_expanders = [e for e in at.sidebar.expander if e.label == "Advanced: Override Base Model"]
+        self.assertEqual(len(adv_expanders), 1)
+
+        # Manual override inside Advanced expander updates active model
+        override_box = next(
+            s for s in at.sidebar.selectbox if s.label == "Base Literature Model Override"
+        )
+        override_box.select("random_forest").run()
+        self.assertEqual(len(at.exception), 0, msg=f"Override failed: {at.exception}")
+        main_captions = "\n".join(c.value for c in at.caption)
+        self.assertIn("Random Forest", main_captions)
+
+        # Switching to delta_learning auto-routes to Hist Gradient Boosting
+        next(r for r in at.sidebar.radio if r.label == "Lab Calibration Mode").set_value("delta_learning").run()
+        self.assertEqual(len(at.exception), 0, msg=f"delta_learning switch failed: {at.exception}")
+        sidebar_captions_delta = "\n".join(c.value for c in at.sidebar.caption)
+        self.assertIn("Hist Gradient Boosting", sidebar_captions_delta)
+
+        # Switching to lab_only_gp hides Advanced: Override Base Model expander
+        next(r for r in at.sidebar.radio if r.label == "Lab Calibration Mode").set_value("lab_only_gp").run()
+        self.assertEqual(len(at.exception), 0, msg=f"lab_only_gp switch failed: {at.exception}")
+        self.assertEqual(
+            [e for e in at.sidebar.expander if e.label == "Advanced: Override Base Model"],
+            [],
+        )
+        sidebar_captions_lab = "\n".join(c.value for c in at.sidebar.caption)
+        self.assertIn("Lab-Only Local GP", sidebar_captions_lab)
 
 
 if __name__ == "__main__":

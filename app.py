@@ -23,6 +23,7 @@ from corrosion_simulator.paths import (
     resolve_data_dirs,
 )
 from corrosion_simulator.platform_controller import (
+    CALIBRATION_MODE_DEFAULT_MODELS,
     NON_AQUEOUS_WARNING_PREFIX,
     CorrosionPlatformController,
     GalvanicViewPayload,
@@ -30,6 +31,8 @@ from corrosion_simulator.platform_controller import (
     SimulationRequest,
     SingleMetalViewPayload,
     build_non_aqueous_physics_warning,
+    format_active_model_label,
+    resolve_active_model_family,
 )
 from corrosion_simulator.reporting import (
     CleaningRecipeSpec,
@@ -39,9 +42,9 @@ from corrosion_simulator.reporting import (
 )
 
 SOURCE_LABELS = {
-    "ml": "ML Prediction (Hybrid Physics-ML)",
-    "database": "Database Lookup (Nearest Neighbor)",
-    "manual": "Manual Override",
+    "ml": "ML Prediction",
+    "database": "Database Lookup",
+    "manual": "Manual Input",
 }
 
 KINETICS_LABELS = {
@@ -522,9 +525,14 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         options=options["parameter_sources"],
         format_func=lambda key: SOURCE_LABELS[key],
         index=0,
+        help=(
+            "- **ML Prediction**: No experimental data yet; predict from chemistry & conditions.\n"
+            "- **Database Lookup**: Compare against the closest measured literature record.\n"
+            "- **Manual Input**: You already measured Tafel parameters and want pure physics simulation."
+        ),
     )
 
-    ml_model_family = "random_forest"
+    ml_model_family: str | None = None
     calibration_mode = "literature_only"
     selected_lab_project: str | None = None
     if parameter_source == "ml":
@@ -535,6 +543,11 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
             format_func=lambda key: CALIBRATION_MODE_LABELS.get(key, key),
             index=0,
             key="sidebar_calibration_mode",
+            help=(
+                "- **Literature Only**: General screening with no lab data.\n"
+                "- **Literature + Lab Calibration**: Adjust literature trends using your small lab set (n < 20) in similar chemistries.\n"
+                "- **Lab Data Only**: Brand-new or non-aqueous systems (n ≥ 3) where aqueous literature does not apply."
+            ),
         )
         lab_project_choices: list[str] = options.get("lab_projects", [])
         if lab_project_choices:
@@ -544,19 +557,39 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
                 index=0,
                 disabled=(calibration_mode == "literature_only"),
                 key="sidebar_lab_project",
+                help=(
+                    "- Select a lab CSV folder under `data/lab/<project>/` for calibration.\n"
+                    "- Disabled when using **Literature Only**."
+                ),
             )
         elif calibration_mode != "literature_only":
             st.sidebar.info(
                 "No lab projects found under `data/lab/<project>/`. Add lab CSVs and click **Reload External Data**."
             )
-        ml_model_family = st.sidebar.selectbox(
-            "ML Model Algorithm",
-            options=options["ml_model_families"],
-            format_func=lambda key: MODEL_FAMILY_LABELS.get(key, key),
-            index=0,
-            disabled=(calibration_mode == "lab_only_gp"),
-            help="Select the ML regressor used for Literature Only or Delta-Learning prior. Lab-Only Local GP fits a standalone local Gaussian Process.",
-        )
+
+        auto_model = CALIBRATION_MODE_DEFAULT_MODELS.get(calibration_mode, "rf_gp_ensemble")
+        if calibration_mode == "lab_only_gp":
+            st.sidebar.caption(
+                "Active ML Architecture: **Lab-Only Local GP** (auto-selected)"
+            )
+            ml_model_family = None
+        else:
+            auto_label = MODEL_FAMILY_LABELS.get(auto_model, auto_model)
+            st.sidebar.caption(f"Active ML Architecture: **{auto_label}** (auto-selected)")
+            with st.sidebar.expander("Advanced: Override Base Model", expanded=False):
+                override_options = ["auto", *options["ml_model_families"]]
+                selected_override = st.selectbox(
+                    "Base Literature Model Override",
+                    options=override_options,
+                    format_func=lambda key: (
+                        f"Auto ({auto_label})"
+                        if key == "auto"
+                        else MODEL_FAMILY_LABELS.get(key, key)
+                    ),
+                    index=0,
+                    key="sidebar_base_model_override",
+                )
+                ml_model_family = None if selected_override == "auto" else selected_override
 
     manual_primary: ManualElectrochemicalInput | None = None
     manual_secondary: ManualElectrochemicalInput | None = None
@@ -602,8 +635,8 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
     st.subheader(f"Single Metal Analysis — {payload.request.primary_metal}")
     _render_non_aqueous_warning_banner(payload.request)
     if payload.request.parameter_source == "ml":
-        model_label = MODEL_FAMILY_LABELS.get(
-            payload.request.ml_model_family, payload.request.ml_model_family
+        model_label = format_active_model_label(
+            resolve_active_model_family(payload.request, payload.resolved_parameters)
         )
         cal_label = CALIBRATION_MODE_LABELS.get(
             payload.request.calibration_mode, payload.request.calibration_mode
@@ -683,7 +716,8 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
         )
 
     st.plotly_chart(payload.polarization_figure, width="stretch")
-    st.plotly_chart(payload.kinetics_risk_figure, width="stretch")
+    st.plotly_chart(payload.depth_figure, width="stretch")
+    st.plotly_chart(payload.risk_figure, width="stretch")
 
 
 def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
@@ -696,8 +730,8 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
     )
     _render_non_aqueous_warning_banner(payload.request)
     if payload.request.parameter_source == "ml":
-        model_label = MODEL_FAMILY_LABELS.get(
-            payload.request.ml_model_family, payload.request.ml_model_family
+        model_label = format_active_model_label(
+            resolve_active_model_family(payload.request, payload.primary_resolved)
         )
         cal_label = CALIBRATION_MODE_LABELS.get(
             payload.request.calibration_mode, payload.request.calibration_mode
@@ -816,7 +850,8 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
         _render_residual_breakdown_section(galv_breakdowns)
 
     st.plotly_chart(payload.galvanic_polarization_figure, width="stretch")
-    st.plotly_chart(payload.comparative_kinetics_figure, width="stretch")
+    st.plotly_chart(payload.galvanic_depth_figure, width="stretch")
+    st.plotly_chart(payload.galvanic_risk_figure, width="stretch")
 
 
 def _render_galvanic_series_explorer(controller: CorrosionPlatformController) -> None:

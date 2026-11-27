@@ -38,11 +38,11 @@ from corrosion_simulator.paths import (
 
 ArtifactFreshnessStatus = Literal["fresh", "stale", "missing"]
 ProgressCallback = Callable[[int, int, str], None]
-MANIFEST_SCHEMA_VERSION: Final[int] = 2
+MANIFEST_SCHEMA_VERSION: Final[int] = 3
 DEFAULT_PREBUILT_MODELS: Final[tuple[ModelFamily, ...]] = (
     "random_forest",
-    "extra_trees",
     "hist_gradient_boosting",
+    "rf_gp_ensemble",
 )
 
 

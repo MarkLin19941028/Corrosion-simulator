@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
 import warnings
 
 import numpy as np
@@ -12,12 +12,10 @@ import pandas as pd
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
-from sklearn.preprocessing import StandardScaler
 
 from corrosion_simulator.database import (
     ExposureCondition,
     HarmonizedDatabase,
-    normalize_category_label as _clean_category,
 )
 from corrosion_simulator.ml_predictor import (
     ECORR_THERMO_MAX_V_SHE,
@@ -28,16 +26,16 @@ from corrosion_simulator.ml_predictor import (
     ApplicabilityDomainChecker,
     ApplicabilityDomainResult,
     ConfidenceTier,
-    ElectrochemicalFeatureExtractor,
     HybridMLPredictor,
     MLFeatureQuery,
     MLParameterPrediction,
-    ModelFamily,
     ParameterEstimate,
+    PredictedModelFamily,
+    ResidualConditionTransformer,
     _extract_sample_weights,
     _extract_target_vectors,
+    fit_zero_mean_residual_gp,
 )
-from corrosion_simulator.solvent_constants import compute_mixture_solvent_descriptors
 
 if TYPE_CHECKING:
     from corrosion_simulator.lab_data import LabProjectDataset
@@ -52,8 +50,8 @@ CALIBRATION_MODES: Final[tuple[CalibrationMode, ...]] = (
 )
 CALIBRATION_MODE_LABELS: Final[dict[CalibrationMode, str]] = {
     "literature_only": "Literature Only",
-    "delta_learning": "Delta-Learning (Prior + Lab Residual)",
-    "lab_only_gp": "Lab-Only Local GP",
+    "delta_learning": "Literature + Lab Calibration",
+    "lab_only_gp": "Lab Data Only",
 }
 RESIDUAL_METHOD_LABELS: Final[dict[ResidualMethod, str]] = {
     "gp_residual": "GP Residual",
@@ -69,13 +67,6 @@ _TARGET_DISPLAY_INFO: Final[dict[str, tuple[str, str]]] = {
 MIN_DELTA_GP_SAMPLES: Final[int] = 4
 MIN_LAB_ONLY_GP_SAMPLES: Final[int] = 3
 
-_DELTA_MIN_AMPLITUDE: Final[dict[str, float]] = {
-    "Ecorr_V_SHE": 0.02,
-    "log10_icorr_uA_cm2": 0.05,
-    "beta_a_mV_dec": 3.0,
-    "beta_c_mV_dec": 3.0,
-}
-
 _CONSTANT_BIAS_FLOOR_STD: Final[dict[str, float]] = {
     "Ecorr_V_SHE": 0.03,
     "log10_icorr_uA_cm2": 0.10,
@@ -89,25 +80,6 @@ _LAB_ONLY_FALLBACK_FLOOR_STD: Final[dict[str, float]] = {
     "beta_a_mV_dec": 30.0,
     "beta_c_mV_dec": 30.0,
 }
-
-_RESIDUAL_NUMERIC_FLOORS: Final[tuple[tuple[str, float], ...]] = (
-    ("pH", 1.0),
-    ("temperature_C", 10.0),
-    ("log1p_oxidizer_conc", 0.3),
-    ("log1p_acid_conc", 0.3),
-    ("log1p_inhibitor_conc", 0.3),
-    ("water_content_wt_pct", 15.0),
-    ("effective_dielectric_constant", 10.0),
-    ("solvent_polarity_index", 1.5),
-    ("is_protic_solvent", 0.5),
-)
-
-_RESIDUAL_CAT_COLS: Final[tuple[str, ...]] = (
-    "oxidizer_type",
-    "acid_type",
-    "inhibitor_type",
-    "organic_solvent_type",
-)
 
 
 class InsufficientLabSamplesError(ValueError):
@@ -230,144 +202,31 @@ def _lab_target_valid_mask(
     return finite_mask & ~df[imputed_col].fillna(False).astype(bool).to_numpy()
 
 
-def _clean_base_solvent_label(value: Any) -> str:
-    label = _clean_category(value)
-    return "DI water" if label == "None" else label
-
-
-class _ResidualConditionTransformer:
-    """Transforms Exposure Conditions into physically floored standardized vectors for residual GPs."""
-
-    def __init__(self) -> None:
-        self._means: np.ndarray = np.array([], dtype=float)
-        self._scales: np.ndarray = np.array([], dtype=float)
-        self._include_orp: bool = False
-        self._orp_median: float = 0.0
-        self._cat_vocab: dict[str, list[str]] = {}
-        self._is_fitted: bool = False
-
-    def _extract_numeric_matrix(self, df: pd.DataFrame) -> tuple[np.ndarray, dict[str, list[str]]]:
-        ph = pd.to_numeric(df.get("pH", 7.0), errors="coerce").fillna(7.0).to_numpy(dtype=float)
-        temp = pd.to_numeric(df.get("temperature_C", 25.0), errors="coerce").fillna(25.0).to_numpy(dtype=float)
-        ox_c = np.maximum(
-            pd.to_numeric(df.get("oxidizer_concentration", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float),
-            0.0,
-        )
-        acid_c = np.maximum(
-            pd.to_numeric(df.get("acid_concentration", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float),
-            0.0,
-        )
-        inh_c = np.maximum(
-            pd.to_numeric(df.get("inhibitor_concentration", 0.0), errors="coerce").fillna(0.0).to_numpy(dtype=float),
-            0.0,
-        )
-        water_pct = np.clip(
-            pd.to_numeric(df.get("water_content_wt_pct", 100.0), errors="coerce").fillna(100.0).to_numpy(dtype=float),
-            0.0,
-            100.0,
-        )
-
-        org_vals = [
-            _clean_category(v)
-            for v in (df["organic_solvent_type"].tolist() if "organic_solvent_type" in df.columns else ["None"] * len(df))
-        ]
-        base_vals = [
-            _clean_base_solvent_label(v)
-            for v in (df["base_solvent"].tolist() if "base_solvent" in df.columns else ["DI water"] * len(df))
-        ]
-        solvent_desc = [
-            compute_mixture_solvent_descriptors(w_val, org_val, base_val)
-            for w_val, org_val, base_val in zip(water_pct, org_vals, base_vals)
-        ]
-
-        cols: list[np.ndarray] = [
-            ph,
-            temp,
-            np.log10(1.0 + ox_c),
-            np.log10(1.0 + acid_c),
-            np.log10(1.0 + inh_c),
-            water_pct,
-            np.array([d[0] for d in solvent_desc], dtype=float),
-            np.array([d[1] for d in solvent_desc], dtype=float),
-            np.array([d[2] for d in solvent_desc], dtype=float),
-        ]
-        if self._include_orp:
-            orp_vals = (
-                pd.to_numeric(df["ORP_mV"], errors="coerce")
-                .fillna(self._orp_median)
-                .to_numpy(dtype=float)
-                if "ORP_mV" in df.columns
-                else np.full(len(df), self._orp_median, dtype=float)
-            )
-            cols.append(orp_vals)
-
-        cats: dict[str, list[str]] = {}
-        for col in _RESIDUAL_CAT_COLS:
-            if col in df.columns:
-                cats[col] = [_clean_category(v) for v in df[col].tolist()]
-            else:
-                cats[col] = ["None"] * len(df)
-        return np.column_stack(cols), cats
-
-    def fit(self, df: pd.DataFrame) -> _ResidualConditionTransformer:
-        if "ORP_mV" in df.columns:
-            orp_series = pd.to_numeric(df["ORP_mV"], errors="coerce").dropna()
-            if not orp_series.empty:
-                self._include_orp = True
-                self._orp_median = float(orp_series.median())
-            else:
-                self._include_orp = False
-        else:
-            self._include_orp = False
-
-        num_mat, cats = self._extract_numeric_matrix(df)
-        floors = [floor for _, floor in _RESIDUAL_NUMERIC_FLOORS]
-        if self._include_orp:
-            floors.append(100.0)
-        floor_arr = np.asarray(floors, dtype=float)
-
-        self._means = np.mean(num_mat, axis=0)
-        emp_std = np.std(num_mat, axis=0)
-        self._scales = np.maximum(emp_std, floor_arr)
-
-        self._cat_vocab = {
-            col: sorted(set(cats[col]))
-            for col in _RESIDUAL_CAT_COLS
-        }
-        self._is_fitted = True
-        return self
-
-    def transform(self, df: pd.DataFrame) -> np.ndarray:
-        if not self._is_fitted:
-            raise RuntimeError("_ResidualConditionTransformer must be fitted before transform().")
-        num_mat, cats = self._extract_numeric_matrix(df)
-        num_scaled = (num_mat - self._means) / self._scales
-
-        cat_cols: list[np.ndarray] = []
-        for col in _RESIDUAL_CAT_COLS:
-            vocab = self._cat_vocab[col]
-            vals = np.asarray(cats[col], dtype=object)
-            if len(vocab) > 1:
-                for token in vocab:
-                    cat_cols.append(((vals == token).astype(float)) * 1.5)
-            unseen_mask = np.array([v not in vocab for v in vals], dtype=float) * 8.0
-            cat_cols.append(unseen_mask)
-
-        return np.column_stack([num_scaled] + cat_cols)
-
-    def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
-        return self.fit(df).transform(df)
-
-    def transform_query(self, query: MLFeatureQuery) -> np.ndarray:
-        return self.transform(pd.DataFrame([query.to_record_dict()]))
+def _extract_gp_kernel_variances(kernel: Any) -> tuple[float, float]:
+    """Extract ``(prior_signal_var, noise_var)`` from a fitted ``Constant * Matern + WhiteKernel``."""
+    signal_var = 0.0
+    noise_var = 0.0
+    k1 = getattr(kernel, "k1", None)
+    k2 = getattr(kernel, "k2", None)
+    if k1 is not None:
+        c_kernel = getattr(k1, "k1", None)
+        if c_kernel is not None and hasattr(c_kernel, "constant_value"):
+            signal_var = max(float(c_kernel.constant_value), 0.0)
+        elif hasattr(k1, "constant_value"):
+            signal_var = max(float(k1.constant_value), 0.0)
+    if k2 is not None and hasattr(k2, "noise_level"):
+        noise_var = max(float(k2.noise_level), 0.0)
+    return signal_var, noise_var
 
 
 @dataclass(frozen=True)
 class _FittedResidualTarget:
     method: ResidualMethod
     n_lab: int
-    transformer: _ResidualConditionTransformer | None = None
+    transformer: ResidualConditionTransformer | None = None
     gp_model: GaussianProcessRegressor | None = None
+    prior_residual_var: float = 0.0
+    noise_var: float = 0.0
     bias_mean: float = 0.0
     bias_std: float = 0.0
 
@@ -376,8 +235,8 @@ class _FittedResidualTarget:
 class _FittedLabOnlyTarget:
     n_lab: int
     is_fallback: bool
+    transformer: ResidualConditionTransformer | None = None
     gp_model: GaussianProcessRegressor | None = None
-    scaler: StandardScaler | None = None
     fallback_mean: float = 0.0
     fallback_std: float = 0.0
     warning: str | None = None
@@ -409,14 +268,14 @@ class LabCalibratedPredictor:
         self.use_quality_weights = bool(use_quality_weights)
         self.allow_fallback = bool(allow_fallback)
 
-        self.model_family: ModelFamily = (
-            base_predictor.model_family if base_predictor is not None else "gaussian_process"
+        self.model_family: PredictedModelFamily = (
+            base_predictor.model_family if base_predictor is not None else "lab_local_gp"
         )
         self._residual_models: dict[tuple[str, str], _FittedResidualTarget] = {}
         self._delta_lab_ad: ApplicabilityDomainChecker | None = None
-        self._lab_only_extractor: ElectrochemicalFeatureExtractor | None = None
         self._lab_only_ad: ApplicabilityDomainChecker | None = None
         self._lab_only_targets: dict[str, _FittedLabOnlyTarget] = {}
+        self._lab_only_metal_targets: dict[tuple[str, str], _FittedLabOnlyTarget] = {}
         self._lab_only_empty_fallback: bool = False
         self._lab_only_n_rows: int = 0
         self._is_fitted: bool = False
@@ -479,7 +338,10 @@ class LabCalibratedPredictor:
         X_prior = self.base_predictor.feature_extractor.transform(df)
         prior_means: dict[str, np.ndarray] = {}
         for target_name in ML_TARGET_NAMES:
-            raw_mean, _ = self.base_predictor.models[target_name].predict_mean_std(X_prior)
+            raw_mean, _ = self.base_predictor.models[target_name].predict_mean_std(
+                X_prior,
+                condition_df=df,
+            )
             prior_means[target_name] = np.array(
                 [_clip_target_mean(target_name, float(v)) for v in raw_mean],
                 dtype=float,
@@ -543,51 +405,69 @@ class LabCalibratedPredictor:
                     continue
 
                 df_valid = df_metal.loc[valid_mask].reset_index(drop=True)
-                transformer = _ResidualConditionTransformer()
-                X_res = transformer.fit_transform(df_valid)
-
-                min_amp = _DELTA_MIN_AMPLITUDE[target_name]
-                v = max(
-                    float(np.average(residuals**2, weights=w_valid)),
-                    min_amp**2,
-                )
-                kernel = (
-                    ConstantKernel(
-                        constant_value=v,
-                        constant_value_bounds=(max(1e-6, 0.1 * v), max(1e2, 25.0 * v)),
-                    )
-                    * Matern(
-                        length_scale=1.0,
-                        length_scale_bounds=(0.2, 2.0),
-                        nu=2.5,
-                    )
-                    + WhiteKernel(
-                        noise_level=0.05 * v,
-                        noise_level_bounds=(max(1e-8, 1e-5 * v), max(1e-3, 0.5 * v)),
-                    )
-                )
-                alpha = 1e-6 * v * ((1.0 / w_valid) ** 2 - 1.0) + 1e-10
-                gpr = GaussianProcessRegressor(
-                    kernel=kernel,
-                    alpha=alpha,
-                    normalize_y=False,
-                    random_state=self.random_state + metal_idx * 41 + t_idx * 13,
+                transformer, gpr = fit_zero_mean_residual_gp(
+                    df_valid,
+                    residuals,
+                    w_valid,
+                    target_name=target_name,
+                    length_scale_bounds=(0.2, 2.0),
+                    alpha_scale=1e-6,
                     n_restarts_optimizer=2,
+                    random_state=self.random_state + metal_idx * 41 + t_idx * 13,
                 )
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore", ConvergenceWarning)
-                    gpr.fit(X_res, residuals)
 
+                prior_var, noise_var = _extract_gp_kernel_variances(gpr.kernel_)
                 self._residual_models[key] = _FittedResidualTarget(
                     method="gp_residual",
                     n_lab=n_valid,
                     transformer=transformer,
                     gp_model=gpr,
+                    prior_residual_var=prior_var,
+                    noise_var=noise_var,
                 )
+
+    def _fit_single_lab_only_gp(
+        self,
+        df_sub: pd.DataFrame,
+        y_sub: np.ndarray,
+        w_sub: np.ndarray,
+        *,
+        include_metal: bool,
+        seed: int,
+    ) -> tuple[ResidualConditionTransformer, GaussianProcessRegressor]:
+        transformer = ResidualConditionTransformer(include_metal=include_metal)
+        X_low = transformer.fit_transform(df_sub)
+        kernel = (
+            ConstantKernel(
+                constant_value=1.0,
+                constant_value_bounds=(1e-3, 1e2),
+            )
+            * Matern(
+                length_scale=1.0,
+                length_scale_bounds=(0.1, 20.0),
+                nu=2.5,
+            )
+            + WhiteKernel(
+                noise_level=0.05,
+                noise_level_bounds=(1e-6, 5.0),
+            )
+        )
+        alpha = 1e-5 * ((1.0 / w_sub) ** 2 - 1.0) + 1e-9
+        gpr = GaussianProcessRegressor(
+            kernel=kernel,
+            alpha=alpha,
+            normalize_y=True,
+            random_state=seed,
+            n_restarts_optimizer=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            gpr.fit(X_low, y_sub)
+        return transformer, gpr
 
     def _fit_lab_only_gp(self, lab_db: HarmonizedDatabase | None) -> None:
         self._lab_only_targets = {}
-        self._lab_only_extractor = None
+        self._lab_only_metal_targets = {}
         self._lab_only_ad = None
         self._lab_only_empty_fallback = False
 
@@ -607,10 +487,6 @@ class LabCalibratedPredictor:
 
         df = lab_db.ml_training_dataframe.reset_index(drop=True)
         self._lab_only_n_rows = len(df)
-        self._lab_only_extractor = ElectrochemicalFeatureExtractor(
-            material_properties=lab_db.material_properties
-        )
-        X_all = self._lab_only_extractor.fit_transform(df)
         self._lab_only_ad = ApplicabilityDomainChecker(
             k=min(3, max(1, len(df))),
             min_high_confidence_samples=5,
@@ -619,6 +495,7 @@ class LabCalibratedPredictor:
 
         targets = _extract_target_vectors(df)
         weights_all = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
+        metals_col = df["metal"].astype(str).str.strip()
 
         for t_idx, target_name in enumerate(ML_TARGET_NAMES):
             y_all = targets[target_name]
@@ -672,7 +549,7 @@ class LabCalibratedPredictor:
                 )
                 continue
 
-            X_target = X_all[valid_mask]
+            df_valid = df.loc[valid_mask].reset_index(drop=True)
             y_target = y_all[valid_mask]
             w_target = (
                 np.clip(weights_all[valid_mask], 0.05, 1.0)
@@ -680,49 +557,49 @@ class LabCalibratedPredictor:
                 else np.ones(n_valid, dtype=float)
             )
 
-            scaler = StandardScaler()
-            scaler.fit(X_target)
-            scaler.scale_ = np.where(
-                scaler.scale_ > 1e-9,
-                np.maximum(scaler.scale_, 1e-3),
-                1.0,
+            # Shared low-dimensional Exposure Condition GP (handles unseen or low-n Metals cleanly)
+            shared_transformer, shared_gpr = self._fit_single_lab_only_gp(
+                df_valid,
+                y_target,
+                w_target,
+                include_metal=True,
+                seed=self.random_state + t_idx * 17,
             )
-            X_scaled = scaler.transform(X_target)
-
-            y_var = max(float(np.var(y_target)), _DELTA_MIN_AMPLITUDE[target_name] ** 2)
-            kernel = (
-                ConstantKernel(
-                    constant_value=y_var,
-                    constant_value_bounds=(1e-4, max(1e3, 50.0 * y_var)),
-                )
-                * Matern(
-                    length_scale=1.0,
-                    length_scale_bounds=(0.1, 20.0),
-                    nu=2.5,
-                )
-                + WhiteKernel(
-                    noise_level=0.05 * y_var,
-                    noise_level_bounds=(1e-6, max(10.0, 2.0 * y_var)),
-                )
-            )
-            alpha = 1e-5 * y_var * ((1.0 / w_target) ** 2 - 1.0) + 1e-9
-            gpr = GaussianProcessRegressor(
-                kernel=kernel,
-                alpha=alpha,
-                normalize_y=True,
-                random_state=self.random_state + t_idx * 17,
-                n_restarts_optimizer=2,
-            )
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", ConvergenceWarning)
-                gpr.fit(X_scaled, y_target)
-
             self._lab_only_targets[target_name] = _FittedLabOnlyTarget(
                 n_lab=n_valid,
                 is_fallback=False,
-                gp_model=gpr,
-                scaler=scaler,
+                transformer=shared_transformer,
+                gp_model=shared_gpr,
             )
+
+            # Fit dedicated per-Metal low-dimensional GPs when multiple Metals have >= 3 valid records
+            valid_metals = sorted(set(metals_col[valid_mask]))
+            if len(valid_metals) > 1:
+                for m_idx, metal in enumerate(valid_metals):
+                    m_mask = valid_mask & (metals_col == metal).to_numpy()
+                    n_m = int(np.sum(m_mask))
+                    if n_m < MIN_LAB_ONLY_GP_SAMPLES:
+                        continue
+                    df_m = df.loc[m_mask].reset_index(drop=True)
+                    y_m = y_all[m_mask]
+                    w_m = (
+                        np.clip(weights_all[m_mask], 0.05, 1.0)
+                        if weights_all is not None
+                        else np.ones(n_m, dtype=float)
+                    )
+                    m_transformer, m_gpr = self._fit_single_lab_only_gp(
+                        df_m,
+                        y_m,
+                        w_m,
+                        include_metal=False,
+                        seed=self.random_state + t_idx * 17 + (m_idx + 1) * 53,
+                    )
+                    self._lab_only_metal_targets[(metal, target_name)] = _FittedLabOnlyTarget(
+                        n_lab=n_m,
+                        is_fallback=False,
+                        transformer=m_transformer,
+                        gp_model=m_gpr,
+                    )
 
     def predict(self, query: ExposureCondition | MLFeatureQuery) -> MLParameterPrediction:
         """Predict calibrated four-parameter electrochemical estimates and uncertainty."""
@@ -792,17 +669,31 @@ class LabCalibratedPredictor:
                     mean=float(fitted.bias_mean),
                     std=float(max(fitted.bias_std, 0.0)),
                 )
+                cal_std = math.hypot(max(float(prior_est.std), 0.0), delta_est.std)
             else:
                 assert fitted.transformer is not None and fitted.gp_model is not None
                 X_q = fitted.transformer.transform_query(q)
-                d_mean, d_std = fitted.gp_model.predict(X_q, return_std=True)
+                d_mean, d_std = cast(
+                    tuple[np.ndarray, np.ndarray],
+                    fitted.gp_model.predict(X_q, return_std=True),
+                )
+                d_std_val = max(float(d_std[0]), 0.0)
                 delta_est = ParameterEstimate(
                     mean=float(d_mean[0]),
-                    std=max(float(d_std[0]), 0.0),
+                    std=d_std_val,
                 )
+                epistemic_var = max(d_std_val**2 - fitted.noise_var, 0.0)
+                coverage = float(
+                    np.clip(
+                        1.0 - epistemic_var / max(fitted.prior_residual_var, 1e-12),
+                        0.0,
+                        1.0,
+                    )
+                )
+                prior_std_val = max(float(prior_est.std), 0.0)
+                cal_std = math.sqrt((1.0 - coverage) * (prior_std_val**2) + d_std_val**2)
 
             cal_mean = _clip_target_mean(target_name, prior_est.mean + delta_est.mean)
-            cal_std = math.hypot(max(float(prior_est.std), 0.0), delta_est.std)
             cal_est = ParameterEstimate(mean=cal_mean, std=float(cal_std))
             breakdowns[target_name] = TargetResidualBreakdown(
                 target=target_name,
@@ -944,15 +835,14 @@ class LabCalibratedPredictor:
                 icorr_uA_cm2_median=prior_pred.icorr_uA_cm2_median,
                 beta_a_mV_dec=prior_pred.beta_a_mV_dec,
                 beta_c_mV_dec=prior_pred.beta_c_mV_dec,
-                model_family="gaussian_process",
+                model_family="lab_local_gp",
                 applicability=ad_res,
                 calibration_mode="lab_only_gp",
                 lab_project=self.lab_project,
                 residual_breakdown=None,
             )
 
-        assert self._lab_only_extractor is not None and self._lab_only_ad is not None
-        X_q = self._lab_only_extractor.transform_query(q)
+        assert self._lab_only_ad is not None
         ad_res = self._lab_only_ad.evaluate(q)
 
         estimates: dict[str, ParameterEstimate] = {}
@@ -961,7 +851,7 @@ class LabCalibratedPredictor:
         has_fallback = False
 
         for target_name in ML_TARGET_NAMES:
-            fitted = self._lab_only_targets[target_name]
+            fitted = self._lab_only_metal_targets.get((metal, target_name)) or self._lab_only_targets[target_name]
             if fitted.is_fallback:
                 has_fallback = True
                 estimates[target_name] = ParameterEstimate(
@@ -975,9 +865,12 @@ class LabCalibratedPredictor:
                         f"in project {project_label!r} or use 'delta_learning'."
                     )
             else:
-                assert fitted.scaler is not None and fitted.gp_model is not None
-                X_scaled = fitted.scaler.transform(X_q)
-                mean_arr, std_arr = fitted.gp_model.predict(X_scaled, return_std=True)
+                assert fitted.transformer is not None and fitted.gp_model is not None
+                X_q = fitted.transformer.transform_query(q)
+                mean_arr, std_arr = cast(
+                    tuple[np.ndarray, np.ndarray],
+                    fitted.gp_model.predict(X_q, return_std=True),
+                )
                 estimates[target_name] = ParameterEstimate(
                     mean=_clip_target_mean(target_name, float(mean_arr[0])),
                     std=max(float(std_arr[0]), 0.0),
@@ -1026,7 +919,7 @@ class LabCalibratedPredictor:
             icorr_uA_cm2_median=float(10.0**log_i_mean),
             beta_a_mV_dec=estimates["beta_a_mV_dec"],
             beta_c_mV_dec=estimates["beta_c_mV_dec"],
-            model_family="gaussian_process",
+            model_family="lab_local_gp",
             applicability=ad_res,
             calibration_mode="lab_only_gp",
             lab_project=self.lab_project,

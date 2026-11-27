@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, replace, replace
 from pathlib import Path
 import time
 from typing import Any, Literal
@@ -59,13 +59,16 @@ from corrosion_simulator.lab_calibration import (
     ResidualBreakdown,
 )
 from corrosion_simulator.ml_predictor import (
+    MODEL_FAMILY_LABELS,
     SUPPORTED_MODEL_FAMILIES,
     ApplicabilityDomainResult,
+    ConfidenceTier,
     HybridMLPredictor,
     MLFeatureQuery,
     MLParameterPrediction,
     ModelFamily,
     MonteCarloPropagationResult,
+    PredictedModelFamily,
     propagate_uncertainty_monte_carlo,
 )
 from corrosion_simulator.paths import (
@@ -107,6 +110,59 @@ class ExternalDataReloadSummary:
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 _CONFIDENCE_BY_RANK = {0: "Low", 1: "Medium", 2: "High"}
 NON_AQUEOUS_WARNING_PREFIX = "Non-aqueous Exposure Condition"
+
+CALIBRATION_MODE_DEFAULT_MODELS: Final[dict[CalibrationMode, PredictedModelFamily]] = {
+    "literature_only": "rf_gp_ensemble",
+    "delta_learning": "hist_gradient_boosting",
+    "lab_only_gp": "lab_local_gp",
+}
+
+_AUTO_ROUTED_BASE_MODELS: Final[dict[CalibrationMode, ModelFamily]] = {
+    "literature_only": "rf_gp_ensemble",
+    "delta_learning": "hist_gradient_boosting",
+    "lab_only_gp": "hist_gradient_boosting",
+}
+
+DISAGREEMENT_SEVERE_LOG10_ICORR: Final[float] = 1.0
+DISAGREEMENT_MODERATE_LOG10_ICORR: Final[float] = 0.5
+DISAGREEMENT_MODERATE_ECORR_V: Final[float] = 0.08
+
+
+def resolve_model_family_for_mode(
+    calibration_mode: CalibrationMode,
+    override_model_family: ModelFamily | None = None,
+) -> PredictedModelFamily:
+    """Return the active model family for ``calibration_mode``, honoring valid base overrides."""
+    if calibration_mode not in CALIBRATION_MODES:
+        raise ValueError(
+            f"Unsupported calibration_mode '{calibration_mode}'. Supported: {CALIBRATION_MODES}"
+        )
+    if calibration_mode == "lab_only_gp":
+        return "lab_local_gp"
+    if override_model_family is not None:
+        if override_model_family not in SUPPORTED_MODEL_FAMILIES:
+            raise ValueError(
+                f"Unsupported ml_model_family '{override_model_family}'. Supported: {SUPPORTED_MODEL_FAMILIES}"
+            )
+        return override_model_family
+    return CALIBRATION_MODE_DEFAULT_MODELS[calibration_mode]
+
+
+def resolve_active_model_family(
+    request: SimulationRequest,
+    resolved: ResolvedMetalParameters | None,
+) -> PredictedModelFamily:
+    """Return the active ML model family from ``resolved`` or ``request`` mode routing."""
+    if resolved is not None and resolved.ml_prediction is not None:
+        return resolved.ml_prediction.model_family
+    return resolve_model_family_for_mode(request.calibration_mode, request.ml_model_family)
+
+
+def format_active_model_label(model_family: PredictedModelFamily | str) -> str:
+    """Return human-readable display label for a global or local ML model family."""
+    if model_family == "lab_local_gp":
+        return "Lab-Only Local GP (Low-Dim Matérn 2.5)"
+    return MODEL_FAMILY_LABELS.get(model_family, str(model_family))  # type: ignore[arg-type]
 
 
 def resolve_consistent_solvent_settings(
@@ -229,7 +285,7 @@ class SimulationRequest:
     d_max_nm: float = DEFAULT_PASSIVATION_LIMIT_NM
     power_law_n: float = DEFAULT_POWER_LAW_N
     parameter_source: ParameterSource = "ml"
-    ml_model_family: ModelFamily = "random_forest"
+    ml_model_family: ModelFamily | None = None
     calibration_mode: CalibrationMode = "literature_only"
     lab_project: str | None = None
     manual_primary: ManualElectrochemicalInput | None = None
@@ -254,13 +310,19 @@ class SimulationRequest:
             raise ValueError("d_crit_nm must be strictly positive.")
         if self.parameter_source not in ("database", "ml", "manual"):
             raise ValueError(f"Unsupported parameter_source '{self.parameter_source}'.")
-        if self.ml_model_family not in SUPPORTED_MODEL_FAMILIES:
-            raise ValueError(
-                f"Unsupported ml_model_family '{self.ml_model_family}'. Supported: {SUPPORTED_MODEL_FAMILIES}"
-            )
         if self.calibration_mode not in CALIBRATION_MODES:
             raise ValueError(
                 f"Unsupported calibration_mode '{self.calibration_mode}'. Supported: {CALIBRATION_MODES}"
+            )
+        if self.ml_model_family is None:
+            object.__setattr__(
+                self,
+                "ml_model_family",
+                _AUTO_ROUTED_BASE_MODELS[self.calibration_mode],
+            )
+        elif self.ml_model_family not in SUPPORTED_MODEL_FAMILIES:
+            raise ValueError(
+                f"Unsupported ml_model_family '{self.ml_model_family}'. Supported: {SUPPORTED_MODEL_FAMILIES}"
             )
         if self.lab_project is not None:
             cleaned_proj = str(self.lab_project).strip()
@@ -407,6 +469,8 @@ class SingleMetalViewPayload:
     experimental_recommendations: list[str]
     polarization_figure: go.Figure
     kinetics_risk_figure: go.Figure
+    depth_figure: go.Figure
+    risk_figure: go.Figure
 
     def to_summary_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable summary of the single-metal analysis."""
@@ -414,7 +478,9 @@ class SingleMetalViewPayload:
             "primary_metal": self.request.primary_metal,
             "parameter_source": self.request.parameter_source,
             "ml_model_family": (
-                self.request.ml_model_family if self.request.parameter_source == "ml" else None
+                resolve_active_model_family(self.request, self.resolved_parameters)
+                if self.request.parameter_source == "ml"
+                else None
             ),
             "calibration_mode": (
                 self.request.calibration_mode if self.request.parameter_source == "ml" else None
@@ -499,6 +565,8 @@ class GalvanicViewPayload:
     experimental_recommendations: list[str]
     galvanic_polarization_figure: go.Figure
     comparative_kinetics_figure: go.Figure
+    galvanic_depth_figure: go.Figure
+    galvanic_risk_figure: go.Figure
 
     def to_summary_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable summary of the galvanic coupling analysis."""
@@ -514,7 +582,9 @@ class GalvanicViewPayload:
             "water_content_wt_pct": float(self.request.water_content_wt_pct),
             "parameter_source": self.request.parameter_source,
             "ml_model_family": (
-                self.request.ml_model_family if self.request.parameter_source == "ml" else None
+                resolve_active_model_family(self.request, self.primary_resolved)
+                if self.request.parameter_source == "ml"
+                else None
             ),
             "calibration_mode": (
                 self.request.calibration_mode if self.request.parameter_source == "ml" else None
@@ -615,12 +685,17 @@ def build_single_metal_polarization_figure(
 
     if mc_result is not None and mc_result.polarization_band is not None:
         band = mc_result.polarization_band
+        e_band = curve.parameters.Ecorr_V_SHE + band.overpotential_V
+        p05 = np.maximum(band.eta_log10_abs_net_p05, cusp_floor)
+        p25 = np.maximum(band.eta_log10_abs_net_p25, cusp_floor)
+        p75 = np.maximum(band.eta_log10_abs_net_p75, cusp_floor)
+        p95 = np.maximum(band.eta_log10_abs_net_p95, cusp_floor)
         fig.add_trace(
             go.Scatter(
-                x=band.potential_V_SHE,
-                y=band.log10_abs_net_p95,
+                x=e_band,
+                y=p95,
                 mode="lines",
-                line={"width": 0},
+                line={"color": "rgba(31, 119, 180, 0.30)", "width": 0.8},
                 showlegend=False,
                 hoverinfo="skip",
                 name="p95",
@@ -628,14 +703,37 @@ def build_single_metal_polarization_figure(
         )
         fig.add_trace(
             go.Scatter(
-                x=band.potential_V_SHE,
-                y=band.log10_abs_net_p05,
+                x=e_band,
+                y=p05,
                 mode="lines",
-                line={"width": 0},
+                line={"color": "rgba(31, 119, 180, 0.30)", "width": 0.8},
                 fill="tonexty",
-                fillcolor="rgba(31, 119, 180, 0.22)",
-                name="90% Uncertainty Band (p05–p95)",
-                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i|: %{y:.2f}<extra></extra>",
+                fillcolor="rgba(31, 119, 180, 0.14)",
+                name="Net |i_net| 90% Band (p05–p95)",
+                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i| (p05): %{y:.2f}<extra></extra>",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=e_band,
+                y=p75,
+                mode="lines",
+                line={"color": "rgba(31, 119, 180, 0.45)", "width": 0.9},
+                showlegend=False,
+                hoverinfo="skip",
+                name="p75",
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=e_band,
+                y=p25,
+                mode="lines",
+                line={"color": "rgba(31, 119, 180, 0.45)", "width": 0.9},
+                fill="tonexty",
+                fillcolor="rgba(31, 119, 180, 0.28)",
+                name="Net |i_net| 50% Band (p25–p75)",
+                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i| (p25): %{y:.2f}<extra></extra>",
             )
         )
 
@@ -669,15 +767,36 @@ def build_single_metal_polarization_figure(
             hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i_net|: %{y:.2f}<extra></extra>",
         )
     )
-    fig.add_trace(
-        go.Scatter(
-            x=[curve.parameters.Ecorr_V_SHE],
-            y=[math.log10(curve.parameters.icorr_uA_cm2)],
-            mode="markers",
-            marker={"color": "#111111", "size": 9, "symbol": "diamond"},
-            name=f"(E_corr, i_corr) = ({curve.parameters.Ecorr_V_SHE:.3f} V, {curve.parameters.icorr_uA_cm2:.2g} µA/cm²)",
-        )
-    )
+    x_ecorr = float(curve.parameters.Ecorr_V_SHE)
+    y_icorr = float(math.log10(curve.parameters.icorr_uA_cm2))
+    marker_kwargs: dict[str, Any] = {
+        "x": [x_ecorr],
+        "y": [y_icorr],
+        "mode": "markers",
+        "marker": {"color": "#111111", "size": 9, "symbol": "diamond"},
+        "name": f"(E_corr, i_corr) = ({x_ecorr:.3f} V, {curve.parameters.icorr_uA_cm2:.2g} µA/cm²)",
+    }
+    if mc_result is not None and mc_result.polarization_band is not None:
+        band = mc_result.polarization_band
+        marker_kwargs["error_x"] = {
+            "type": "data",
+            "symmetric": False,
+            "array": [max(0.0, float(band.ecorr_p95_V_SHE) - x_ecorr)],
+            "arrayminus": [max(0.0, x_ecorr - float(band.ecorr_p05_V_SHE))],
+            "color": "#111111",
+            "thickness": 1.5,
+            "width": 4,
+        }
+        marker_kwargs["error_y"] = {
+            "type": "data",
+            "symmetric": False,
+            "array": [max(0.0, float(band.log10_icorr_p95) - y_icorr)],
+            "arrayminus": [max(0.0, y_icorr - float(band.log10_icorr_p05))],
+            "color": "#111111",
+            "thickness": 1.5,
+            "width": 4,
+        }
+    fig.add_trace(go.Scatter(**marker_kwargs))
 
     fig.update_layout(
         title=title or f"{metal} Polarization Curve (Tafel Plot)",
@@ -688,6 +807,156 @@ def build_single_metal_polarization_figure(
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
         margin={"l": 60, "r": 25, "t": 70, "b": 55},
         height=440,
+    )
+    return fig
+
+
+def _add_dual_band_traces(
+    fig: go.Figure,
+    times: np.ndarray,
+    p05: np.ndarray,
+    p25: np.ndarray,
+    p75: np.ndarray,
+    p95: np.ndarray,
+    *,
+    label_prefix: str,
+    fillcolor_90: str,
+    fillcolor_50: str,
+    row: int | None = None,
+    col: int | None = None,
+) -> None:
+    """Add layered 90% (p05-p95) and 50% (p25-p75) uncertainty band traces."""
+    loc_kwargs = {"row": row, "col": col} if row is not None and col is not None else {}
+    fig.add_trace(
+        go.Scatter(
+            x=np.concatenate([times, times[::-1]]),
+            y=np.concatenate([p95, p05[::-1]]),
+            fill="toself",
+            fillcolor=fillcolor_90,
+            line={"width": 0},
+            name=f"{label_prefix} 90% Band (p05–p95)",
+            hoverinfo="skip",
+        ),
+        **loc_kwargs,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=np.concatenate([times, times[::-1]]),
+            y=np.concatenate([p75, p25[::-1]]),
+            fill="toself",
+            fillcolor=fillcolor_50,
+            line={"width": 0},
+            name=f"{label_prefix} 50% Band (p25–p75)",
+            hoverinfo="skip",
+        ),
+        **loc_kwargs,
+    )
+
+
+def build_single_metal_depth_figure(
+    kinetics: TimeResolvedKineticsResult,
+    *,
+    mc_kinetics: MonteCarloKineticsResult | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Build standalone interactive Plotly Corrosion Depth figure with dual 50%/90% bands."""
+    fig = go.Figure()
+    times = kinetics.times_s
+    metal = kinetics.metal or "Metal"
+
+    if mc_kinetics is not None:
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_kinetics.depth_p05_nm,
+            mc_kinetics.depth_p25_nm,
+            mc_kinetics.depth_p75_nm,
+            mc_kinetics.depth_p95_nm,
+            label_prefix="Depth",
+            fillcolor_90="rgba(31, 119, 180, 0.14)",
+            fillcolor_50="rgba(31, 119, 180, 0.28)",
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=kinetics.depth_nm,
+            mode="lines",
+            line={"color": "#1f77b4", "dash": "solid", "width": 2.6},
+            name=f"{metal} Depth ({kinetics.model})",
+            hovertemplate="t: %{x:.1f} s<br>Depth: %{y:.3f} nm<extra></extra>",
+        )
+    )
+    fig.add_hline(
+        y=kinetics.d_crit_nm,
+        line_dash="dash",
+        line_color="#475569",
+        annotation_text=f"d_crit = {kinetics.d_crit_nm:.2f} nm",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=title or f"{metal} Corrosion Depth vs. Immersion Time ({kinetics.model})",
+        xaxis_title="Immersion Time (s)",
+        yaxis_title="Corrosion Depth (nm)",
+        yaxis={"rangemode": "tozero"},
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 60, "r": 25, "t": 75, "b": 55},
+        height=360,
+    )
+    return fig
+
+
+def build_single_metal_risk_figure(
+    kinetics: TimeResolvedKineticsResult,
+    *,
+    mc_kinetics: MonteCarloKineticsResult | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Build standalone interactive Plotly Thickness Loss Risk figure with dual 50%/90% bands."""
+    fig = go.Figure()
+    times = kinetics.times_s
+    metal = kinetics.metal or "Metal"
+
+    if mc_kinetics is not None:
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_kinetics.risk_p05,
+            mc_kinetics.risk_p25,
+            mc_kinetics.risk_p75,
+            mc_kinetics.risk_p95,
+            label_prefix="Risk",
+            fillcolor_90="rgba(217, 95, 2, 0.14)",
+            fillcolor_50="rgba(217, 95, 2, 0.28)",
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=kinetics.risk_score,
+            mode="lines",
+            line={"color": "#d95f02", "dash": "dashdot", "width": 2.6},
+            name="Thickness Loss Risk R(t)",
+            hovertemplate="t: %{x:.1f} s<br>Risk R(t): %{y:.3f}<extra></extra>",
+        )
+    )
+    fig.add_hline(
+        y=0.5,
+        line_dash="dot",
+        line_color="#94a3b8",
+        annotation_text="R(d_crit) = 0.50",
+        annotation_position="bottom right",
+    )
+    fig.update_layout(
+        title=title or f"{metal} Thickness Loss Risk vs. Immersion Time ({kinetics.model})",
+        xaxis_title="Immersion Time (s)",
+        yaxis_title="Thickness Loss Risk R(t)",
+        yaxis={"range": [0.0, 1.05]},
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 60, "r": 25, "t": 75, "b": 55},
+        height=360,
     )
     return fig
 
@@ -710,29 +979,29 @@ def build_single_metal_kinetics_figure(
     metal = kinetics.metal or "Metal"
 
     if mc_kinetics is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=np.concatenate([times, times[::-1]]),
-                y=np.concatenate([mc_kinetics.depth_p95_nm, mc_kinetics.depth_p05_nm[::-1]]),
-                fill="toself",
-                fillcolor="rgba(31, 119, 180, 0.20)",
-                line={"width": 0},
-                name="Depth 90% Band (p05–p95)",
-                hoverinfo="skip",
-            ),
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_kinetics.depth_p05_nm,
+            mc_kinetics.depth_p25_nm,
+            mc_kinetics.depth_p75_nm,
+            mc_kinetics.depth_p95_nm,
+            label_prefix="Depth",
+            fillcolor_90="rgba(31, 119, 180, 0.14)",
+            fillcolor_50="rgba(31, 119, 180, 0.28)",
             row=1,
             col=1,
         )
-        fig.add_trace(
-            go.Scatter(
-                x=np.concatenate([times, times[::-1]]),
-                y=np.concatenate([mc_kinetics.risk_p95, mc_kinetics.risk_p05[::-1]]),
-                fill="toself",
-                fillcolor="rgba(214, 39, 40, 0.18)",
-                line={"width": 0},
-                name="Risk 90% Band (p05–p95)",
-                hoverinfo="skip",
-            ),
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_kinetics.risk_p05,
+            mc_kinetics.risk_p25,
+            mc_kinetics.risk_p75,
+            mc_kinetics.risk_p95,
+            label_prefix="Risk",
+            fillcolor_90="rgba(217, 95, 2, 0.14)",
+            fillcolor_50="rgba(217, 95, 2, 0.28)",
             row=1,
             col=2,
         )
@@ -742,7 +1011,7 @@ def build_single_metal_kinetics_figure(
             x=times,
             y=kinetics.depth_nm,
             mode="lines",
-            line={"color": "#1f77b4", "width": 2.6},
+            line={"color": "#1f77b4", "dash": "solid", "width": 2.6},
             name=f"{metal} Depth ({kinetics.model})",
             hovertemplate="t: %{x:.1f} s<br>Depth: %{y:.3f} nm<extra></extra>",
         ),
@@ -752,7 +1021,7 @@ def build_single_metal_kinetics_figure(
     fig.add_hline(
         y=kinetics.d_crit_nm,
         line_dash="dash",
-        line_color="#d62728",
+        line_color="#475569",
         annotation_text=f"d_crit = {kinetics.d_crit_nm:.2f} nm",
         annotation_position="top left",
         row=1,
@@ -764,7 +1033,7 @@ def build_single_metal_kinetics_figure(
             x=times,
             y=kinetics.risk_score,
             mode="lines",
-            line={"color": "#d62728", "width": 2.6},
+            line={"color": "#d95f02", "dash": "dashdot", "width": 2.6},
             name="Thickness Loss Risk R(t)",
             hovertemplate="t: %{x:.1f} s<br>Risk R(t): %{y:.3f}<extra></extra>",
         ),
@@ -774,7 +1043,7 @@ def build_single_metal_kinetics_figure(
     fig.add_hline(
         y=0.5,
         line_dash="dot",
-        line_color="#ff7f0e",
+        line_color="#94a3b8",
         annotation_text="R(d_crit) = 0.50",
         annotation_position="bottom right",
         row=1,
@@ -895,6 +1164,138 @@ def build_galvanic_polarization_figure(
     return fig
 
 
+def build_galvanic_depth_comparison_figure(
+    uncoupled_kinetics: TimeResolvedKineticsResult,
+    coupled_kinetics: TimeResolvedKineticsResult,
+    *,
+    mc_coupled_kinetics: MonteCarloKineticsResult | None = None,
+    active_metal: str | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Build standalone comparative uncoupled vs. coupled Corrosion Depth figure."""
+    metal = active_metal or coupled_kinetics.metal or "Active Metal"
+    times = coupled_kinetics.times_s
+    fig = go.Figure()
+
+    if mc_coupled_kinetics is not None:
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_coupled_kinetics.depth_p05_nm,
+            mc_coupled_kinetics.depth_p25_nm,
+            mc_coupled_kinetics.depth_p75_nm,
+            mc_coupled_kinetics.depth_p95_nm,
+            label_prefix="Coupled Depth",
+            fillcolor_90="rgba(31, 119, 180, 0.14)",
+            fillcolor_50="rgba(31, 119, 180, 0.28)",
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=uncoupled_kinetics.depth_nm,
+            mode="lines",
+            line={"color": "#64748b", "dash": "dash", "width": 2.2},
+            name=f"{metal} Uncoupled Depth",
+            hovertemplate="t: %{x:.1f} s<br>Uncoupled Depth: %{y:.3f} nm<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=coupled_kinetics.depth_nm,
+            mode="lines",
+            line={"color": "#1f77b4", "dash": "solid", "width": 2.8},
+            name=f"{metal} Coupled Depth",
+            hovertemplate="t: %{x:.1f} s<br>Coupled Depth: %{y:.3f} nm<extra></extra>",
+        )
+    )
+    fig.add_hline(
+        y=coupled_kinetics.d_crit_nm,
+        line_dash="dash",
+        line_color="#475569",
+        annotation_text=f"d_crit = {coupled_kinetics.d_crit_nm:.2f} nm",
+        annotation_position="top left",
+    )
+    fig.update_layout(
+        title=title or f"{metal} Corrosion Depth: Uncoupled vs. Coupled ({coupled_kinetics.model})",
+        xaxis_title="Immersion Time (s)",
+        yaxis_title="Corrosion Depth (nm)",
+        yaxis={"rangemode": "tozero"},
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 60, "r": 25, "t": 75, "b": 55},
+        height=360,
+    )
+    return fig
+
+
+def build_galvanic_risk_comparison_figure(
+    uncoupled_kinetics: TimeResolvedKineticsResult,
+    coupled_kinetics: TimeResolvedKineticsResult,
+    *,
+    mc_coupled_kinetics: MonteCarloKineticsResult | None = None,
+    active_metal: str | None = None,
+    title: str | None = None,
+) -> go.Figure:
+    """Build standalone comparative uncoupled vs. coupled Thickness Loss Risk figure."""
+    metal = active_metal or coupled_kinetics.metal or "Active Metal"
+    times = coupled_kinetics.times_s
+    fig = go.Figure()
+
+    if mc_coupled_kinetics is not None:
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_coupled_kinetics.risk_p05,
+            mc_coupled_kinetics.risk_p25,
+            mc_coupled_kinetics.risk_p75,
+            mc_coupled_kinetics.risk_p95,
+            label_prefix="Coupled Risk",
+            fillcolor_90="rgba(217, 95, 2, 0.14)",
+            fillcolor_50="rgba(217, 95, 2, 0.28)",
+        )
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=uncoupled_kinetics.risk_score,
+            mode="lines",
+            line={"color": "#94a3b8", "dash": "dot", "width": 2.2},
+            name=f"{metal} Uncoupled Risk",
+            hovertemplate="t: %{x:.1f} s<br>Uncoupled Risk: %{y:.3f}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=coupled_kinetics.risk_score,
+            mode="lines",
+            line={"color": "#d95f02", "dash": "dashdot", "width": 2.8},
+            name=f"{metal} Coupled Risk",
+            hovertemplate="t: %{x:.1f} s<br>Coupled Risk: %{y:.3f}<extra></extra>",
+        )
+    )
+    fig.add_hline(
+        y=0.5,
+        line_dash="dot",
+        line_color="#94a3b8",
+        annotation_text="R(d_crit) = 0.50",
+        annotation_position="bottom right",
+    )
+    fig.update_layout(
+        title=title or f"{metal} Thickness Loss Risk: Uncoupled vs. Coupled ({coupled_kinetics.model})",
+        xaxis_title="Immersion Time (s)",
+        yaxis_title="Thickness Loss Risk R(t)",
+        yaxis={"range": [0.0, 1.05]},
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 60, "r": 25, "t": 75, "b": 55},
+        height=360,
+    )
+    return fig
+
+
 def build_galvanic_kinetics_comparison_figure(
     uncoupled_kinetics: TimeResolvedKineticsResult,
     coupled_kinetics: TimeResolvedKineticsResult,
@@ -918,29 +1319,29 @@ def build_galvanic_kinetics_comparison_figure(
     )
 
     if mc_coupled_kinetics is not None:
-        fig.add_trace(
-            go.Scatter(
-                x=np.concatenate([times, times[::-1]]),
-                y=np.concatenate([mc_coupled_kinetics.depth_p95_nm, mc_coupled_kinetics.depth_p05_nm[::-1]]),
-                fill="toself",
-                fillcolor="rgba(214, 39, 40, 0.16)",
-                line={"width": 0},
-                name="Coupled Depth 90% Band",
-                hoverinfo="skip",
-            ),
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_coupled_kinetics.depth_p05_nm,
+            mc_coupled_kinetics.depth_p25_nm,
+            mc_coupled_kinetics.depth_p75_nm,
+            mc_coupled_kinetics.depth_p95_nm,
+            label_prefix="Coupled Depth",
+            fillcolor_90="rgba(31, 119, 180, 0.14)",
+            fillcolor_50="rgba(31, 119, 180, 0.28)",
             row=1,
             col=1,
         )
-        fig.add_trace(
-            go.Scatter(
-                x=np.concatenate([times, times[::-1]]),
-                y=np.concatenate([mc_coupled_kinetics.risk_p95, mc_coupled_kinetics.risk_p05[::-1]]),
-                fill="toself",
-                fillcolor="rgba(214, 39, 40, 0.16)",
-                line={"width": 0},
-                name="Coupled Risk 90% Band",
-                hoverinfo="skip",
-            ),
+        _add_dual_band_traces(
+            fig,
+            times,
+            mc_coupled_kinetics.risk_p05,
+            mc_coupled_kinetics.risk_p25,
+            mc_coupled_kinetics.risk_p75,
+            mc_coupled_kinetics.risk_p95,
+            label_prefix="Coupled Risk",
+            fillcolor_90="rgba(217, 95, 2, 0.14)",
+            fillcolor_50="rgba(217, 95, 2, 0.28)",
             row=1,
             col=2,
         )
@@ -950,7 +1351,7 @@ def build_galvanic_kinetics_comparison_figure(
             x=times,
             y=uncoupled_kinetics.depth_nm,
             mode="lines",
-            line={"color": "#1f77b4", "dash": "dash", "width": 2.2},
+            line={"color": "#64748b", "dash": "dash", "width": 2.2},
             name=f"{metal} Uncoupled Depth",
             hovertemplate="t: %{x:.1f} s<br>Uncoupled Depth: %{y:.3f} nm<extra></extra>",
         ),
@@ -962,7 +1363,7 @@ def build_galvanic_kinetics_comparison_figure(
             x=times,
             y=coupled_kinetics.depth_nm,
             mode="lines",
-            line={"color": "#d62728", "width": 2.8},
+            line={"color": "#1f77b4", "dash": "solid", "width": 2.8},
             name=f"{metal} Coupled Depth",
             hovertemplate="t: %{x:.1f} s<br>Coupled Depth: %{y:.3f} nm<extra></extra>",
         ),
@@ -971,8 +1372,8 @@ def build_galvanic_kinetics_comparison_figure(
     )
     fig.add_hline(
         y=coupled_kinetics.d_crit_nm,
-        line_dash="dot",
-        line_color="#555555",
+        line_dash="dash",
+        line_color="#475569",
         annotation_text=f"d_crit = {coupled_kinetics.d_crit_nm:.2f} nm",
         annotation_position="top left",
         row=1,
@@ -984,7 +1385,7 @@ def build_galvanic_kinetics_comparison_figure(
             x=times,
             y=uncoupled_kinetics.risk_score,
             mode="lines",
-            line={"color": "#1f77b4", "dash": "dash", "width": 2.2},
+            line={"color": "#94a3b8", "dash": "dot", "width": 2.2},
             name=f"{metal} Uncoupled Risk",
             hovertemplate="t: %{x:.1f} s<br>Uncoupled Risk: %{y:.3f}<extra></extra>",
         ),
@@ -996,7 +1397,7 @@ def build_galvanic_kinetics_comparison_figure(
             x=times,
             y=coupled_kinetics.risk_score,
             mode="lines",
-            line={"color": "#d62728", "width": 2.8},
+            line={"color": "#d95f02", "dash": "dashdot", "width": 2.8},
             name=f"{metal} Coupled Risk",
             hovertemplate="t: %{x:.1f} s<br>Coupled Risk: %{y:.3f}<extra></extra>",
         ),
@@ -1006,7 +1407,7 @@ def build_galvanic_kinetics_comparison_figure(
     fig.add_hline(
         y=0.5,
         line_dash="dot",
-        line_color="#ff7f0e",
+        line_color="#94a3b8",
         annotation_text="R(d_crit) = 0.50",
         annotation_position="bottom right",
         row=1,
@@ -1074,7 +1475,7 @@ class CorrosionPlatformController:
         self._lab_calibration_cache: dict[str, Any] = {}
 
         if predictor is None:
-            self.predictor = self._load_or_fit_predictor("random_forest")
+            self.predictor = self._load_or_fit_predictor("rf_gp_ensemble")
         else:
             self.predictor = predictor
         self._predictors: dict[ModelFamily, HybridMLPredictor] = {
@@ -1138,6 +1539,25 @@ class CorrosionPlatformController:
         self._predictors[target_family] = predictor
         return predictor
 
+    def _get_cached_or_prebuilt_predictor(self, model_family: ModelFamily) -> HybridMLPredictor | None:
+        """Return an in-memory or prebuilt on-disk predictor without ever triggering on-the-fly training."""
+        cached = self._predictors.get(model_family)
+        if cached is not None:
+            return cached
+        if self.artifact_dir is None:
+            return None
+        prebuilt_path = self.artifact_dir / "models" / f"{model_family}.joblib"
+        if not prebuilt_path.exists():
+            return None
+        try:
+            loaded = HybridMLPredictor.load(prebuilt_path)
+            if loaded.model_family != model_family:
+                return None
+            self._predictors[model_family] = loaded
+            return loaded
+        except Exception:
+            return None
+
     @classmethod
     def from_default_data(
         cls,
@@ -1146,7 +1566,7 @@ class CorrosionPlatformController:
         processed_dir: str | Path | None = None,
         lab_dir: str | Path | None = None,
         data_dir: str | Path | None = None,
-        model_family: ModelFamily = "random_forest",
+        model_family: ModelFamily = "rf_gp_ensemble",
         auto_rebuild: bool = True,
         rebuild_models: Sequence[str] = ("all",),
         progress_callback: Callable[[int, int, str], None] | None = None,
@@ -1638,6 +2058,80 @@ class CorrosionPlatformController:
                 best_sid = sid
         return best_sid
 
+    def _evaluate_cross_model_disagreement(
+        self,
+        request: SimulationRequest,
+        metal: str,
+        query: MLFeatureQuery,
+        pred: MLParameterPrediction,
+    ) -> MLParameterPrediction:
+        """Check HGB vs RF+RGP agreement on unanchored literature queries without training missing peers."""
+        if request.calibration_mode == "lab_only_gp":
+            return pred
+        if (
+            request.calibration_mode == "delta_learning"
+            and pred.applicability.lab_anchoring_status == "Lab-Anchored"
+        ):
+            return pred
+
+        active_base = request.ml_model_family or _AUTO_ROUTED_BASE_MODELS[request.calibration_mode]
+        peer_preds: dict[ModelFamily, MLParameterPrediction | None] = {}
+        for family in ("rf_gp_ensemble", "hist_gradient_boosting"):
+            if family == active_base and request.calibration_mode == "literature_only":
+                peer_preds[family] = pred
+            elif family == active_base:
+                peer_preds[family] = self.get_predictor(family).predict(query)
+            else:
+                peer_model = self._get_cached_or_prebuilt_predictor(family)
+                peer_preds[family] = peer_model.predict(query) if peer_model is not None else None
+
+        rgp_pred = peer_preds["rf_gp_ensemble"]
+        hgb_pred = peer_preds["hist_gradient_boosting"]
+        if hgb_pred is None or rgp_pred is None:
+            return pred
+
+        delta_log_i = abs(
+            float(hgb_pred.log10_icorr_uA_cm2.mean) - float(rgp_pred.log10_icorr_uA_cm2.mean)
+        )
+        delta_e = abs(float(hgb_pred.Ecorr_V_SHE.mean) - float(rgp_pred.Ecorr_V_SHE.mean))
+
+        ad = pred.applicability
+        new_tier: ConfidenceTier = ad.confidence_tier
+        downgraded = False
+        if delta_log_i > DISAGREEMENT_SEVERE_LOG10_ICORR:
+            new_tier = "Low"
+            downgraded = True
+        elif (
+            delta_log_i > DISAGREEMENT_MODERATE_LOG10_ICORR
+            or delta_e > DISAGREEMENT_MODERATE_ECORR_V
+        ):
+            new_tier = _CONFIDENCE_BY_RANK[max(0, _CONFIDENCE_RANK[ad.confidence_tier] - 1)]  # type: ignore[assignment]
+            downgraded = True
+
+        warnings_list = list(ad.warnings)
+        recs_list = list(ad.experimental_recommendations)
+        if downgraded:
+            warnings_list.append(
+                f"Cross-model disagreement between hist_gradient_boosting and rf_gp_ensemble for {metal} "
+                f"(|Δlog10(i_corr)| = {delta_log_i:.2f} dec, |ΔE_corr| = {delta_e:.3f} V); "
+                f"Confidence Tier set to {new_tier}."
+            )
+            recs_list.append(
+                f"Run confirmatory Tafel polarization experiments for {metal} at pH {query.pH:.1f}, "
+                f"{query.temperature_C:.1f} °C to resolve heterogeneous model divergence."
+            )
+
+        updated_ad = replace(
+            ad,
+            confidence_tier=new_tier,
+            warnings=tuple(dict.fromkeys(warnings_list)),
+            experimental_recommendations=tuple(dict.fromkeys(recs_list)),
+            cross_model_disagreement_log10_icorr=delta_log_i,
+            cross_model_disagreement_ecorr_V=delta_e,
+            disagreement_downgraded=downgraded,
+        )
+        return replace(pred, applicability=updated_ad)
+
     def _resolve_metal_parameters(
         self,
         request: SimulationRequest,
@@ -1691,6 +2185,7 @@ class CorrosionPlatformController:
             model_family=request.ml_model_family,
         )
         pred = predictor.predict(query)
+        pred = self._evaluate_cross_model_disagreement(request, metal, query, pred)
         params = pred.to_polarization_parameters()
         # Approximate linear-space 1-sigma for i_corr from log10-normal distribution:
         # sd(10^X) ≈ median * ln(10) * sigma_log10
@@ -1789,6 +2284,8 @@ class CorrosionPlatformController:
                 experimental_recommendations=_dedupe_preserve_order(recs_list),
                 polarization_figure=pol_fig,
                 kinetics_risk_figure=placeholder_fig,
+                depth_figure=placeholder_fig,
+                risk_figure=placeholder_fig,
             )
 
         faraday = calculate_faraday_corrosion_rate(
@@ -1857,6 +2354,16 @@ class CorrosionPlatformController:
             mc_kinetics=mc_kinetics,
             title=f"{request.primary_metal} Time-Resolved Kinetics & Thickness Loss Risk ({kinetics.model})",
         )
+        depth_fig = build_single_metal_depth_figure(
+            kinetics,
+            mc_kinetics=mc_kinetics,
+            title=f"{request.primary_metal} Corrosion Depth vs. Immersion Time ({kinetics.model})",
+        )
+        risk_fig = build_single_metal_risk_figure(
+            kinetics,
+            mc_kinetics=mc_kinetics,
+            title=f"{request.primary_metal} Thickness Loss Risk vs. Immersion Time ({kinetics.model})",
+        )
 
         return SingleMetalViewPayload(
             request=request,
@@ -1878,6 +2385,8 @@ class CorrosionPlatformController:
             experimental_recommendations=_dedupe_preserve_order(recs_list),
             polarization_figure=pol_fig,
             kinetics_risk_figure=kin_fig,
+            depth_figure=depth_fig,
+            risk_figure=risk_fig,
         )
 
     def run_galvanic_analysis(self, request: SimulationRequest) -> GalvanicViewPayload:
@@ -2077,6 +2586,8 @@ class CorrosionPlatformController:
                 experimental_recommendations=combined_recs,
                 galvanic_polarization_figure=galv_pol_fig,
                 comparative_kinetics_figure=placeholder_fig,
+                galvanic_depth_figure=placeholder_fig,
+                galvanic_risk_figure=placeholder_fig,
             )
 
         mc_galvanic: MonteCarloGalvanicResult | None = None
@@ -2171,6 +2682,18 @@ class CorrosionPlatformController:
             mc_coupled_kinetics=mc_coupled_kinetics,
             active_metal=coupling.active_metal,
         )
+        galv_depth_fig = build_galvanic_depth_comparison_figure(
+            uncoupled_kinetics,
+            coupled_kinetics,
+            mc_coupled_kinetics=mc_coupled_kinetics,
+            active_metal=coupling.active_metal,
+        )
+        galv_risk_fig = build_galvanic_risk_comparison_figure(
+            uncoupled_kinetics,
+            coupled_kinetics,
+            mc_coupled_kinetics=mc_coupled_kinetics,
+            active_metal=coupling.active_metal,
+        )
 
         return GalvanicViewPayload(
             request=request,
@@ -2203,4 +2726,6 @@ class CorrosionPlatformController:
             experimental_recommendations=combined_recs,
             galvanic_polarization_figure=galv_pol_fig,
             comparative_kinetics_figure=comp_kin_fig,
+            galvanic_depth_figure=galv_depth_fig,
+            galvanic_risk_figure=galv_risk_fig,
         )

@@ -12,8 +12,6 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import (
-    ExtraTreesRegressor,
-    GradientBoostingRegressor,
     HistGradientBoostingRegressor,
     RandomForestRegressor,
 )
@@ -22,7 +20,6 @@ from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import ConstantKernel, Matern, WhiteKernel
 from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
 from sklearn.model_selection import GroupKFold, KFold, LeaveOneOut, StratifiedKFold
-from sklearn.preprocessing import StandardScaler
 
 from corrosion_simulator.database import (
     ExposureCondition,
@@ -47,30 +44,27 @@ if TYPE_CHECKING:
 ConfidenceTier = Literal["High", "Medium", "Low"]
 ModelFamily = Literal[
     "random_forest",
-    "extra_trees",
-    "gaussian_process",
-    "rf_gp_ensemble",
     "hist_gradient_boosting",
-    "gradient_boosting",
+    "rf_gp_ensemble",
+]
+PredictedModelFamily = Literal[
+    "random_forest",
+    "hist_gradient_boosting",
+    "rf_gp_ensemble",
+    "lab_local_gp",
 ]
 CVStrategy = Literal["stratified_5fold", "group_5fold", "loocv"]
 
 SUPPORTED_MODEL_FAMILIES: Final[tuple[ModelFamily, ...]] = (
     "random_forest",
-    "extra_trees",
-    "gaussian_process",
-    "rf_gp_ensemble",
     "hist_gradient_boosting",
-    "gradient_boosting",
+    "rf_gp_ensemble",
 )
 
 MODEL_FAMILY_LABELS: Final[dict[ModelFamily, str]] = {
     "random_forest": "Random Forest (Default — Balanced & Fast)",
-    "extra_trees": "Extra Trees (Lowest MAE, Fastest)",
-    "gaussian_process": "Gaussian Process (Bayesian Uncertainty, High R²)",
-    "rf_gp_ensemble": "RF + GP Hybrid Ensemble (Tree + Smooth Kernel)",
     "hist_gradient_boosting": "Hist Gradient Boosting (L2 Regularized GBDT)",
-    "gradient_boosting": "Gradient Boosting (Bootstrap Ensemble)",
+    "rf_gp_ensemble": "RF + GP Hybrid Ensemble (Tree + Smooth Kernel)",
 }
 
 ML_TARGET_NAMES: Final[tuple[str, ...]] = (
@@ -84,8 +78,35 @@ TAFEL_SLOPE_MIN_MV_DEC: Final[float] = 20.0
 TAFEL_SLOPE_MAX_MV_DEC: Final[float] = 500.0
 ECORR_THERMO_MIN_V_SHE: Final[float] = -2.5
 ECORR_THERMO_MAX_V_SHE: Final[float] = 2.5
-GP_MAX_TRAINING_SAMPLES: Final[int] = 2500
+GP_MAX_TRAINING_SAMPLES: Final[int] = 2000
+MIN_RESIDUAL_GP_SAMPLES: Final[int] = 4
 DEFAULT_LOW_SAMPLE_THRESHOLD: Final[int] = 10
+
+RESIDUAL_MIN_AMPLITUDE: Final[dict[str, float]] = {
+    "Ecorr_V_SHE": 0.02,
+    "log10_icorr_uA_cm2": 0.05,
+    "beta_a_mV_dec": 3.0,
+    "beta_c_mV_dec": 3.0,
+}
+
+_RESIDUAL_NUMERIC_FLOORS: Final[tuple[tuple[str, float], ...]] = (
+    ("pH", 1.0),
+    ("temperature_C", 10.0),
+    ("log1p_oxidizer_conc", 0.3),
+    ("log1p_acid_conc", 0.3),
+    ("log1p_inhibitor_conc", 0.3),
+    ("water_content_wt_pct", 15.0),
+    ("effective_dielectric_constant", 10.0),
+    ("solvent_polarity_index", 1.5),
+    ("is_protic_solvent", 0.5),
+)
+
+_RESIDUAL_CAT_COLS: Final[tuple[str, ...]] = (
+    "oxidizer_type",
+    "acid_type",
+    "inhibitor_type",
+    "organic_solvent_type",
+)
 
 _MATERIAL_DESCRIPTOR_COLS: Final[tuple[str, ...]] = (
     "standard_potential_V_SHE",
@@ -430,6 +451,182 @@ class ElectrochemicalFeatureExtractor:
         return self.transform(pd.DataFrame([q.to_record_dict()]))
 
 
+def _numeric_column_with_default(df: pd.DataFrame, col: str, default: float) -> np.ndarray:
+    """Return numeric column array filled with ``default`` when missing or non-numeric."""
+    if col in df.columns:
+        return pd.to_numeric(df[col], errors="coerce").fillna(default).to_numpy(dtype=float)
+    return np.full(len(df), default, dtype=float)
+
+
+class ResidualConditionTransformer:
+    """Transforms Exposure Conditions into physically floored low-dimensional vectors for GPs."""
+
+    def __init__(self, *, include_metal: bool = False) -> None:
+        self.include_metal = bool(include_metal)
+        self._means: np.ndarray = np.array([], dtype=float)
+        self._scales: np.ndarray = np.array([], dtype=float)
+        self._include_orp: bool = False
+        self._orp_median: float = 0.0
+        self._cat_cols: tuple[str, ...] = (
+            ("metal", *_RESIDUAL_CAT_COLS) if self.include_metal else _RESIDUAL_CAT_COLS
+        )
+        self._cat_vocab: dict[str, list[str]] = {}
+        self._is_fitted: bool = False
+
+    def _extract_numeric_matrix(self, df: pd.DataFrame) -> tuple[np.ndarray, dict[str, list[str]]]:
+        ph = _numeric_column_with_default(df, "pH", 7.0)
+        temp = _numeric_column_with_default(df, "temperature_C", 25.0)
+        ox_c = np.maximum(_numeric_column_with_default(df, "oxidizer_concentration", 0.0), 0.0)
+        acid_c = np.maximum(_numeric_column_with_default(df, "acid_concentration", 0.0), 0.0)
+        inh_c = np.maximum(_numeric_column_with_default(df, "inhibitor_concentration", 0.0), 0.0)
+        water_pct = np.clip(_numeric_column_with_default(df, "water_content_wt_pct", 100.0), 0.0, 100.0)
+
+        org_vals = [
+            _clean_category(v)
+            for v in (
+                df["organic_solvent_type"].tolist()
+                if "organic_solvent_type" in df.columns
+                else ["None"] * len(df)
+            )
+        ]
+        base_vals = [
+            _clean_base_solvent(v)
+            for v in (
+                df["base_solvent"].tolist()
+                if "base_solvent" in df.columns
+                else ["DI water"] * len(df)
+            )
+        ]
+        solvent_desc = [
+            compute_mixture_solvent_descriptors(w_val, org_val, base_val)
+            for w_val, org_val, base_val in zip(water_pct, org_vals, base_vals)
+        ]
+
+        cols: list[np.ndarray] = [
+            ph,
+            temp,
+            np.log10(1.0 + ox_c),
+            np.log10(1.0 + acid_c),
+            np.log10(1.0 + inh_c),
+            water_pct,
+            np.array([d[0] for d in solvent_desc], dtype=float),
+            np.array([d[1] for d in solvent_desc], dtype=float),
+            np.array([d[2] for d in solvent_desc], dtype=float),
+        ]
+        if self._include_orp:
+            cols.append(_numeric_column_with_default(df, "ORP_mV", self._orp_median))
+
+        cats: dict[str, list[str]] = {}
+        for col in self._cat_cols:
+            if col == "metal":
+                cats[col] = (
+                    [str(v).strip() for v in df["metal"].tolist()]
+                    if "metal" in df.columns
+                    else ["Unknown"] * len(df)
+                )
+            elif col in df.columns:
+                cats[col] = [_clean_category(v) for v in df[col].tolist()]
+            else:
+                cats[col] = ["None"] * len(df)
+        return np.column_stack(cols), cats
+
+    def fit(self, df: pd.DataFrame) -> ResidualConditionTransformer:
+        if "ORP_mV" in df.columns:
+            orp_series = pd.to_numeric(df["ORP_mV"], errors="coerce").dropna()
+            if not orp_series.empty:
+                self._include_orp = True
+                self._orp_median = float(orp_series.median())
+            else:
+                self._include_orp = False
+        else:
+            self._include_orp = False
+
+        num_mat, cats = self._extract_numeric_matrix(df)
+        floors = [floor for _, floor in _RESIDUAL_NUMERIC_FLOORS]
+        if self._include_orp:
+            floors.append(100.0)
+        floor_arr = np.asarray(floors, dtype=float)
+
+        self._means = np.mean(num_mat, axis=0)
+        emp_std = np.std(num_mat, axis=0)
+        self._scales = np.maximum(emp_std, floor_arr)
+
+        self._cat_vocab = {col: sorted(set(cats[col])) for col in self._cat_cols}
+        self._is_fitted = True
+        return self
+
+    def transform(self, df: pd.DataFrame) -> np.ndarray:
+        if not self._is_fitted:
+            raise RuntimeError("ResidualConditionTransformer must be fitted before transform().")
+        num_mat, cats = self._extract_numeric_matrix(df)
+        num_scaled = (num_mat - self._means) / self._scales
+
+        cat_cols: list[np.ndarray] = []
+        for col in self._cat_cols:
+            vocab = self._cat_vocab[col]
+            vals = np.asarray(cats[col], dtype=object)
+            if len(vocab) > 1:
+                for token in vocab:
+                    cat_cols.append(((vals == token).astype(float)) * 1.5)
+            unseen_mask = np.array([v not in vocab for v in vals], dtype=float) * 8.0
+            cat_cols.append(unseen_mask)
+
+        return np.column_stack([num_scaled] + cat_cols)
+
+    def fit_transform(self, df: pd.DataFrame) -> np.ndarray:
+        return self.fit(df).transform(df)
+
+    def transform_query(self, query: ExposureCondition | MLFeatureQuery) -> np.ndarray:
+        q = MLFeatureQuery.from_exposure_condition(query)
+        return self.transform(pd.DataFrame([q.to_record_dict()]))
+
+
+def fit_zero_mean_residual_gp(
+    condition_df: pd.DataFrame,
+    residuals: np.ndarray,
+    weights: np.ndarray,
+    *,
+    target_name: str | None = None,
+    length_scale_bounds: tuple[float, float] = (0.2, 5.0),
+    alpha_scale: float = 0.01,
+    n_restarts_optimizer: int = 1,
+    random_state: int = 42,
+) -> tuple[ResidualConditionTransformer, GaussianProcessRegressor]:
+    """Fit a low-dimensional Zero-Mean Matérn(2.5) + WhiteKernel GP on weighted residuals."""
+    transformer = ResidualConditionTransformer(include_metal=False)
+    X_res = transformer.fit_transform(condition_df)
+
+    min_amp = RESIDUAL_MIN_AMPLITUDE.get(target_name or "", 0.02)
+    v = max(float(np.average(residuals**2, weights=weights)), min_amp**2)
+    kernel = (
+        ConstantKernel(
+            constant_value=v,
+            constant_value_bounds=(max(1e-6, 0.1 * v), max(1e2, 25.0 * v)),
+        )
+        * Matern(
+            length_scale=1.0,
+            length_scale_bounds=length_scale_bounds,
+            nu=2.5,
+        )
+        + WhiteKernel(
+            noise_level=0.05 * v,
+            noise_level_bounds=(max(1e-8, 1e-5 * v), max(1e-3, 0.5 * v)),
+        )
+    )
+    alpha = alpha_scale * v * ((1.0 / weights) ** 2 - 1.0) + 1e-10
+    gpr = GaussianProcessRegressor(
+        kernel=kernel,
+        alpha=alpha,
+        normalize_y=False,
+        random_state=random_state,
+        n_restarts_optimizer=n_restarts_optimizer,
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ConvergenceWarning)
+        gpr.fit(X_res, residuals)
+    return transformer, gpr
+
+
 @dataclass(frozen=True)
 class ApplicabilityDomainResult:
     """Two-tier Applicability Domain assessment (per-metal Bounding Box + local k-NN density)."""
@@ -449,6 +646,9 @@ class ApplicabilityDomainResult:
     lab_knn_distance: float | None = None
     n_lab_samples: int = 0
     lab_anchoring_status: str | None = None
+    cross_model_disagreement_log10_icorr: float | None = None
+    cross_model_disagreement_ecorr_V: float | None = None
+    disagreement_downgraded: bool = False
 
 
 class ApplicabilityDomainChecker:
@@ -696,7 +896,7 @@ class MLParameterPrediction:
     icorr_uA_cm2_median: float
     beta_a_mV_dec: ParameterEstimate
     beta_c_mV_dec: ParameterEstimate
-    model_family: ModelFamily
+    model_family: PredictedModelFamily
     applicability: ApplicabilityDomainResult
     calibration_mode: str = "literature_only"
     lab_project: str | None = None
@@ -722,7 +922,7 @@ class CrossValidationMetrics:
     """Cross-validated regression metrics for one electrochemical target."""
 
     target: str
-    model_family: ModelFamily
+    model_family: PredictedModelFamily
     cv_strategy: CVStrategy
     mae: float
     rmse: float
@@ -730,6 +930,16 @@ class CrossValidationMetrics:
     mape: float
     n_samples: int
     per_metal_metrics: dict[str, dict[str, float]] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _PerMetalResidualGP:
+    """Per-Metal Stage 2 Zero-Mean OOB residual GP fitted in low-dimensional Exposure Condition space."""
+
+    transformer: ResidualConditionTransformer
+    gp_model: GaussianProcessRegressor
+    n_samples: int
+    subsampled: bool
 
 
 class _UncertainTargetModel:
@@ -743,26 +953,29 @@ class _UncertainTargetModel:
         n_estimators: int = 100,
         n_bootstrap: int = 10,
         max_gp_samples: int = GP_MAX_TRAINING_SAMPLES,
+        target_name: str | None = None,
     ) -> None:
-        self.model_family = model_family
+        if model_family not in SUPPORTED_MODEL_FAMILIES:
+            raise ValueError(
+                f"Unsupported model_family: {model_family!r}. Supported: {SUPPORTED_MODEL_FAMILIES}"
+            )
+        self.model_family: ModelFamily = model_family
         self.random_state = int(random_state)
         self.n_estimators = int(n_estimators)
         self.n_bootstrap = int(n_bootstrap)
         self.max_gp_samples = int(max_gp_samples)
+        self.target_name: str | None = target_name
         self.gp_subsampled: bool = False
-        self._scaler: StandardScaler | None = None
         self._model: Any = None
-        self._secondary_model: Any = None
+        self._per_metal_residual_gps: dict[str, _PerMetalResidualGP] = {}
         self._ensemble: list[Any] = []
 
-    def _subsample_for_gp(self, X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Deterministically cap GP training size to prevent O(N^3) blowup on large datasets."""
-        if len(y) <= self.max_gp_samples:
-            self.gp_subsampled = False
-            return X, y
-        self.gp_subsampled = True
-        rng = np.random.default_rng(self.random_state)
-        # Stratified-like selection across sorted target quantiles for representative coverage
+    def _select_stratified_indices(self, y: np.ndarray, *, seed_offset: int = 0) -> np.ndarray:
+        """Deterministically cap per-Metal GP training size via quantile-stratified selection."""
+        n = len(y)
+        if n <= self.max_gp_samples:
+            return np.arange(n, dtype=int)
+        rng = np.random.default_rng(self.random_state + seed_offset)
         order = np.argsort(y)
         bins = np.array_split(order, min(20, self.max_gp_samples))
         selected: list[int] = []
@@ -774,28 +987,68 @@ class _UncertainTargetModel:
                 chosen = rng.choice(b, size=take, replace=False)
                 selected.extend(int(idx) for idx in chosen)
                 remaining -= take
-        idx_arr = np.array(sorted(selected), dtype=int)
-        return X[idx_arr], y[idx_arr]
+        return np.array(sorted(selected), dtype=int)
 
-    def _fit_gp_regressor(self, X: np.ndarray, y: np.ndarray) -> GaussianProcessRegressor:
-        X_gp, y_gp = self._subsample_for_gp(X, y)
-        self._scaler = StandardScaler()
-        X_scaled = self._scaler.fit_transform(X_gp)
-        kernel = (
-            ConstantKernel(1.0, (1e-3, 1e3))
-            * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e3), nu=2.5)
-            + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-5, 1e1))
+    def _fit_per_metal_oob_residual_gps(
+        self,
+        condition_df: pd.DataFrame,
+        y: np.ndarray,
+        oob_pred: np.ndarray,
+        sample_weight: np.ndarray | None,
+    ) -> None:
+        """Fit Stage 2 per-Metal Zero-Mean Matérn(2.5) GPs on valid out-of-bag RF residuals."""
+        self._per_metal_residual_gps = {}
+        self.gp_subsampled = False
+
+        valid_oob = np.isfinite(oob_pred) & np.isfinite(y)
+        if not np.any(valid_oob):
+            return
+
+        residuals = y - oob_pred
+        metals = condition_df["metal"].astype(str).str.strip().to_numpy()
+        weights_all = (
+            np.clip(np.asarray(sample_weight, dtype=float), 0.05, 1.0)
+            if sample_weight is not None
+            else np.ones(len(y), dtype=float)
         )
-        gpr = GaussianProcessRegressor(
-            kernel=kernel,
-            normalize_y=True,
-            random_state=self.random_state,
-            n_restarts_optimizer=1,
-        )
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", ConvergenceWarning)
-            gpr.fit(X_scaled, y_gp)
-        return gpr
+
+        for metal_idx, metal in enumerate(sorted(set(metals))):
+            m_mask = valid_oob & (metals == metal)
+            n_valid = int(np.sum(m_mask))
+            if n_valid < MIN_RESIDUAL_GP_SAMPLES:
+                continue
+
+            df_m = condition_df.loc[m_mask].reset_index(drop=True)
+            res_m = residuals[m_mask]
+            w_m = weights_all[m_mask]
+
+            if n_valid > self.max_gp_samples:
+                idx_sub = self._select_stratified_indices(res_m, seed_offset=metal_idx * 19)
+                df_m = df_m.iloc[idx_sub].reset_index(drop=True)
+                res_m = res_m[idx_sub]
+                w_m = w_m[idx_sub]
+                subsampled = True
+                self.gp_subsampled = True
+            else:
+                subsampled = False
+
+            transformer, gpr = fit_zero_mean_residual_gp(
+                df_m,
+                res_m,
+                w_m,
+                target_name=self.target_name,
+                length_scale_bounds=(0.2, 5.0),
+                alpha_scale=0.01,
+                n_restarts_optimizer=1,
+                random_state=self.random_state + metal_idx * 29,
+            )
+
+            self._per_metal_residual_gps[metal] = _PerMetalResidualGP(
+                transformer=transformer,
+                gp_model=gpr,
+                n_samples=len(res_m),
+                subsampled=subsampled,
+            )
 
     def fit(
         self,
@@ -803,6 +1056,7 @@ class _UncertainTargetModel:
         y: np.ndarray,
         *,
         sample_weight: np.ndarray | None = None,
+        condition_df: pd.DataFrame | None = None,
     ) -> _UncertainTargetModel:
         if self.model_family == "random_forest":
             rf = RandomForestRegressor(
@@ -812,29 +1066,6 @@ class _UncertainTargetModel:
             )
             rf.fit(X, y, sample_weight=sample_weight)
             self._model = rf
-        elif self.model_family == "extra_trees":
-            et = ExtraTreesRegressor(
-                n_estimators=self.n_estimators,
-                random_state=self.random_state,
-                min_samples_leaf=1,
-            )
-            et.fit(X, y, sample_weight=sample_weight)
-            self._model = et
-        elif self.model_family == "gradient_boosting":
-            rng = np.random.default_rng(self.random_state)
-            n_samples = len(y)
-            self._ensemble = []
-            for b in range(self.n_bootstrap):
-                idx = rng.integers(0, n_samples, size=n_samples)
-                gbr = GradientBoostingRegressor(
-                    n_estimators=max(20, self.n_estimators // 2),
-                    max_depth=3,
-                    learning_rate=0.08,
-                    random_state=self.random_state + b,
-                )
-                w_boot = sample_weight[idx] if sample_weight is not None else None
-                gbr.fit(X[idx], y[idx], sample_weight=w_boot)
-                self._ensemble.append(gbr)
         elif self.model_family == "hist_gradient_boosting":
             rng = np.random.default_rng(self.random_state)
             n_samples = len(y)
@@ -850,54 +1081,72 @@ class _UncertainTargetModel:
                 w_boot = sample_weight[idx] if sample_weight is not None else None
                 hgbr.fit(X[idx], y[idx], sample_weight=w_boot)
                 self._ensemble.append(hgbr)
-        elif self.model_family == "gaussian_process":
-            self._model = self._fit_gp_regressor(X, y)
         elif self.model_family == "rf_gp_ensemble":
             rf = RandomForestRegressor(
                 n_estimators=self.n_estimators,
                 random_state=self.random_state,
                 min_samples_leaf=1,
+                oob_score=True,
             )
-            rf.fit(X, y, sample_weight=sample_weight)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                rf.fit(X, y, sample_weight=sample_weight)
             self._model = rf
-            self._secondary_model = self._fit_gp_regressor(X, y)
+            self._per_metal_residual_gps = {}
+            self.gp_subsampled = False
+            if condition_df is not None and len(condition_df) == len(y):
+                oob_pred = np.asarray(rf.oob_prediction_, dtype=float)
+                self._fit_per_metal_oob_residual_gps(
+                    condition_df.reset_index(drop=True),
+                    np.asarray(y, dtype=float),
+                    oob_pred,
+                    sample_weight,
+                )
         else:
             raise ValueError(f"Unsupported model_family: {self.model_family!r}")
         return self
 
-    def predict_mean_std(self, X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        if self.model_family in ("random_forest", "extra_trees"):
+    def predict_mean_std(
+        self,
+        X: np.ndarray,
+        *,
+        condition_df: pd.DataFrame | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.model_family == "random_forest":
             tree_preds = np.vstack([tree.predict(X) for tree in self._model.estimators_])
             return np.mean(tree_preds, axis=0), np.std(tree_preds, axis=0)
-        if self.model_family in ("gradient_boosting", "hist_gradient_boosting"):
+        if self.model_family == "hist_gradient_boosting":
             boot_preds = np.vstack([m.predict(X) for m in self._ensemble])
             return np.mean(boot_preds, axis=0), np.std(boot_preds, axis=0)
-        if self.model_family == "gaussian_process":
-            assert self._scaler is not None
-            X_scaled = self._scaler.transform(X)
-            mean, std = self._model.predict(X_scaled, return_std=True)
-            return np.asarray(mean, dtype=float), np.maximum(np.asarray(std, dtype=float), 0.0)
         if self.model_family == "rf_gp_ensemble":
-            assert self._scaler is not None and self._secondary_model is not None
             tree_preds = np.vstack([tree.predict(X) for tree in self._model.estimators_])
             rf_mean = np.mean(tree_preds, axis=0)
             rf_std = np.std(tree_preds, axis=0)
-            X_scaled = self._scaler.transform(X)
-            gp_mean, gp_std = self._secondary_model.predict(X_scaled, return_std=True)
-            gp_mean = np.asarray(gp_mean, dtype=float)
-            gp_std = np.maximum(np.asarray(gp_std, dtype=float), 0.0)
-            # Equal-weight mixture mean and law-of-total-variance std
-            comb_mean = 0.5 * (rf_mean + gp_mean)
-            comb_var = 0.5 * (rf_std**2 + gp_std**2) + 0.25 * ((rf_mean - gp_mean) ** 2)
-            return comb_mean, np.sqrt(np.maximum(comb_var, 0.0))
+            if condition_df is None or not self._per_metal_residual_gps:
+                return rf_mean, rf_std
+
+            comb_mean = rf_mean.copy()
+            comb_std = rf_std.copy()
+            cond_reset = condition_df.reset_index(drop=True)
+            metals = cond_reset["metal"].astype(str).str.strip().to_numpy()
+            for metal in dict.fromkeys(metals):
+                fitted_gp = self._per_metal_residual_gps.get(metal)
+                if fitted_gp is None:
+                    continue
+                idx = np.flatnonzero(metals == metal)
+                X_res = fitted_gp.transformer.transform(cond_reset.iloc[idx].reset_index(drop=True))
+                r_mean, r_std = fitted_gp.gp_model.predict(X_res, return_std=True)
+                r_mean_arr = np.asarray(r_mean, dtype=float)
+                r_std_arr = np.maximum(np.asarray(r_std, dtype=float), 0.0)
+                comb_mean[idx] = rf_mean[idx] + r_mean_arr
+                comb_std[idx] = np.hypot(rf_std[idx], r_std_arr)
+            return comb_mean, comb_std
         raise ValueError(f"Unsupported model_family: {self.model_family!r}")
 
     def feature_importances(self) -> np.ndarray:
         """Return feature importance vector for tree-based model families."""
-        if self.model_family in ("random_forest", "extra_trees", "rf_gp_ensemble"):
+        if self.model_family in ("random_forest", "rf_gp_ensemble"):
             return np.asarray(self._model.feature_importances_, dtype=float)
-        if self.model_family == "gradient_boosting":
-            return np.mean([m.feature_importances_ for m in self._ensemble], axis=0)
         raise ValueError(
             f"Feature importances are only available for tree models, not {self.model_family!r}."
         )
@@ -1108,14 +1357,16 @@ class HybridMLPredictor:
                 exclude_imputed_tafel=self.exclude_imputed_tafel,
             )
             w_target = sample_weights[mask] if sample_weights is not None else None
+            df_target = df.loc[mask].reset_index(drop=True)
             model = _UncertainTargetModel(
                 self.model_family,
                 random_state=self.random_state + idx * 17,
                 n_estimators=self.n_estimators,
                 n_bootstrap=self.n_bootstrap,
                 max_gp_samples=self.max_gp_samples,
+                target_name=target_name,
             )
-            model.fit(X[mask], y_all[mask], sample_weight=w_target)
+            model.fit(X[mask], y_all[mask], sample_weight=w_target, condition_df=df_target)
             self.models[target_name] = model
             self.target_training_counts[target_name] = int(np.sum(mask))
 
@@ -1128,12 +1379,13 @@ class HybridMLPredictor:
             raise RuntimeError("HybridMLPredictor must be fitted before predict().")
 
         q = MLFeatureQuery.from_exposure_condition(query)
-        X_q = self.feature_extractor.transform_query(q)
+        q_df = pd.DataFrame([q.to_record_dict()])
+        X_q = self.feature_extractor.transform(q_df)
         ad_res = self.applicability_checker.evaluate(q)
 
         estimates: dict[str, ParameterEstimate] = {}
         for target_name in ML_TARGET_NAMES:
-            mean_arr, std_arr = self.models[target_name].predict_mean_std(X_q)
+            mean_arr, std_arr = self.models[target_name].predict_mean_std(X_q, condition_df=q_df)
             raw_mean = float(mean_arr[0])
             if target_name == "Ecorr_V_SHE":
                 clipped_mean = float(np.clip(raw_mean, ECORR_THERMO_MIN_V_SHE, ECORR_THERMO_MAX_V_SHE))
@@ -1217,9 +1469,16 @@ class HybridMLPredictor:
                     random_state=self.random_state + fold_idx * 31 + t_idx * 7,
                     n_estimators=self.n_estimators,
                     n_bootstrap=self.n_bootstrap,
+                    max_gp_samples=self.max_gp_samples,
+                    target_name=target_name,
                 )
-                model.fit(X_train, y_true[train_idx], sample_weight=w_train)
-                mean_pred, _ = model.predict_mean_std(X_val)
+                model.fit(
+                    X_train,
+                    y_true[train_idx],
+                    sample_weight=w_train,
+                    condition_df=train_df,
+                )
+                mean_pred, _ = model.predict_mean_std(X_val, condition_df=val_df)
                 oof_pred[val_idx] = mean_pred
 
             metals_arr = sub_df["metal"].astype(str).str.strip().to_numpy()
@@ -1290,6 +1549,22 @@ class MonteCarloPolarizationBand:
     cathodic_p05_uA_cm2: np.ndarray
     cathodic_p50_uA_cm2: np.ndarray
     cathodic_p95_uA_cm2: np.ndarray
+    overpotential_V: np.ndarray
+    eta_log10_abs_net_p05: np.ndarray
+    eta_log10_abs_net_p25: np.ndarray
+    eta_log10_abs_net_p50: np.ndarray
+    eta_log10_abs_net_p75: np.ndarray
+    eta_log10_abs_net_p95: np.ndarray
+    ecorr_p05_V_SHE: float
+    ecorr_p25_V_SHE: float
+    ecorr_p50_V_SHE: float
+    ecorr_p75_V_SHE: float
+    ecorr_p95_V_SHE: float
+    log10_icorr_p05: float
+    log10_icorr_p25: float
+    log10_icorr_p50: float
+    log10_icorr_p75: float
+    log10_icorr_p95: float
 
 
 @dataclass(frozen=True)
@@ -1403,6 +1678,19 @@ def propagate_uncertainty_monte_carlo(
     abs_net = np.maximum(np.abs(i_anodic - i_cathodic), 1e-12)
     log_abs_net = np.log10(abs_net)
 
+    # Overpotential-anchored evaluation (eta = E - E_corr) preserves the sharp V-cusp at eta = 0
+    ecorr_p50 = float(np.percentile(ecorr_draws, 50.0))
+    if potentials_V_SHE is not None:
+        eta_grid = potentials - ecorr_p50
+    else:
+        eta_grid = np.linspace(overpotential_min_V, overpotential_max_V, num_potential_points)
+
+    eta_mat = eta_grid[None, :]
+    i_anodic_eta = icorr * np.power(10.0, np.clip(eta_mat / ba_v, -30.0, 30.0))
+    i_cathodic_eta = icorr * np.power(10.0, np.clip(-eta_mat / bc_v, -30.0, 30.0))
+    abs_net_eta = np.maximum(np.abs(i_anodic_eta - i_cathodic_eta), 1e-12)
+    log_abs_net_eta = np.log10(abs_net_eta)
+
     band = MonteCarloPolarizationBand(
         potential_V_SHE=potentials,
         log10_abs_net_mean=np.mean(log_abs_net, axis=0),
@@ -1415,6 +1703,22 @@ def propagate_uncertainty_monte_carlo(
         cathodic_p05_uA_cm2=np.percentile(i_cathodic, 5.0, axis=0),
         cathodic_p50_uA_cm2=np.percentile(i_cathodic, 50.0, axis=0),
         cathodic_p95_uA_cm2=np.percentile(i_cathodic, 95.0, axis=0),
+        overpotential_V=eta_grid,
+        eta_log10_abs_net_p05=np.percentile(log_abs_net_eta, 5.0, axis=0),
+        eta_log10_abs_net_p25=np.percentile(log_abs_net_eta, 25.0, axis=0),
+        eta_log10_abs_net_p50=np.percentile(log_abs_net_eta, 50.0, axis=0),
+        eta_log10_abs_net_p75=np.percentile(log_abs_net_eta, 75.0, axis=0),
+        eta_log10_abs_net_p95=np.percentile(log_abs_net_eta, 95.0, axis=0),
+        ecorr_p05_V_SHE=float(np.percentile(ecorr_draws, 5.0)),
+        ecorr_p25_V_SHE=float(np.percentile(ecorr_draws, 25.0)),
+        ecorr_p50_V_SHE=ecorr_p50,
+        ecorr_p75_V_SHE=float(np.percentile(ecorr_draws, 75.0)),
+        ecorr_p95_V_SHE=float(np.percentile(ecorr_draws, 95.0)),
+        log10_icorr_p05=float(np.percentile(log_i_draws, 5.0)),
+        log10_icorr_p25=float(np.percentile(log_i_draws, 25.0)),
+        log10_icorr_p50=float(np.percentile(log_i_draws, 50.0)),
+        log10_icorr_p75=float(np.percentile(log_i_draws, 75.0)),
+        log10_icorr_p95=float(np.percentile(log_i_draws, 95.0)),
     )
 
     return MonteCarloPropagationResult(
@@ -1447,17 +1751,30 @@ def plot_tafel_uncertainty_band(
     else:
         fig = ax.figure
 
+    e_band = band.ecorr_p50_V_SHE + band.overpotential_V
     ax.fill_betweenx(
-        band.potential_V_SHE,
-        band.log10_abs_net_p05,
-        band.log10_abs_net_p95,
+        e_band,
+        band.eta_log10_abs_net_p05,
+        band.eta_log10_abs_net_p95,
         color="#1f77b4",
-        alpha=0.22,
-        label=f"90% Uncertainty Band (P05–P95, N={mc_result.n_draws})",
+        alpha=0.14,
+        edgecolor="#1f77b4",
+        linewidth=0.6,
+        label=f"Net |i_net| 90% Band (p05–p95, N={mc_result.n_draws})",
+    )
+    ax.fill_betweenx(
+        e_band,
+        band.eta_log10_abs_net_p25,
+        band.eta_log10_abs_net_p75,
+        color="#1f77b4",
+        alpha=0.28,
+        edgecolor="#1f77b4",
+        linewidth=0.8,
+        label="Net |i_net| 50% Band (p25–p75)",
     )
     ax.plot(
-        band.log10_abs_net_p50,
-        band.potential_V_SHE,
+        band.eta_log10_abs_net_p50,
+        e_band,
         color="#111111",
         linewidth=2.1,
         label="Median Polarization Curve (P50)",

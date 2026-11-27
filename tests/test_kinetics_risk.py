@@ -221,8 +221,14 @@ class TestKineticsMonteCarloAndPlotting(unittest.TestCase):
 
         # Physical invariants across all time points
         self.assertAlmostEqual(float(mc.depth_p50_nm[0]), 0.0, places=12)
-        self.assertTrue(np.all(mc.depth_p05_nm <= mc.depth_p50_nm + 1e-12))
-        self.assertTrue(np.all(mc.depth_p50_nm <= mc.depth_p95_nm + 1e-12))
+        self.assertTrue(np.all(mc.depth_p05_nm <= mc.depth_p25_nm + 1e-12))
+        self.assertTrue(np.all(mc.depth_p25_nm <= mc.depth_p50_nm + 1e-12))
+        self.assertTrue(np.all(mc.depth_p50_nm <= mc.depth_p75_nm + 1e-12))
+        self.assertTrue(np.all(mc.depth_p75_nm <= mc.depth_p95_nm + 1e-12))
+        self.assertTrue(np.all(mc.risk_p05 <= mc.risk_p25 + 1e-12))
+        self.assertTrue(np.all(mc.risk_p25 <= mc.risk_p50 + 1e-12))
+        self.assertTrue(np.all(mc.risk_p50 <= mc.risk_p75 + 1e-12))
+        self.assertTrue(np.all(mc.risk_p75 <= mc.risk_p95 + 1e-12))
         self.assertTrue(np.all(np.diff(mc.depth_p50_nm) >= 0.0))
         self.assertTrue(np.all((mc.risk_p05 >= 0.0) & (mc.risk_p95 <= 1.0)))
 

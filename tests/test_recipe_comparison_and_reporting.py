@@ -260,6 +260,23 @@ class TestMultiFormatReportExport(unittest.TestCase):
         self.assertIn("warnings", json_obj)
         self.assertIn("recommended_recipe", json_obj["recipe_comparison"])
 
+        # Composite Technical Report figure: unified dual-axis Depth & Risk legend + polarization V-bands
+        from corrosion_simulator.reporting import _render_composite_figure
+
+        fig = _render_composite_figure(
+            self.single_payload,
+            galvanic_payload=self.galvanic_payload,
+            comparison_payload=self.comparison_payload,
+        )
+        ax_tafel = fig.axes[0]
+        tafel_labels = [t.get_text() for t in ax_tafel.get_legend().get_texts()]
+        self.assertIn("Net |i_net| 50% Band (p25–p75)", tafel_labels)
+        self.assertIn("Net |i_net| 90% Band (p05–p95)", tafel_labels)
+        ax_kin = fig.axes[1]
+        kin_labels = [t.get_text() for t in ax_kin.get_legend().get_texts()]
+        self.assertTrue(any("(left)" in lbl for lbl in kin_labels))
+        self.assertIn("Risk R(t) (right)", kin_labels)
+
         # CSV: parseable CSV with inputs, uncertainty intervals, structured recipe comparison metrics, and provenance
         csv_text = exports["csv"].decode("utf-8")
         rows = list(csv.DictReader(io.StringIO(csv_text)))
