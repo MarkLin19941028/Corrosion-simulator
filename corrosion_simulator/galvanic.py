@@ -16,11 +16,13 @@ from corrosion_simulator.database import (
     HarmonizedDatabase,
 )
 from corrosion_simulator.ml_predictor import (
+    DEFAULT_ECORR_CORRELATION,
+    DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
     ECORR_THERMO_MAX_V_SHE,
     ECORR_THERMO_MIN_V_SHE,
-    TAFEL_SLOPE_MAX_MV_DEC,
-    TAFEL_SLOPE_MIN_MV_DEC,
     MLParameterPrediction,
+    sample_clipped_icorr,
+    sample_lognormal_tafel_slope,
 )
 from corrosion_simulator.physics import (
     FaradayCorrosionResult,
@@ -332,6 +334,7 @@ class MonteCarloGalvanicResult:
     acceleration_factor_summary: dict[str, float]
     coupled_cr_nm_min_summary: dict[str, float]
     coupled_cr_mm_yr_summary: dict[str, float]
+    polarity_flip_fraction: float = 0.0
 
 
 def _summarize_array(samples: np.ndarray) -> dict[str, float]:
@@ -356,40 +359,37 @@ def _sample_parameter_draws(
     item: MLParameterPrediction | PolarizationParameters | ExposureLookupResult,
     n_draws: int,
     rng: np.random.Generator,
+    *,
+    z_ecorr: np.ndarray | None = None,
+    limiting_current_uA_cm2: float = DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Sample (E_corr, i_corr, beta_a_V_dec, beta_c_V_dec) arrays following ADR-0003 physical clipping."""
+    """Sample (E_corr, i_corr, beta_a_V_dec, beta_c_V_dec) arrays using log-normal Tafel slopes and i_lim cap."""
     if isinstance(item, MLParameterPrediction):
+        z_e = z_ecorr if z_ecorr is not None else rng.standard_normal(n_draws)
         ecorr = np.clip(
-            rng.normal(item.Ecorr_V_SHE.mean, max(item.Ecorr_V_SHE.std, 0.0), size=n_draws),
+            item.Ecorr_V_SHE.mean + max(item.Ecorr_V_SHE.std, 0.0) * z_e,
             ECORR_THERMO_MIN_V_SHE,
             ECORR_THERMO_MAX_V_SHE,
         )
-        log_i = np.clip(
-            rng.normal(
-                item.log10_icorr_uA_cm2.mean,
-                max(item.log10_icorr_uA_cm2.std, 0.0),
-                size=n_draws,
-            ),
-            -6.0,
-            6.0,
+        _, icorr = sample_clipped_icorr(
+            item.log10_icorr_uA_cm2.mean,
+            item.log10_icorr_uA_cm2.std,
+            n_draws,
+            rng,
+            limiting_current_uA_cm2=limiting_current_uA_cm2,
         )
-        icorr = np.power(10.0, log_i)
-        ba_mv = np.clip(
-            rng.normal(item.beta_a_mV_dec.mean, max(item.beta_a_mV_dec.std, 0.0), size=n_draws),
-            TAFEL_SLOPE_MIN_MV_DEC,
-            TAFEL_SLOPE_MAX_MV_DEC,
+        ba_mv = sample_lognormal_tafel_slope(
+            item.beta_a_mV_dec.mean, item.beta_a_mV_dec.std, n_draws, rng
         )
-        bc_mv = np.clip(
-            rng.normal(item.beta_c_mV_dec.mean, max(item.beta_c_mV_dec.std, 0.0), size=n_draws),
-            TAFEL_SLOPE_MIN_MV_DEC,
-            TAFEL_SLOPE_MAX_MV_DEC,
+        bc_mv = sample_lognormal_tafel_slope(
+            item.beta_c_mV_dec.mean, item.beta_c_mV_dec.std, n_draws, rng
         )
         return ecorr, icorr, ba_mv / 1000.0, bc_mv / 1000.0
 
     p = _coerce_polarization_params(item)
     return (
         np.full(n_draws, p.Ecorr_V_SHE, dtype=float),
-        np.full(n_draws, p.icorr_uA_cm2, dtype=float),
+        np.full(n_draws, min(p.icorr_uA_cm2, limiting_current_uA_cm2), dtype=float),
         np.full(n_draws, p.beta_a_V_dec, dtype=float),
         np.full(n_draws, p.beta_c_V_dec, dtype=float),
     )
@@ -404,10 +404,25 @@ def propagate_galvanic_uncertainty_monte_carlo(
     seed: int | None = 42,
     active_valence: int | None = None,
     material_properties: pd.DataFrame | None = None,
+    ecorr_correlation: float = DEFAULT_ECORR_CORRELATION,
+    limiting_current_uA_cm2: float = DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
 ) -> MonteCarloGalvanicResult:
-    """Propagate parameter uncertainties through the area-weighted bimetallic Mixed Potential solver."""
+    """Propagate parameter uncertainties through the area-weighted bimetallic Mixed Potential solver.
+
+    Tracks the nominal Active Metal consistently across all draws (cathodic protection when
+    polarity flips, i.e., AF < 1), applies shared-solution E_corr correlation, log-normal Tafel
+    slope sampling, and a physical mass-transport limiting current cap.
+    """
     if n_draws < 1:
         raise ValueError(f"n_draws must be positive, got {n_draws!r}")
+    rho = float(ecorr_correlation)
+    if not math.isfinite(rho) or not (0.0 <= rho <= 0.99):
+        raise ValueError(f"ecorr_correlation must lie in [0.0, 0.99], got {ecorr_correlation!r}")
+    i_lim = float(limiting_current_uA_cm2)
+    if not math.isfinite(i_lim) or i_lim <= 0.0:
+        raise ValueError(
+            f"limiting_current_uA_cm2 must be strictly positive and finite, got {limiting_current_uA_cm2!r}"
+        )
 
     nom_a = _to_nominal_params(prediction_a)
     nom_b = _to_nominal_params(prediction_b)
@@ -426,18 +441,21 @@ def propagate_galvanic_uncertainty_monte_carlo(
         active_src, noble_src = prediction_b, prediction_a
 
     rng = np.random.default_rng(seed)
-    e_act, i_act, ba_act, bc_act = _sample_parameter_draws(active_src, n_draws, rng)
-    e_nob, i_nob, ba_nob, bc_nob = _sample_parameter_draws(noble_src, n_draws, rng)
+    z_act = rng.standard_normal(n_draws)
+    z_ind = rng.standard_normal(n_draws)
+    z_nob = rho * z_act + math.sqrt(max(0.0, 1.0 - rho * rho)) * z_ind
+
+    e_act, i_act, ba_act, bc_act = _sample_parameter_draws(
+        active_src, n_draws, rng, z_ecorr=z_act, limiting_current_uA_cm2=i_lim
+    )
+    e_nob, i_nob, ba_nob, bc_nob = _sample_parameter_draws(
+        noble_src, n_draws, rng, z_ecorr=z_nob, limiting_current_uA_cm2=i_lim
+    )
 
     unit_faraday_act = calculate_faraday_corrosion_rate(
         nominal.active_metal,
         1.0,
         valence=active_valence,
-        material_properties=material_properties,
-    )
-    unit_faraday_nob = calculate_faraday_corrosion_rate(
-        nominal.noble_metal,
-        1.0,
         material_properties=material_properties,
     )
 
@@ -455,19 +473,15 @@ def propagate_galvanic_uncertainty_monte_carlo(
             ea_k, ia_k, baa_k, bca_k, en_k, in_k, ban_k, bcn_k, area_ratio
         )
         e_galv_draws[k] = eg
-        # Evaluate galvanic dissolution on whichever metal is Active in this draw so AF >= 1.0 always holds
-        if ea_k <= en_k:
-            ig = _safe_wagner_traud_anodic(eg, ea_k, ia_k, baa_k)
-            i_galv_draws[k] = ig
-            af_draws[k] = ig / ia_k
-            cr_nm_min_draws[k] = ig * unit_faraday_act.corrosion_rate_nm_min
-            cr_mm_yr_draws[k] = ig * unit_faraday_act.corrosion_rate_mm_yr
-        else:
-            ig = _safe_wagner_traud_anodic(eg, en_k, in_k, ban_k)
-            i_galv_draws[k] = ig
-            af_draws[k] = ig / in_k
-            cr_nm_min_draws[k] = ig * unit_faraday_nob.corrosion_rate_nm_min
-            cr_mm_yr_draws[k] = ig * unit_faraday_nob.corrosion_rate_mm_yr
+        # Always evaluate dissolution of the nominal Active Metal at E_galv
+        # (when ea_k > en_k, eg < ea_k -> nominal Active Metal is cathodically protected, AF < 1.0)
+        ig = min(_safe_wagner_traud_anodic(eg, ea_k, ia_k, baa_k), i_lim)
+        i_galv_draws[k] = ig
+        af_draws[k] = ig / ia_k
+        cr_nm_min_draws[k] = ig * unit_faraday_act.corrosion_rate_nm_min
+        cr_mm_yr_draws[k] = ig * unit_faraday_act.corrosion_rate_mm_yr
+
+    flip_fraction = float(np.mean(e_act > e_nob))
 
     return MonteCarloGalvanicResult(
         active_metal=nominal.active_metal,
@@ -485,6 +499,7 @@ def propagate_galvanic_uncertainty_monte_carlo(
         acceleration_factor_summary=_summarize_array(af_draws),
         coupled_cr_nm_min_summary=_summarize_array(cr_nm_min_draws),
         coupled_cr_mm_yr_summary=_summarize_array(cr_mm_yr_draws),
+        polarity_flip_fraction=flip_fraction,
     )
 
 

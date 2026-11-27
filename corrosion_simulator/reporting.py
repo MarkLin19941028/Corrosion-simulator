@@ -8,6 +8,7 @@ import html
 import io
 import json
 import math
+import textwrap
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, Sequence
@@ -507,20 +508,8 @@ def _render_composite_figure(
     if single_payload.mc_propagation is not None and single_payload.mc_propagation.polarization_band is not None:
         band = single_payload.mc_propagation.polarization_band
         e_band = curve.parameters.Ecorr_V_SHE + band.overpotential_V
-        p05 = np.maximum(band.eta_log10_abs_net_p05, cusp_floor)
         p25 = np.maximum(band.eta_log10_abs_net_p25, cusp_floor)
         p75 = np.maximum(band.eta_log10_abs_net_p75, cusp_floor)
-        p95 = np.maximum(band.eta_log10_abs_net_p95, cusp_floor)
-        ax_tafel.fill_between(
-            e_band,
-            p05,
-            p95,
-            color="#1f77b4",
-            alpha=0.14,
-            edgecolor="#1f77b4",
-            linewidth=0.6,
-            label="Net |i_net| 90% Band (p05–p95)",
-        )
         ax_tafel.fill_between(
             e_band,
             p25,
@@ -531,33 +520,33 @@ def _render_composite_figure(
             linewidth=0.8,
             label="Net |i_net| 50% Band (p25–p75)",
         )
+    ax_tafel.plot(
+        curve.potential_V_SHE,
+        curve.log10_anodic_uA_cm2,
+        color="#d62728",
+        linestyle="--",
+        linewidth=1.3,
+        label="Anodic Branch (i_a)",
+    )
+    ax_tafel.plot(
+        curve.potential_V_SHE,
+        curve.log10_cathodic_uA_cm2,
+        color="#2ca02c",
+        linestyle=":",
+        linewidth=1.3,
+        label="Cathodic Branch (i_c)",
+    )
     ax_tafel.plot(curve.potential_V_SHE, net_log10, color="#1f77b4", linewidth=2.0, label="Net |i_net|")
     x_ecorr = float(curve.parameters.Ecorr_V_SHE)
     y_icorr = float(math.log10(curve.parameters.icorr_uA_cm2))
-    if single_payload.mc_propagation is not None and single_payload.mc_propagation.polarization_band is not None:
-        band = single_payload.mc_propagation.polarization_band
-        ax_tafel.errorbar(
-            [x_ecorr],
-            [y_icorr],
-            xerr=[[max(0.0, x_ecorr - float(band.ecorr_p05_V_SHE))], [max(0.0, float(band.ecorr_p95_V_SHE) - x_ecorr)]],
-            yerr=[[max(0.0, y_icorr - float(band.log10_icorr_p05))], [max(0.0, float(band.log10_icorr_p95) - y_icorr)]],
-            fmt="D",
-            color="#111111",
-            ecolor="#111111",
-            elinewidth=1.2,
-            capsize=3,
-            zorder=5,
-            label="E_corr, i_corr (90% CI)",
-        )
-    else:
-        ax_tafel.scatter(
-            [x_ecorr],
-            [y_icorr],
-            color="#111111",
-            marker="D",
-            zorder=5,
-            label="E_corr, i_corr",
-        )
+    ax_tafel.scatter(
+        [x_ecorr],
+        [y_icorr],
+        color="#111111",
+        marker="D",
+        zorder=5,
+        label="E_corr, i_corr",
+    )
     ax_tafel.set_title(f"{single_payload.request.primary_metal} Polarization Curve ({single_payload.request.parameter_source.upper()})")
     ax_tafel.set_xlabel("Potential E (V vs. SHE)")
     ax_tafel.set_ylabel("log10(|i| / µA·cm⁻²)")
@@ -570,14 +559,6 @@ def _render_composite_figure(
     if kin is not None:
         ax_kin.plot(kin.times_s, kin.depth_nm, color="#1f77b4", linestyle="-", linewidth=2.0, label=f"Depth ({kin.model}) (left)")
         if single_payload.mc_kinetics is not None:
-            ax_kin.fill_between(
-                kin.times_s,
-                single_payload.mc_kinetics.depth_p05_nm,
-                single_payload.mc_kinetics.depth_p95_nm,
-                color="#1f77b4",
-                alpha=0.14,
-                label="Depth 90% Band (left)",
-            )
             ax_kin.fill_between(
                 kin.times_s,
                 single_payload.mc_kinetics.depth_p25_nm,
@@ -594,6 +575,15 @@ def _render_composite_figure(
         ax_kin.grid(True, alpha=0.3)
 
         ax_risk = ax_kin.twinx()
+        if single_payload.mc_kinetics is not None:
+            ax_risk.fill_between(
+                kin.times_s,
+                single_payload.mc_kinetics.risk_p25,
+                single_payload.mc_kinetics.risk_p75,
+                color="#d95f02",
+                alpha=0.22,
+                label="Risk 50% Band (right)",
+            )
         ax_risk.plot(kin.times_s, kin.risk_score, color="#d95f02", linestyle="-.", linewidth=1.8, label="Risk R(t) (right)")
         ax_risk.set_ylabel("Thickness Loss Risk R(t)", color="#d95f02")
         ax_risk.set_ylim(0.0, 1.05)
@@ -646,6 +636,15 @@ def _render_composite_figure(
 
         ax_gd = fig.add_subplot(n_rows, 2, (next_row - 1) * 2 + 2)
         if g.uncoupled_kinetics is not None and g.coupled_kinetics is not None:
+            if g.mc_coupled_kinetics is not None:
+                ax_gd.fill_between(
+                    g.coupled_kinetics.times_s,
+                    g.mc_coupled_kinetics.depth_p25_nm,
+                    g.mc_coupled_kinetics.depth_p75_nm,
+                    color="#1f77b4",
+                    alpha=0.28,
+                    label="Coupled Depth 50% Band",
+                )
             ax_gd.plot(g.uncoupled_kinetics.times_s, g.uncoupled_kinetics.depth_nm, "--", color="#64748b", label=f"{g.active_metal} Uncoupled")
             ax_gd.plot(g.coupled_kinetics.times_s, g.coupled_kinetics.depth_nm, "-", color="#1f77b4", linewidth=2.2, label=f"{g.active_metal} Coupled ({g.acceleration_factor:.2f}×)")
             ax_gd.axhline(g.request.d_crit_nm, color="#475569", linestyle="--", linewidth=1.0, label=f"d_crit={g.request.d_crit_nm:.2f} nm")
@@ -795,6 +794,188 @@ def _build_uncertainty_intervals(
     return intervals
 
 
+_METHODOLOGY_GUIDE_ENTRIES: tuple[dict[str, str], ...] = (
+    {
+        "Topic": "4 Electrochemical Parameters (E_corr, i_corr, β_a, β_c) & Generation",
+        "Definition": (
+            "E_corr (V vs. SHE): open-circuit corrosion potential where anodic = cathodic current. "
+            "i_corr (µA/cm²): corrosion current density at E_corr. "
+            "β_a, β_c (mV/dec): anodic & cathodic Tafel slopes. "
+            "Generated via: (1) ML Prediction (ensemble / GP trained on harmonized database in log10(i_corr) space, "
+            "optionally calibrated with lab data via Delta-Learning or Lab-Only GP), "
+            "(2) Database Lookup (nearest experimental record), or (3) Manual Input."
+        ),
+        "Formula": "i_net(E) = i_corr · [10^((E − E_corr)/β_a) − 10^(−(E − E_corr)/β_c)]  (Wagner–Traud, β in V/dec)",
+    },
+    {
+        "Topic": "Initial Corrosion Rate (CR₀)",
+        "Definition": (
+            "Instantaneous thickness-loss rate at t = 0 (nm/min or mm/yr) derived from dissolution current density "
+            "(i = i_corr for single metal; i = i_galv for coupled anode) via Faraday's law."
+        ),
+        "Formula": (
+            "CR₀ (nm/min) = [(i · 10⁻⁶ · EW) / (F · ρ)] · 10⁷ · 60,  "
+            "EW = M / z (g/eq), F = 96,485.33 C/mol, ρ = density (g/cm³), z = valence"
+        ),
+    },
+    {
+        "Topic": "Corrosion Depth d(t)",
+        "Definition": (
+            "Cumulative metal thickness lost (nm) over immersion time t (s), anchored to initial velocity v₀ = CR₀ / 60 (nm/s). "
+            "Selected automatically from Pourbaix stability or manually."
+        ),
+        "Formula": (
+            "Linear: d(t) = v₀·t  |  "
+            "Passivation: d(t) = d_max·[1 − exp(−v₀·t / d_max)]  |  "
+            "Power-Law: d(t) = (v₀·t_ref)·(t / t_ref)^n  (t_ref = 60 s, 0.3 ≤ n ≤ 1.0)"
+        ),
+    },
+    {
+        "Topic": "Critical Thickness Threshold (d_crit) & Time to Threshold (t_crit)",
+        "Definition": (
+            "d_crit (nm, default 1.0 nm): maximum tolerable thickness loss before process/device impact. "
+            "t_crit (s): immersion time required for d(t) to reach d_crit (∞ if d_max ≤ d_crit in passivation)."
+        ),
+        "Formula": (
+            "Linear: t_crit = d_crit / v₀  |  "
+            "Passivation: t_crit = −(d_max / v₀)·ln(1 − d_crit / d_max)  |  "
+            "Power-Law: t_crit = t_ref·[d_crit / (v₀·t_ref)]^(1/n)"
+        ),
+    },
+    {
+        "Topic": "Thickness Loss Risk Score R(t) & Risk Tiers",
+        "Definition": (
+            "Bounded risk score R(t) ∈ [0, 1] calibrated so R(d_crit) = 0.50. "
+            "Discrete Risk Tiers by ratio r = d(t) / d_crit: Low (r < 0.8), Medium (0.8 ≤ r < 2.0), "
+            "High (2.0 ≤ r < 4.0), Critical (r ≥ 4.0)."
+        ),
+        "Formula": "R(t) = 1 − exp(−ln(2) · d(t) / d_crit)",
+    },
+    {
+        "Topic": "Galvanic Coupling (E_galv, i_galv, Acceleration Factor AF)",
+        "Definition": (
+            "Active Metal (Anode, lower E_corr) dissolves faster when coupled to Noble Metal (Cathode, higher E_corr). "
+            "Mixed potential E_galv satisfies area-weighted charge conservation; i_galv is the anodic dissolution current density on Active Metal. "
+            "Galvanic Driving Force Risk by |ΔE_corr|: Low (< 0.1 V), Medium (0.1–0.3 V), High (≥ 0.3 V)."
+        ),
+        "Formula": (
+            "i_net,active(E_galv) + (A_cathode / A_anode)·i_net,noble(E_galv) = 0;  "
+            "i_galv = i_anodic,active(E_galv);  AF = i_galv / i_corr,active"
+        ),
+    },
+    {
+        "Topic": "Uncertainty Bands (50% Band) & Confidence Tier",
+        "Definition": (
+            "Monte Carlo propagation samples ML parameter uncertainties using log-normal Tafel slopes, "
+            "mass-transport limiting current cap (i_lim = 1e5 µA/cm²), shared-solution E_corr correlation (ρ = 0.6), "
+            "and fixed-anode tracking (AF < 1 when polarity flips) to form the shaded 50% Band (p25–p75 interquartile range). "
+            "Confidence Tier (High / Medium / Low) indicates Applicability Domain coverage (bounding box + local k-NN density)."
+        ),
+        "Formula": "50% Band = [p25, p75] of Monte Carlo ensemble;  90% CI summary = [p05, p95];  i_galv ≤ i_lim",
+    },
+)
+
+
+def _methodology_guide_dataframe() -> pd.DataFrame:
+    """Return a display-ready DataFrame of report definitions and mathematical formulas."""
+    return pd.DataFrame(list(_METHODOLOGY_GUIDE_ENTRIES))
+
+
+def _format_galvanic_param_table_text(galvanic_payload: GalvanicViewPayload) -> list[str]:
+    """Format Anode, Cathode & Mixed electrochemical parameters as compact aligned monospace lines (<=86 chars) for PDF."""
+    if galvanic_payload.primary_resolved.metal == galvanic_payload.active_metal:
+        active_src = galvanic_payload.primary_resolved.source_label
+        noble_src = galvanic_payload.secondary_resolved.source_label
+    else:
+        active_src = galvanic_payload.secondary_resolved.source_label
+        noble_src = galvanic_payload.primary_resolved.source_label
+
+    active_params = galvanic_payload.coupling_result.active_parameters
+    noble_params = galvanic_payload.coupling_result.noble_parameters
+    a_ratio = galvanic_payload.request.cathode_to_anode_area_ratio
+
+    rows = [
+        (
+            f"Anode ({galvanic_payload.active_metal})",
+            f"{active_params.Ecorr_V_SHE:.4f}",
+            f"{active_params.icorr_uA_cm2:.3g}",
+            f"{active_params.beta_a_mV_dec:.1f}",
+            f"{active_params.beta_c_mV_dec:.1f}",
+            active_src,
+        ),
+        (
+            f"Cathode ({galvanic_payload.noble_metal})",
+            f"{noble_params.Ecorr_V_SHE:.4f}",
+            f"{noble_params.icorr_uA_cm2:.3g}",
+            f"{noble_params.beta_a_mV_dec:.1f}",
+            f"{noble_params.beta_c_mV_dec:.1f}",
+            noble_src,
+        ),
+        (
+            f"Mixed (A={a_ratio:g})",
+            f"{galvanic_payload.mixed_potential_V_SHE:.4f}",
+            f"{galvanic_payload.galvanic_current_density_uA_cm2:.3g}",
+            "-",
+            "-",
+            "Solver",
+        ),
+    ]
+    lines = [
+        "  Galvanic Electrochemical Parameters (Anode, Cathode & Mixed Point):",
+        f"    {'Role':<18} {'E(V SHE)':>9} {'i(uA/cm2)':>10} {'ba':>6} {'bc':>6}  Source",
+        "    " + "-" * 74,
+    ]
+    for role, e_s, i_s, ba_s, bc_s, src_s in rows:
+        lines.append(f"    {role[:18]:<18} {e_s:>9} {i_s:>10} {ba_s:>6} {bc_s:>6}  {src_s[:22]}")
+    return lines
+
+
+def _write_paginated_text_pages(
+    pdf: PdfPages,
+    lines: Sequence[str],
+    *,
+    max_lines_per_page: int = 58,
+    fontsize: float = 7.8,
+    linespacing: float = 1.38,
+    wrap_width: int = 92,
+) -> None:
+    """Render monospace text lines across one or more letter-sized PDF pages without bottom clipping."""
+    expanded: list[str] = []
+    for raw_line in lines:
+        if not raw_line:
+            expanded.append("")
+        elif len(raw_line) <= wrap_width:
+            expanded.append(raw_line)
+        else:
+            indent = " " * (len(raw_line) - len(raw_line.lstrip(" ")) + 2)
+            expanded.extend(
+                textwrap.wrap(
+                    raw_line,
+                    width=wrap_width,
+                    subsequent_indent=indent,
+                    break_long_words=False,
+                )
+            )
+
+    for start in range(0, max(len(expanded), 1), max_lines_per_page):
+        page_lines = expanded[start : start + max_lines_per_page]
+        page_fig = Figure(figsize=(8.5, 11.0), dpi=150)
+        FigureCanvasAgg(page_fig)
+        ax = page_fig.add_axes([0.07, 0.05, 0.86, 0.90])
+        ax.axis("off")
+        ax.text(
+            0.0,
+            0.98,
+            "\n".join(page_lines),
+            va="top",
+            ha="left",
+            family="monospace",
+            fontsize=fontsize,
+            linespacing=linespacing,
+        )
+        pdf.savefig(page_fig)
+
+
 def export_report_png(
     single_payload: SingleMetalViewPayload,
     *,
@@ -901,8 +1082,14 @@ def export_report_json(
         payload["lab_calibration"] = lab_cal_obj
     if galvanic_payload is not None:
         payload["galvanic"] = galvanic_payload.to_summary_dict()
+        payload["galvanic_electrochemical_parameters"] = (
+            galvanic_payload.electrochemical_parameter_table.where(
+                pd.notna(galvanic_payload.electrochemical_parameter_table), None
+            ).to_dict(orient="records")
+        )
     if comparison_payload is not None:
         payload["recipe_comparison"] = comparison_payload.to_summary_dict()
+    payload["methodology_and_formulas"] = list(_METHODOLOGY_GUIDE_ENTRIES)
 
     return json.dumps(payload, indent=2, default=str).encode("utf-8")
 
@@ -977,9 +1164,19 @@ def export_report_csv(
             )
 
     if galvanic_payload is not None:
+        active_params = galvanic_payload.coupling_result.active_parameters
+        noble_params = galvanic_payload.coupling_result.noble_parameters
         g_rows = [
             ("Galvanic", "Active Query", "Active Metal", galvanic_payload.active_metal, "", src),
             ("Galvanic", "Active Query", "Noble Metal", galvanic_payload.noble_metal, "", src),
+            ("Galvanic", "Active Query", f"Anode ({galvanic_payload.active_metal}) E_corr", active_params.Ecorr_V_SHE, "V vs. SHE", src),
+            ("Galvanic", "Active Query", f"Anode ({galvanic_payload.active_metal}) i_corr", active_params.icorr_uA_cm2, "µA/cm²", src),
+            ("Galvanic", "Active Query", f"Anode ({galvanic_payload.active_metal}) beta_a", active_params.beta_a_mV_dec, "mV/dec", src),
+            ("Galvanic", "Active Query", f"Anode ({galvanic_payload.active_metal}) beta_c", active_params.beta_c_mV_dec, "mV/dec", src),
+            ("Galvanic", "Active Query", f"Cathode ({galvanic_payload.noble_metal}) E_corr", noble_params.Ecorr_V_SHE, "V vs. SHE", src),
+            ("Galvanic", "Active Query", f"Cathode ({galvanic_payload.noble_metal}) i_corr", noble_params.icorr_uA_cm2, "µA/cm²", src),
+            ("Galvanic", "Active Query", f"Cathode ({galvanic_payload.noble_metal}) beta_a", noble_params.beta_a_mV_dec, "mV/dec", src),
+            ("Galvanic", "Active Query", f"Cathode ({galvanic_payload.noble_metal}) beta_c", noble_params.beta_c_mV_dec, "mV/dec", src),
             ("Galvanic", "Active Query", "Galvanic Driving Force Risk", galvanic_payload.galvanic_driving_force_risk, "", src),
             ("Galvanic", "Active Query", "Mixed Potential (E_galv)", galvanic_payload.mixed_potential_V_SHE, "V vs. SHE", src),
             ("Galvanic", "Active Query", "Galvanic Current Density (i_galv)", galvanic_payload.galvanic_current_density_uA_cm2, "µA/cm²", src),
@@ -1042,6 +1239,115 @@ def export_report_csv(
     return buf.getvalue().encode("utf-8")
 
 
+def export_report_raw_data_csv(
+    single_payload: SingleMetalViewPayload,
+    *,
+    galvanic_payload: GalvanicViewPayload | None = None,
+    comparison_payload: RecipeComparisonPayload | None = None,
+) -> bytes:
+    """Export raw simulation curve data for all report charts in tidy CSV format."""
+    buf = io.StringIO()
+    writer = csv.DictWriter(
+        buf,
+        fieldnames=["chart", "series", "x_name", "x_value", "x_unit", "y_name", "y_value", "y_unit"],
+    )
+    writer.writeheader()
+
+    def _emit_series(
+        chart: str,
+        series: str,
+        x_name: str,
+        xs: Sequence[Any] | np.ndarray,
+        x_unit: str,
+        y_name: str,
+        ys: Sequence[Any] | np.ndarray,
+        y_unit: str,
+    ) -> None:
+        for xv, yv in zip(xs, ys):
+            y_out: Any = "" if (isinstance(yv, (float, np.floating)) and not math.isfinite(float(yv))) else yv
+            writer.writerow(
+                {
+                    "chart": chart,
+                    "series": series,
+                    "x_name": x_name,
+                    "x_value": xv,
+                    "x_unit": x_unit,
+                    "y_name": y_name,
+                    "y_value": y_out,
+                    "y_unit": y_unit,
+                }
+            )
+
+    # 1. Single Metal Polarization Curve (Tafel)
+    curve = single_payload.polarization_curve
+    metal = single_payload.request.primary_metal
+    tafel_chart = f"Single Metal Polarization Curve ({metal})"
+    _emit_series(tafel_chart, f"{metal} Net |i_net|", "Potential E", curve.potential_V_SHE, "V vs. SHE", "log10|i|", curve.log10_abs_net_uA_cm2, "log10(µA/cm²)")
+    _emit_series(tafel_chart, "Anodic Branch (i_a)", "Potential E", curve.potential_V_SHE, "V vs. SHE", "log10(i_a)", curve.log10_anodic_uA_cm2, "log10(µA/cm²)")
+    _emit_series(tafel_chart, "Cathodic Branch (i_c)", "Potential E", curve.potential_V_SHE, "V vs. SHE", "log10(i_c)", curve.log10_cathodic_uA_cm2, "log10(µA/cm²)")
+    if single_payload.mc_propagation is not None and single_payload.mc_propagation.polarization_band is not None:
+        band = single_payload.mc_propagation.polarization_band
+        e_band = curve.parameters.Ecorr_V_SHE + band.overpotential_V
+        _emit_series(tafel_chart, "Net |i_net| 50% Band p25", "Potential E", e_band, "V vs. SHE", "log10|i|", band.eta_log10_abs_net_p25, "log10(µA/cm²)")
+        _emit_series(tafel_chart, "Net |i_net| 50% Band p75", "Potential E", e_band, "V vs. SHE", "log10|i|", band.eta_log10_abs_net_p75, "log10(µA/cm²)")
+
+    # 2. Single Metal Corrosion Depth & Risk
+    kin = single_payload.kinetics_result
+    if kin is not None:
+        kin_chart = f"Single Metal Depth & Risk ({metal})"
+        _emit_series(kin_chart, f"Depth ({kin.model})", "Immersion Time", kin.times_s, "s", "Corrosion Depth", kin.depth_nm, "nm")
+        _emit_series(kin_chart, "Thickness Loss Risk R(t)", "Immersion Time", kin.times_s, "s", "Risk R(t)", kin.risk_score, "unitless")
+        if single_payload.mc_kinetics is not None:
+            mc_k = single_payload.mc_kinetics
+            _emit_series(kin_chart, "Depth 50% Band p25", "Immersion Time", kin.times_s, "s", "Corrosion Depth", mc_k.depth_p25_nm, "nm")
+            _emit_series(kin_chart, "Depth 50% Band p75", "Immersion Time", kin.times_s, "s", "Corrosion Depth", mc_k.depth_p75_nm, "nm")
+            _emit_series(kin_chart, "Risk 50% Band p25", "Immersion Time", kin.times_s, "s", "Risk R(t)", mc_k.risk_p25, "unitless")
+            _emit_series(kin_chart, "Risk 50% Band p75", "Immersion Time", kin.times_s, "s", "Risk R(t)", mc_k.risk_p75, "unitless")
+
+    # 3. Galvanic Polarization Overlay & Depth/Risk
+    if galvanic_payload is not None:
+        g = galvanic_payload
+        coupling = g.coupling_result
+        e_min = min(coupling.active_parameters.Ecorr_V_SHE, coupling.noble_parameters.Ecorr_V_SHE) - 0.15
+        e_max = max(coupling.active_parameters.Ecorr_V_SHE, coupling.noble_parameters.Ecorr_V_SHE) + 0.15
+        potentials = np.linspace(e_min, e_max, 241)
+        active_c = generate_polarization_curve(coupling.active_parameters, potentials_V_SHE=potentials)
+        noble_c = generate_polarization_curve(coupling.noble_parameters, potentials_V_SHE=potentials)
+        noble_scaled = np.log10(np.maximum(noble_c.abs_net_current_uA_cm2 * coupling.cathode_to_anode_area_ratio, 1e-12))
+
+        gt_chart = f"Galvanic Polarization Overlay ({g.active_metal} vs. {g.noble_metal})"
+        _emit_series(gt_chart, f"Active: {g.active_metal} |i_net|", "Potential E", potentials, "V vs. SHE", "log10|i|", active_c.log10_abs_net_uA_cm2, "log10(µA/cm²)")
+        _emit_series(gt_chart, f"Noble: {g.noble_metal} ({coupling.cathode_to_anode_area_ratio:g}x |i_net|)", "Potential E", potentials, "V vs. SHE", "log10(A_ratio*|i|)", noble_scaled, "log10(µA/cm²)")
+        _emit_series(gt_chart, "Galvanic Operating Point", "Potential E", [g.mixed_potential_V_SHE], "V vs. SHE", "log10(i_galv)", [math.log10(max(g.galvanic_current_density_uA_cm2, 1e-12))], "log10(µA/cm²)")
+
+        if g.uncoupled_kinetics is not None and g.coupled_kinetics is not None:
+            gd_chart = f"Galvanic Depth & Risk ({g.active_metal})"
+            t_g = g.coupled_kinetics.times_s
+            _emit_series(gd_chart, f"{g.active_metal} Uncoupled Depth", "Immersion Time", t_g, "s", "Corrosion Depth", g.uncoupled_kinetics.depth_nm, "nm")
+            _emit_series(gd_chart, f"{g.active_metal} Coupled Depth", "Immersion Time", t_g, "s", "Corrosion Depth", g.coupled_kinetics.depth_nm, "nm")
+            _emit_series(gd_chart, f"{g.active_metal} Uncoupled Risk R(t)", "Immersion Time", t_g, "s", "Risk R(t)", g.uncoupled_kinetics.risk_score, "unitless")
+            _emit_series(gd_chart, f"{g.active_metal} Coupled Risk R(t)", "Immersion Time", t_g, "s", "Risk R(t)", g.coupled_kinetics.risk_score, "unitless")
+            if g.mc_coupled_kinetics is not None:
+                mc_g = g.mc_coupled_kinetics
+                _emit_series(gd_chart, "Coupled Depth 50% Band p25", "Immersion Time", t_g, "s", "Corrosion Depth", mc_g.depth_p25_nm, "nm")
+                _emit_series(gd_chart, "Coupled Depth 50% Band p75", "Immersion Time", t_g, "s", "Corrosion Depth", mc_g.depth_p75_nm, "nm")
+                _emit_series(gd_chart, "Coupled Risk 50% Band p25", "Immersion Time", t_g, "s", "Risk R(t)", mc_g.risk_p25, "unitless")
+                _emit_series(gd_chart, "Coupled Risk 50% Band p75", "Immersion Time", t_g, "s", "Risk R(t)", mc_g.risk_p75, "unitless")
+
+    # 4. Recipe Comparison
+    if comparison_payload is not None:
+        cmp_chart = "Recipe Comparison"
+        r_names = [e.recipe.name for e in comparison_payload.entries]
+        _emit_series(cmp_chart, "Initial Corrosion Rate CR_0", "Recipe", r_names, "", "CR_0", [e.cr0_nm_min for e in comparison_payload.entries], "nm/min")
+        _emit_series(cmp_chart, "Final Corrosion Depth", "Recipe", r_names, "", "Corrosion Depth", [e.corrosion_depth_nm for e in comparison_payload.entries], "nm")
+        _emit_series(cmp_chart, "Thickness Loss Risk Score R(t)", "Recipe", r_names, "", "Risk R(t)", [e.risk_score for e in comparison_payload.entries], "unitless")
+        _emit_series(cmp_chart, "Time to Threshold", "Recipe", r_names, "", "Time to Threshold", [e.time_to_threshold_s for e in comparison_payload.entries], "s")
+        if comparison_payload.mode == "galvanic":
+            _emit_series(cmp_chart, "Acceleration Factor", "Recipe", r_names, "", "Acceleration Factor", [e.acceleration_factor or 1.0 for e in comparison_payload.entries], "x")
+
+    return buf.getvalue().encode("utf-8")
+
+
 def export_report_pdf(
     single_payload: SingleMetalViewPayload,
     *,
@@ -1052,12 +1358,7 @@ def export_report_pdf(
     """Export a multi-page technical PDF report using Matplotlib PdfPages."""
     buf = io.BytesIO()
     with PdfPages(buf) as pdf:
-        # Page 1: Executive Summary & Provenance
-        summary_fig = Figure(figsize=(8.5, 11.0), dpi=150)
-        FigureCanvasAgg(summary_fig)
-        ax = summary_fig.add_axes([0.07, 0.05, 0.86, 0.90])
-        ax.axis("off")
-
+        # Executive Summary & Provenance (auto-paginated)
         req = single_payload.request
         params = single_payload.resolved_parameters.parameters
         intervals = _build_uncertainty_intervals(single_payload, galvanic_payload)
@@ -1115,6 +1416,7 @@ def export_report_pdf(
                     f"  Acceleration Factor: {g.acceleration_factor:.2f}×{_ci_str('galvanic_acceleration_factor', '×')}   |   Accelerated CR_0: {_fmt_metric(g.accelerated_cr0_nm_min, '.4g', ' nm/min')}",
                     f"  Coupled Depth: {_fmt_metric(g.coupled_depth_nm, '.4f', ' nm')}{_ci_str('galvanic_coupled_depth_nm', 'nm')} (Uncoupled: {_fmt_metric(g.uncoupled_depth_nm, '.4f', ' nm')})",
                     f"  Coupled Time to Threshold: {_format_ttt_short(g.coupled_time_to_threshold_s)}   |   Risk Tier: {g.coupled_risk_tier}   |   Confidence: {g.confidence_tier}",
+                    *_format_galvanic_param_table_text(g),
                 ]
             )
 
@@ -1153,17 +1455,6 @@ def export_report_pdf(
             for r in all_recs:
                 lines.append(f"  - {r}")
 
-        ax.text(
-            0.0,
-            0.98,
-            "\n".join(lines),
-            va="top",
-            ha="left",
-            family="monospace",
-            fontsize=7.8,
-            linespacing=1.4,
-            wrap=True,
-        )
         cal_subject = (
             f"; calibration_mode={cal_meta['calibration_mode']}; lab_project={cal_meta['lab_project'] or 'None'}"
             if cal_meta["is_ml"] and cal_meta["calibration_mode"] != "literature_only"
@@ -1184,15 +1475,31 @@ def export_report_pdf(
                 else ""
             )
         )
-        pdf.savefig(summary_fig)
+        _write_paginated_text_pages(pdf, lines, max_lines_per_page=58, fontsize=7.8, linespacing=1.38)
 
-        # Page 2: Figures
+        # Figures Page
         comp_fig = _figure or _render_composite_figure(
             single_payload,
             galvanic_payload=galvanic_payload,
             comparison_payload=comparison_payload,
         )
         pdf.savefig(comp_fig, bbox_inches="tight")
+
+        # Methodology, Definitions & Mathematical Formulas (Quick-Start Guide)
+        guide_lines = [
+            "METHODOLOGY, DEFINITIONS & MATHEMATICAL FORMULAS (QUICK-START GUIDE)",
+            "=" * 78,
+            "Brief reference explaining how electrochemical parameters are generated and",
+            "how each corrosion metric in this report is defined and calculated.",
+            "",
+        ]
+        for idx, entry in enumerate(_METHODOLOGY_GUIDE_ENTRIES, start=1):
+            guide_lines.append(f"{idx}. {entry['Topic']}")
+            guide_lines.append(f"   {entry['Definition']}")
+            guide_lines.append(f"   Formula: {entry['Formula']}")
+            guide_lines.append("")
+
+        _write_paginated_text_pages(pdf, guide_lines, max_lines_per_page=58, fontsize=7.6, linespacing=1.38, wrap_width=86)
 
     return buf.getvalue()
 
@@ -1241,6 +1548,12 @@ def export_report_html(
     galv_section = ""
     if galvanic_payload is not None:
         g = galvanic_payload
+        galv_param_table_html = g.electrochemical_parameter_table.to_html(
+            index=False,
+            na_rep="—",
+            classes="data-table",
+            border=0,
+        )
         galv_section = f"""
         <section>
           <h2>Bimetallic Galvanic Analysis — {html.escape(g.active_metal)} (Active) vs. {html.escape(g.noble_metal)} (Noble)</h2>
@@ -1253,6 +1566,8 @@ def export_report_html(
             <div class="kpi"><span>Coupled Risk Tier</span><strong>{html.escape(g.coupled_risk_tier)} ({_fmt_metric(g.coupled_risk_score, '.3f')})</strong></div>
             <div class="kpi"><span>Galvanic Confidence Tier</span><strong>{html.escape(g.confidence_tier)}</strong></div>
           </div>
+          <h3>Galvanic Electrochemical Parameters (Anode, Cathode &amp; Mixed Point)</h3>
+          {galv_param_table_html}
         </section>
         """
 
@@ -1370,6 +1685,12 @@ def export_report_html(
       {recs_html}
     </div>
   </section>
+
+  <section>
+    <h2>Methodology, Definitions &amp; Mathematical Formulas (Quick-Start Guide)</h2>
+    <p>Concise reference explaining how the four electrochemical parameters are generated and how each corrosion metric in this report is calculated.</p>
+    {_methodology_guide_dataframe().to_html(index=False, classes="data-table", border=0)}
+  </section>
 </body>
 </html>
 """
@@ -1408,6 +1729,11 @@ def generate_all_report_exports(
             _figure=shared_fig,
         ),
         "csv": export_report_csv(
+            single_payload,
+            galvanic_payload=galvanic_payload,
+            comparison_payload=comparison_payload,
+        ),
+        "raw_data_csv": export_report_raw_data_csv(
             single_payload,
             galvanic_payload=galvanic_payload,
             comparison_payload=comparison_payload,

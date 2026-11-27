@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import math
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -30,6 +31,7 @@ from corrosion_simulator.platform_controller import (
     ManualElectrochemicalInput,
     SimulationRequest,
     SingleMetalViewPayload,
+    apply_depth_yaxis_scale,
     build_non_aqueous_physics_warning,
     format_active_model_label,
     resolve_active_model_family,
@@ -402,6 +404,40 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     )
 
     st.sidebar.subheader("2. Solution & Operating Conditions")
+    st.sidebar.markdown("**Solvent System**")
+    solvent_regime = st.sidebar.selectbox(
+        "Solvent Regime",
+        options=options["solvent_regimes"],
+        format_func=lambda key: SOLVENT_REGIME_LABELS.get(key, key),
+        index=0,
+        key="sidebar_solvent_regime",
+    )
+    organic_options = options["organic_solvent_types"]
+    organic_solvent_type = st.sidebar.selectbox(
+        "Organic Co-Solvent",
+        options=organic_options,
+        index=0,
+        key="sidebar_organic_solvent",
+    )
+    w_min, w_max, w_default, w_step = _solvent_slider_bounds(
+        solvent_regime, organic_solvent_type
+    )
+    prev_regime = st.session_state.get("_last_sidebar_solvent_regime")
+    if "sidebar_water_content" not in st.session_state:
+        st.session_state["sidebar_water_content"] = w_default
+    elif prev_regime != solvent_regime or not (
+        w_min <= float(st.session_state["sidebar_water_content"]) <= w_max
+    ):
+        st.session_state["sidebar_water_content"] = w_default
+    st.session_state["_last_sidebar_solvent_regime"] = solvent_regime
+    water_content_wt_pct = st.sidebar.slider(
+        "Water Content (wt%)",
+        min_value=w_min,
+        max_value=w_max,
+        step=w_step,
+        key="sidebar_water_content",
+    )
+
     oxidizer_options = options["oxidizer_types"]
     default_ox = oxidizer_options.index("H2O2") if "H2O2" in oxidizer_options else 0
     oxidizer_type = st.sidebar.selectbox("Oxidizer Type", options=oxidizer_options, index=default_ox)
@@ -444,40 +480,6 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
 
     pH = st.sidebar.slider("Solution pH", min_value=0.0, max_value=14.0, value=3.0, step=0.1)
     temperature_C = st.sidebar.slider("Operating Temperature (°C)", min_value=5.0, max_value=95.0, value=25.0, step=1.0)
-
-    st.sidebar.markdown("**Solvent System**")
-    solvent_regime = st.sidebar.selectbox(
-        "Solvent Regime",
-        options=options["solvent_regimes"],
-        format_func=lambda key: SOLVENT_REGIME_LABELS.get(key, key),
-        index=0,
-        key="sidebar_solvent_regime",
-    )
-    organic_options = options["organic_solvent_types"]
-    organic_solvent_type = st.sidebar.selectbox(
-        "Organic Co-Solvent",
-        options=organic_options,
-        index=0,
-        key="sidebar_organic_solvent",
-    )
-    w_min, w_max, w_default, w_step = _solvent_slider_bounds(
-        solvent_regime, organic_solvent_type
-    )
-    prev_regime = st.session_state.get("_last_sidebar_solvent_regime")
-    if "sidebar_water_content" not in st.session_state:
-        st.session_state["sidebar_water_content"] = w_default
-    elif prev_regime != solvent_regime or not (
-        w_min <= float(st.session_state["sidebar_water_content"]) <= w_max
-    ):
-        st.session_state["sidebar_water_content"] = w_default
-    st.session_state["_last_sidebar_solvent_regime"] = solvent_regime
-    water_content_wt_pct = st.sidebar.slider(
-        "Water Content (wt%)",
-        min_value=w_min,
-        max_value=w_max,
-        step=w_step,
-        key="sidebar_water_content",
-    )
 
     st.sidebar.subheader("3. Immersion Time & Kinetics")
     immersion_time_s = st.sidebar.number_input(
@@ -631,6 +633,30 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     )
 
 
+def _render_depth_and_risk_charts(
+    depth_figure: Any,
+    risk_figure: Any,
+    *,
+    scale_key: str,
+) -> None:
+    """Render side-by-side Depth and Risk Plotly charts with a Linear/Log Y-axis toggle for Depth."""
+    depth_scale = st.radio(
+        "Depth Y-Axis Scale",
+        options=["linear", "log"],
+        format_func=lambda s: "Linear" if s == "linear" else "Log",
+        horizontal=True,
+        key=scale_key,
+    )
+    col_depth, col_risk = st.columns(2)
+    with col_depth:
+        st.plotly_chart(
+            apply_depth_yaxis_scale(depth_figure, depth_scale),
+            width="stretch",
+        )
+    with col_risk:
+        st.plotly_chart(risk_figure, width="stretch")
+
+
 def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
     st.subheader(f"Single Metal Analysis — {payload.request.primary_metal}")
     _render_non_aqueous_warning_banner(payload.request)
@@ -716,8 +742,11 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
         )
 
     st.plotly_chart(payload.polarization_figure, width="stretch")
-    st.plotly_chart(payload.depth_figure, width="stretch")
-    st.plotly_chart(payload.risk_figure, width="stretch")
+    _render_depth_and_risk_charts(
+        payload.depth_figure,
+        payload.risk_figure,
+        scale_key="single_depth_yaxis_scale",
+    )
 
 
 def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
@@ -835,6 +864,9 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
             },
         ]
     )
+    st.markdown("#### Galvanic Electrochemical Parameters (Anode, Cathode & Mixed Point)")
+    st.dataframe(payload.electrochemical_parameter_table, width="stretch", hide_index=True)
+
     st.markdown("#### Uncoupled vs. Galvanically Coupled Summary")
     st.dataframe(comparison_df, width="stretch", hide_index=True)
     if payload.request.calibration_mode == "delta_learning":
@@ -850,8 +882,11 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
         _render_residual_breakdown_section(galv_breakdowns)
 
     st.plotly_chart(payload.galvanic_polarization_figure, width="stretch")
-    st.plotly_chart(payload.galvanic_depth_figure, width="stretch")
-    st.plotly_chart(payload.galvanic_risk_figure, width="stretch")
+    _render_depth_and_risk_charts(
+        payload.galvanic_depth_figure,
+        payload.galvanic_risk_figure,
+        scale_key="galvanic_depth_yaxis_scale",
+    )
 
 
 def _render_galvanic_series_explorer(controller: CorrosionPlatformController) -> None:
@@ -1145,10 +1180,10 @@ def _render_report_export_view(
         width="stretch",
     )
     c6.download_button(
-        "Download Vector Figure (.svg)",
-        data=exports["svg"],
-        file_name=f"{stem}.svg",
-        mime="image/svg+xml",
+        "Download Raw Data (.csv)",
+        data=exports["raw_data_csv"],
+        file_name=f"{stem}_raw_data.csv",
+        mime="text/csv",
         width="stretch",
     )
 

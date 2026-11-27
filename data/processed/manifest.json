@@ -1,34 +1,34 @@
 {
   "schema_version": 3,
-  "built_at_utc": "2026-11-27T16:04:04.354119+00:00",
+  "built_at_utc": "2026-11-27T16:35:52.150875+00:00",
   "raw_fingerprint": {
     "raw_dir": "/Users/mark/Documents/python/Corrosion simulator/data/raw",
-    "combined_sha256": "7492fe93e429dbe1572491be02cdb4a87b714e25af4b77665d7aee4fdf2e435a",
+    "combined_sha256": "86ae5e82fe580f8927ef4a548dbe274531b230c9ac19eda39b819cadd8b4eb66",
     "file_count": 3,
     "files": {
       "material_properties.csv": {
-        "sha256": "eb33597362403a0c4229fbb08a41142b9988479c8fe3924799b9263d1072bfb6",
-        "size_bytes": 2370
+        "sha256": "d36447c4a7a5320990fa60734b1aeeb201754491be1a33791c8b538c0602bdcd",
+        "size_bytes": 2401
       },
       "ml_training_dataset.csv": {
-        "sha256": "2435c0d58eb6fc90e77be72e9ddeff96eddac125530e0d60274cf589466997bf",
-        "size_bytes": 16013786
+        "sha256": "c6ed41ef8f9444e979f7a77d1b27b33ad4ef64526633325af3f73f033205f9f3",
+        "size_bytes": 25510665
       },
       "solution_properties.csv": {
-        "sha256": "ba76faa393eb888899714dbaa3fe983bccaf8bae60bcd4f6ccac2433ad272c17",
-        "size_bytes": 760392
+        "sha256": "346d3d11a420ff2ff587fba8678d23b57fa68c9e3712fc24742b103c1d683960",
+        "size_bytes": 1027513
       }
     }
   },
   "filter_to_core_metals": false,
   "supplement_missing_core_metals": false,
-  "n_records": 3182,
-  "n_complete_pairs": 3182,
-  "n_partial_records": 2830,
-  "n_derived_icorr_cr": 146,
-  "n_derived_icorr_rp": 131,
-  "n_rejected": 334,
-  "n_solutions": 1300,
+  "n_records": 4320,
+  "n_complete_pairs": 4320,
+  "n_partial_records": 3738,
+  "n_derived_icorr_cr": 184,
+  "n_derived_icorr_rp": 173,
+  "n_rejected": 507,
+  "n_solutions": 1757,
   "n_materials": 21,
   "available_metals": [
     "Cu",
@@ -41,13 +41,13 @@
     "Mo",
     "Fe",
     "Ni",
-    "Cr",
     "Zn",
+    "Mg",
+    "Cr",
+    "Mn",
     "TiN",
     "Ag",
-    "Mg",
     "Sn",
-    "Mn",
     "Pt",
     "Au",
     "Pd",
@@ -66,36 +66,36 @@
   "extended_metals_present": [
     "Fe",
     "Ni",
-    "Cr",
     "Zn",
+    "Mg",
+    "Cr",
+    "Mn",
     "TiN",
     "Ag",
-    "Mg",
     "Sn",
-    "Mn",
     "Pt",
     "Au",
     "Pd",
     "WN"
   ],
   "metal_sample_counts": {
-    "Cu": 956,
-    "Ti": 653,
-    "Fe": 465,
-    "W": 232,
-    "Co": 188,
-    "Al": 157,
-    "Ni": 104,
-    "Mo": 98,
-    "Cr": 74,
-    "Zn": 66,
-    "TiN": 51,
-    "Ta": 35,
-    "Ag": 25,
-    "Mg": 23,
+    "Cu": 958,
+    "Ti": 884,
+    "Fe": 671,
+    "Al": 588,
+    "W": 240,
+    "Co": 196,
+    "Ni": 142,
+    "Zn": 106,
+    "Mo": 101,
+    "Mg": 99,
+    "Cr": 86,
+    "Mn": 84,
+    "TiN": 55,
+    "Ta": 39,
+    "Ag": 28,
     "Sn": 15,
     "Ru": 15,
-    "Mn": 12,
     "Pt": 5,
     "Pd": 3,
     "Au": 3,
@@ -114,36 +114,35 @@
     "random_forest": {
       "path": "models/random_forest.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 4777,
-        "log10_icorr_uA_cm2": 4417,
-        "beta_a_mV_dec": 1559,
-        "beta_c_mV_dec": 1461
+        "Ecorr_V_SHE": 6449,
+        "log10_icorr_uA_cm2": 5929,
+        "beta_a_mV_dec": 1946,
+        "beta_c_mV_dec": 1853
       },
       "gp_subsampled": false
     },
     "hist_gradient_boosting": {
       "path": "models/hist_gradient_boosting.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 4777,
-        "log10_icorr_uA_cm2": 4417,
-        "beta_a_mV_dec": 1559,
-        "beta_c_mV_dec": 1461
+        "Ecorr_V_SHE": 6449,
+        "log10_icorr_uA_cm2": 5929,
+        "beta_a_mV_dec": 1946,
+        "beta_c_mV_dec": 1853
       },
       "gp_subsampled": false
     },
     "rf_gp_ensemble": {
       "path": "models/rf_gp_ensemble.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 4777,
-        "log10_icorr_uA_cm2": 4417,
-        "beta_a_mV_dec": 1559,
-        "beta_c_mV_dec": 1461
+        "Ecorr_V_SHE": 6449,
+        "log10_icorr_uA_cm2": 5929,
+        "beta_a_mV_dec": 1946,
+        "beta_c_mV_dec": 1853
       },
-      "gp_subsampled": true
+      "gp_subsampled": false
     }
   },
   "warnings": [
-    "Quarantined 334 invalid/incomplete raw record(s) to rejected_rows.csv.",
-    "Model 'rf_gp_ensemble' subsampled GP training set to 2500 samples for scalability."
+    "Quarantined 507 invalid/incomplete raw record(s) to rejected_rows.csv."
   ]
 }

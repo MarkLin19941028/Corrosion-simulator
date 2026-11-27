@@ -235,24 +235,34 @@ class TestMultiFormatReportExport(unittest.TestCase):
             galvanic_payload=self.galvanic_payload,
             comparison_payload=self.comparison_payload,
         )
-        self.assertEqual(set(exports.keys()), {"html", "pdf", "csv", "json", "png", "svg"})
+        self.assertEqual(set(exports.keys()), {"html", "pdf", "csv", "raw_data_csv", "json", "png", "svg"})
 
-        # HTML: self-contained with provenance, warnings/confidence, MC uncertainty intervals, galvanic confidence, embedded image, comparison
+        # HTML: self-contained with provenance, warnings/confidence, MC uncertainty intervals, galvanic confidence, embedded image, comparison, galvanic params table, and methodology guide
         html_str = exports["html"].decode("utf-8")
         self.assertIn("<!DOCTYPE html>", html_str)
         self.assertIn("Confidence Tier", html_str)
         self.assertIn("Galvanic Confidence Tier", html_str)
+        self.assertIn("Galvanic Electrochemical Parameters", html_str)
+        self.assertIn("Anode (Active):", html_str)
+        self.assertIn("Cathode (Noble):", html_str)
+        self.assertIn("Methodology, Definitions &amp; Mathematical Formulas", html_str)
+        self.assertIn("Initial Corrosion Rate (CR₀)", html_str)
+        self.assertIn("Critical Thickness Threshold (d_crit)", html_str)
         self.assertIn("Monte Carlo Uncertainty Intervals", html_str)
         self.assertIn("data:image/png;base64,", html_str)
         self.assertIn("Recipe Comparison", html_str)
         self.assertIn("ML", html_str)
 
-        # JSON: valid JSON with inputs, single_metal, galvanic, recipe_comparison, uncertainty_intervals, warnings
+        # JSON: valid JSON with inputs, single_metal, galvanic, galvanic_electrochemical_parameters, recipe_comparison, uncertainty_intervals, warnings, methodology_and_formulas
         json_obj = json.loads(exports["json"].decode("utf-8"))
         self.assertIn("inputs", json_obj)
         self.assertEqual(json_obj["inputs"]["oxidizer_type"], "H2O2")
         self.assertIn("single_metal", json_obj)
         self.assertIn("galvanic", json_obj)
+        self.assertIn("galvanic_electrochemical_parameters", json_obj)
+        self.assertEqual(len(json_obj["galvanic_electrochemical_parameters"]), 3)
+        self.assertIn("methodology_and_formulas", json_obj)
+        self.assertGreaterEqual(len(json_obj["methodology_and_formulas"]), 6)
         self.assertIn("recipe_comparison", json_obj)
         self.assertIn("uncertainty_intervals", json_obj)
         self.assertIn("single_cr0_nm_min", json_obj["uncertainty_intervals"])
@@ -260,7 +270,7 @@ class TestMultiFormatReportExport(unittest.TestCase):
         self.assertIn("warnings", json_obj)
         self.assertIn("recommended_recipe", json_obj["recipe_comparison"])
 
-        # Composite Technical Report figure: unified dual-axis Depth & Risk legend + polarization V-bands
+        # Composite Technical Report figure: 50% band only (no 90% band, no 2D cross error bar)
         from corrosion_simulator.reporting import _render_composite_figure
 
         fig = _render_composite_figure(
@@ -271,10 +281,17 @@ class TestMultiFormatReportExport(unittest.TestCase):
         ax_tafel = fig.axes[0]
         tafel_labels = [t.get_text() for t in ax_tafel.get_legend().get_texts()]
         self.assertIn("Net |i_net| 50% Band (p25–p75)", tafel_labels)
-        self.assertIn("Net |i_net| 90% Band (p05–p95)", tafel_labels)
+        self.assertNotIn("Net |i_net| 90% Band (p05–p95)", tafel_labels)
+        self.assertIn("Anodic Branch (i_a)", tafel_labels)
+        self.assertIn("Cathodic Branch (i_c)", tafel_labels)
+        self.assertIn("E_corr, i_corr", tafel_labels)
+        self.assertEqual(len(ax_tafel.containers), 0)
         ax_kin = fig.axes[1]
         kin_labels = [t.get_text() for t in ax_kin.get_legend().get_texts()]
         self.assertTrue(any("(left)" in lbl for lbl in kin_labels))
+        self.assertIn("Depth 50% Band (left)", kin_labels)
+        self.assertNotIn("Depth 90% Band (left)", kin_labels)
+        self.assertIn("Risk 50% Band (right)", kin_labels)
         self.assertIn("Risk R(t) (right)", kin_labels)
 
         # CSV: parseable CSV with inputs, uncertainty intervals, structured recipe comparison metrics, and provenance
@@ -290,6 +307,16 @@ class TestMultiFormatReportExport(unittest.TestCase):
         self.assertIn("Time to Threshold", cmp_metrics)
         self.assertIn("Acceleration Factor", cmp_metrics)
         self.assertIn("Confidence Tier", cmp_metrics)
+
+        # Raw Data CSV: contains raw simulation curves for all composite figure panels
+        raw_rows = list(csv.DictReader(io.StringIO(exports["raw_data_csv"].decode("utf-8"))))
+        self.assertGreater(len(raw_rows), 500)
+        raw_charts = {r["chart"] for r in raw_rows}
+        self.assertTrue(any(c.startswith("Single Metal Polarization Curve") for c in raw_charts))
+        self.assertTrue(any(c.startswith("Single Metal Depth & Risk") for c in raw_charts))
+        self.assertTrue(any(c.startswith("Galvanic Polarization Overlay") for c in raw_charts))
+        self.assertTrue(any(c.startswith("Galvanic Depth & Risk") for c in raw_charts))
+        self.assertIn("Recipe Comparison", raw_charts)
 
         # PDF: valid PDF header and non-trivial size
         pdf_bytes = exports["pdf"]

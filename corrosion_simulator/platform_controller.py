@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 import math
-from dataclasses import dataclass, field, replace, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 import time
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 import numpy as np
 import pandas as pd
@@ -382,19 +382,23 @@ class ResolvedMetalParameters:
     lab_project: str | None = None
     residual_breakdown: ResidualBreakdown | None = None
 
-    def to_parameter_table(self) -> pd.DataFrame:
-        """Build a display-ready parameter summary table with ±1σ uncertainties."""
+    @property
+    def source_label(self) -> str:
+        """Human-readable provenance label for this resolved parameter set."""
         if self.source == "ml":
-            source_label = {
+            return {
                 "literature_only": "ML",
                 "delta_learning": "ML (Delta-Learning)",
                 "lab_only_gp": "ML (Lab-Only GP)",
             }[self.calibration_mode]
-        else:
-            source_label = {
-                "database": "Database",
-                "manual": "Manual",
-            }[self.source]
+        return {
+            "database": "Database",
+            "manual": "Manual",
+        }[self.source]
+
+    def to_parameter_table(self) -> pd.DataFrame:
+        """Build a display-ready parameter summary table with ±1σ uncertainties."""
+        source_label = self.source_label
         rows = [
             {
                 "Parameter": "E_corr",
@@ -568,6 +572,48 @@ class GalvanicViewPayload:
     galvanic_depth_figure: go.Figure
     galvanic_risk_figure: go.Figure
 
+    @property
+    def electrochemical_parameter_table(self) -> pd.DataFrame:
+        """Build a summary table of Anode (Active) & Cathode (Noble) 4 parameters plus Mixed (E_galv, i_galv)."""
+        if self.primary_resolved.metal == self.active_metal:
+            active_resolved = self.primary_resolved
+            noble_resolved = self.secondary_resolved
+        else:
+            active_resolved = self.secondary_resolved
+            noble_resolved = self.primary_resolved
+
+        active_params = self.coupling_result.active_parameters
+        noble_params = self.coupling_result.noble_parameters
+
+        return pd.DataFrame(
+            [
+                {
+                    "Role": f"Anode (Active): {self.active_metal}",
+                    "E_corr / E_galv (V vs. SHE)": round(float(active_params.Ecorr_V_SHE), 4),
+                    "i_corr / i_galv (µA/cm²)": float(active_params.icorr_uA_cm2),
+                    "β_a (mV/dec)": round(float(active_params.beta_a_mV_dec), 2),
+                    "β_c (mV/dec)": round(float(active_params.beta_c_mV_dec), 2),
+                    "Source": active_resolved.source_label,
+                },
+                {
+                    "Role": f"Cathode (Noble): {self.noble_metal}",
+                    "E_corr / E_galv (V vs. SHE)": round(float(noble_params.Ecorr_V_SHE), 4),
+                    "i_corr / i_galv (µA/cm²)": float(noble_params.icorr_uA_cm2),
+                    "β_a (mV/dec)": round(float(noble_params.beta_a_mV_dec), 2),
+                    "β_c (mV/dec)": round(float(noble_params.beta_c_mV_dec), 2),
+                    "Source": noble_resolved.source_label,
+                },
+                {
+                    "Role": f"Mixed (Coupled, A_ratio={self.request.cathode_to_anode_area_ratio:g})",
+                    "E_corr / E_galv (V vs. SHE)": round(float(self.mixed_potential_V_SHE), 4),
+                    "i_corr / i_galv (µA/cm²)": float(self.galvanic_current_density_uA_cm2),
+                    "β_a (mV/dec)": None,
+                    "β_c (mV/dec)": None,
+                    "Source": "Mixed-Potential Solver",
+                },
+            ]
+        )
+
     def to_summary_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable summary of the galvanic coupling analysis."""
         return {
@@ -686,33 +732,8 @@ def build_single_metal_polarization_figure(
     if mc_result is not None and mc_result.polarization_band is not None:
         band = mc_result.polarization_band
         e_band = curve.parameters.Ecorr_V_SHE + band.overpotential_V
-        p05 = np.maximum(band.eta_log10_abs_net_p05, cusp_floor)
         p25 = np.maximum(band.eta_log10_abs_net_p25, cusp_floor)
         p75 = np.maximum(band.eta_log10_abs_net_p75, cusp_floor)
-        p95 = np.maximum(band.eta_log10_abs_net_p95, cusp_floor)
-        fig.add_trace(
-            go.Scatter(
-                x=e_band,
-                y=p95,
-                mode="lines",
-                line={"color": "rgba(31, 119, 180, 0.30)", "width": 0.8},
-                showlegend=False,
-                hoverinfo="skip",
-                name="p95",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=e_band,
-                y=p05,
-                mode="lines",
-                line={"color": "rgba(31, 119, 180, 0.30)", "width": 0.8},
-                fill="tonexty",
-                fillcolor="rgba(31, 119, 180, 0.14)",
-                name="Net |i_net| 90% Band (p05–p95)",
-                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i| (p05): %{y:.2f}<extra></extra>",
-            )
-        )
         fig.add_trace(
             go.Scatter(
                 x=e_band,
@@ -769,34 +790,15 @@ def build_single_metal_polarization_figure(
     )
     x_ecorr = float(curve.parameters.Ecorr_V_SHE)
     y_icorr = float(math.log10(curve.parameters.icorr_uA_cm2))
-    marker_kwargs: dict[str, Any] = {
-        "x": [x_ecorr],
-        "y": [y_icorr],
-        "mode": "markers",
-        "marker": {"color": "#111111", "size": 9, "symbol": "diamond"},
-        "name": f"(E_corr, i_corr) = ({x_ecorr:.3f} V, {curve.parameters.icorr_uA_cm2:.2g} µA/cm²)",
-    }
-    if mc_result is not None and mc_result.polarization_band is not None:
-        band = mc_result.polarization_band
-        marker_kwargs["error_x"] = {
-            "type": "data",
-            "symmetric": False,
-            "array": [max(0.0, float(band.ecorr_p95_V_SHE) - x_ecorr)],
-            "arrayminus": [max(0.0, x_ecorr - float(band.ecorr_p05_V_SHE))],
-            "color": "#111111",
-            "thickness": 1.5,
-            "width": 4,
-        }
-        marker_kwargs["error_y"] = {
-            "type": "data",
-            "symmetric": False,
-            "array": [max(0.0, float(band.log10_icorr_p95) - y_icorr)],
-            "arrayminus": [max(0.0, y_icorr - float(band.log10_icorr_p05))],
-            "color": "#111111",
-            "thickness": 1.5,
-            "width": 4,
-        }
-    fig.add_trace(go.Scatter(**marker_kwargs))
+    fig.add_trace(
+        go.Scatter(
+            x=[x_ecorr],
+            y=[y_icorr],
+            mode="markers",
+            marker={"color": "#111111", "size": 9, "symbol": "diamond"},
+            name=f"(E_corr, i_corr) = ({x_ecorr:.3f} V, {curve.parameters.icorr_uA_cm2:.2g} µA/cm²)",
+        )
+    )
 
     fig.update_layout(
         title=title or f"{metal} Polarization Curve (Tafel Plot)",
@@ -811,34 +813,19 @@ def build_single_metal_polarization_figure(
     return fig
 
 
-def _add_dual_band_traces(
+def _add_50pct_band_trace(
     fig: go.Figure,
     times: np.ndarray,
-    p05: np.ndarray,
     p25: np.ndarray,
     p75: np.ndarray,
-    p95: np.ndarray,
     *,
     label_prefix: str,
-    fillcolor_90: str,
     fillcolor_50: str,
     row: int | None = None,
     col: int | None = None,
 ) -> None:
-    """Add layered 90% (p05-p95) and 50% (p25-p75) uncertainty band traces."""
+    """Add a 50% (p25–p75) interquartile uncertainty band trace."""
     loc_kwargs = {"row": row, "col": col} if row is not None and col is not None else {}
-    fig.add_trace(
-        go.Scatter(
-            x=np.concatenate([times, times[::-1]]),
-            y=np.concatenate([p95, p05[::-1]]),
-            fill="toself",
-            fillcolor=fillcolor_90,
-            line={"width": 0},
-            name=f"{label_prefix} 90% Band (p05–p95)",
-            hoverinfo="skip",
-        ),
-        **loc_kwargs,
-    )
     fig.add_trace(
         go.Scatter(
             x=np.concatenate([times, times[::-1]]),
@@ -853,27 +840,75 @@ def _add_dual_band_traces(
     )
 
 
+def apply_depth_yaxis_scale(
+    fig: go.Figure,
+    scale: Literal["linear", "log"] = "linear",
+    *,
+    log_floor_nm: float = 1e-4,
+) -> go.Figure:
+    """Return a copy of a Corrosion Depth Plotly figure formatted for linear or log Y-axis display."""
+    if scale not in ("linear", "log"):
+        raise ValueError(f"Unsupported depth Y-axis scale {scale!r}. Expected 'linear' or 'log'.")
+    out = go.Figure(fig)
+    if scale == "linear":
+        out.update_yaxes(type="linear", rangemode="tozero")
+        return out
+
+    for trace in out.data:
+        y_vals = getattr(trace, "y", None)
+        if y_vals is None:
+            continue
+        y_arr = np.asarray(y_vals, dtype=float)
+        if np.any(y_arr <= 0.0):
+            trace.y = np.maximum(y_arr, log_floor_nm)
+    out.update_yaxes(type="log", rangemode="normal")
+    return out
+
+
+def _apply_kinetics_panel_layout(
+    fig: go.Figure,
+    *,
+    title_text: str,
+    yaxis_title: str,
+    yaxis: dict[str, Any],
+) -> None:
+    """Apply consistent top-title and top-legend layout for side-by-side Depth/Risk figures."""
+    fig.update_layout(
+        title={
+            "text": title_text,
+            "y": 0.96,
+            "x": 0.0,
+            "xanchor": "left",
+            "yanchor": "top",
+        },
+        xaxis_title="Immersion Time (s)",
+        yaxis_title=yaxis_title,
+        yaxis=yaxis,
+        template="plotly_white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
+        margin={"l": 55, "r": 20, "t": 90, "b": 55},
+        height=380,
+    )
+
+
 def build_single_metal_depth_figure(
     kinetics: TimeResolvedKineticsResult,
     *,
     mc_kinetics: MonteCarloKineticsResult | None = None,
     title: str | None = None,
 ) -> go.Figure:
-    """Build standalone interactive Plotly Corrosion Depth figure with dual 50%/90% bands."""
+    """Build standalone interactive Plotly Corrosion Depth figure with 50% uncertainty band."""
     fig = go.Figure()
     times = kinetics.times_s
     metal = kinetics.metal or "Metal"
 
     if mc_kinetics is not None:
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_kinetics.depth_p05_nm,
             mc_kinetics.depth_p25_nm,
             mc_kinetics.depth_p75_nm,
-            mc_kinetics.depth_p95_nm,
             label_prefix="Depth",
-            fillcolor_90="rgba(31, 119, 180, 0.14)",
             fillcolor_50="rgba(31, 119, 180, 0.28)",
         )
 
@@ -894,15 +929,11 @@ def build_single_metal_depth_figure(
         annotation_text=f"d_crit = {kinetics.d_crit_nm:.2f} nm",
         annotation_position="top left",
     )
-    fig.update_layout(
-        title=title or f"{metal} Corrosion Depth vs. Immersion Time ({kinetics.model})",
-        xaxis_title="Immersion Time (s)",
+    _apply_kinetics_panel_layout(
+        fig,
+        title_text=title or f"{metal} Corrosion Depth vs. Immersion Time ({kinetics.model})",
         yaxis_title="Corrosion Depth (nm)",
         yaxis={"rangemode": "tozero"},
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 75, "b": 55},
-        height=360,
     )
     return fig
 
@@ -913,21 +944,18 @@ def build_single_metal_risk_figure(
     mc_kinetics: MonteCarloKineticsResult | None = None,
     title: str | None = None,
 ) -> go.Figure:
-    """Build standalone interactive Plotly Thickness Loss Risk figure with dual 50%/90% bands."""
+    """Build standalone interactive Plotly Thickness Loss Risk figure with 50% uncertainty band."""
     fig = go.Figure()
     times = kinetics.times_s
     metal = kinetics.metal or "Metal"
 
     if mc_kinetics is not None:
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_kinetics.risk_p05,
             mc_kinetics.risk_p25,
             mc_kinetics.risk_p75,
-            mc_kinetics.risk_p95,
             label_prefix="Risk",
-            fillcolor_90="rgba(217, 95, 2, 0.14)",
             fillcolor_50="rgba(217, 95, 2, 0.28)",
         )
 
@@ -948,15 +976,11 @@ def build_single_metal_risk_figure(
         annotation_text="R(d_crit) = 0.50",
         annotation_position="bottom right",
     )
-    fig.update_layout(
-        title=title or f"{metal} Thickness Loss Risk vs. Immersion Time ({kinetics.model})",
-        xaxis_title="Immersion Time (s)",
+    _apply_kinetics_panel_layout(
+        fig,
+        title_text=title or f"{metal} Thickness Loss Risk vs. Immersion Time ({kinetics.model})",
         yaxis_title="Thickness Loss Risk R(t)",
         yaxis={"range": [0.0, 1.05]},
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 75, "b": 55},
-        height=360,
     )
     return fig
 
@@ -979,28 +1003,22 @@ def build_single_metal_kinetics_figure(
     metal = kinetics.metal or "Metal"
 
     if mc_kinetics is not None:
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_kinetics.depth_p05_nm,
             mc_kinetics.depth_p25_nm,
             mc_kinetics.depth_p75_nm,
-            mc_kinetics.depth_p95_nm,
             label_prefix="Depth",
-            fillcolor_90="rgba(31, 119, 180, 0.14)",
             fillcolor_50="rgba(31, 119, 180, 0.28)",
             row=1,
             col=1,
         )
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_kinetics.risk_p05,
             mc_kinetics.risk_p25,
             mc_kinetics.risk_p75,
-            mc_kinetics.risk_p95,
             label_prefix="Risk",
-            fillcolor_90="rgba(217, 95, 2, 0.14)",
             fillcolor_50="rgba(217, 95, 2, 0.28)",
             row=1,
             col=2,
@@ -1172,21 +1190,18 @@ def build_galvanic_depth_comparison_figure(
     active_metal: str | None = None,
     title: str | None = None,
 ) -> go.Figure:
-    """Build standalone comparative uncoupled vs. coupled Corrosion Depth figure."""
+    """Build standalone comparative uncoupled vs. coupled Corrosion Depth figure with 50% band."""
     metal = active_metal or coupled_kinetics.metal or "Active Metal"
     times = coupled_kinetics.times_s
     fig = go.Figure()
 
     if mc_coupled_kinetics is not None:
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_coupled_kinetics.depth_p05_nm,
             mc_coupled_kinetics.depth_p25_nm,
             mc_coupled_kinetics.depth_p75_nm,
-            mc_coupled_kinetics.depth_p95_nm,
             label_prefix="Coupled Depth",
-            fillcolor_90="rgba(31, 119, 180, 0.14)",
             fillcolor_50="rgba(31, 119, 180, 0.28)",
         )
 
@@ -1217,15 +1232,11 @@ def build_galvanic_depth_comparison_figure(
         annotation_text=f"d_crit = {coupled_kinetics.d_crit_nm:.2f} nm",
         annotation_position="top left",
     )
-    fig.update_layout(
-        title=title or f"{metal} Corrosion Depth: Uncoupled vs. Coupled ({coupled_kinetics.model})",
-        xaxis_title="Immersion Time (s)",
+    _apply_kinetics_panel_layout(
+        fig,
+        title_text=title or f"{metal} Corrosion Depth: Uncoupled vs. Coupled ({coupled_kinetics.model})",
         yaxis_title="Corrosion Depth (nm)",
         yaxis={"rangemode": "tozero"},
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 75, "b": 55},
-        height=360,
     )
     return fig
 
@@ -1238,21 +1249,18 @@ def build_galvanic_risk_comparison_figure(
     active_metal: str | None = None,
     title: str | None = None,
 ) -> go.Figure:
-    """Build standalone comparative uncoupled vs. coupled Thickness Loss Risk figure."""
+    """Build standalone comparative uncoupled vs. coupled Thickness Loss Risk figure with 50% band."""
     metal = active_metal or coupled_kinetics.metal or "Active Metal"
     times = coupled_kinetics.times_s
     fig = go.Figure()
 
     if mc_coupled_kinetics is not None:
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_coupled_kinetics.risk_p05,
             mc_coupled_kinetics.risk_p25,
             mc_coupled_kinetics.risk_p75,
-            mc_coupled_kinetics.risk_p95,
             label_prefix="Coupled Risk",
-            fillcolor_90="rgba(217, 95, 2, 0.14)",
             fillcolor_50="rgba(217, 95, 2, 0.28)",
         )
 
@@ -1283,15 +1291,11 @@ def build_galvanic_risk_comparison_figure(
         annotation_text="R(d_crit) = 0.50",
         annotation_position="bottom right",
     )
-    fig.update_layout(
-        title=title or f"{metal} Thickness Loss Risk: Uncoupled vs. Coupled ({coupled_kinetics.model})",
-        xaxis_title="Immersion Time (s)",
+    _apply_kinetics_panel_layout(
+        fig,
+        title_text=title or f"{metal} Thickness Loss Risk: Uncoupled vs. Coupled ({coupled_kinetics.model})",
         yaxis_title="Thickness Loss Risk R(t)",
         yaxis={"range": [0.0, 1.05]},
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 75, "b": 55},
-        height=360,
     )
     return fig
 
@@ -1319,28 +1323,22 @@ def build_galvanic_kinetics_comparison_figure(
     )
 
     if mc_coupled_kinetics is not None:
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_coupled_kinetics.depth_p05_nm,
             mc_coupled_kinetics.depth_p25_nm,
             mc_coupled_kinetics.depth_p75_nm,
-            mc_coupled_kinetics.depth_p95_nm,
             label_prefix="Coupled Depth",
-            fillcolor_90="rgba(31, 119, 180, 0.14)",
             fillcolor_50="rgba(31, 119, 180, 0.28)",
             row=1,
             col=1,
         )
-        _add_dual_band_traces(
+        _add_50pct_band_trace(
             fig,
             times,
-            mc_coupled_kinetics.risk_p05,
             mc_coupled_kinetics.risk_p25,
             mc_coupled_kinetics.risk_p75,
-            mc_coupled_kinetics.risk_p95,
             label_prefix="Coupled Risk",
-            fillcolor_90="rgba(217, 95, 2, 0.14)",
             fillcolor_50="rgba(217, 95, 2, 0.28)",
             row=1,
             col=2,

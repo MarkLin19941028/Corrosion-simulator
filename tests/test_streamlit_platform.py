@@ -183,10 +183,10 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertTrue(all(math.isfinite(float(v)) for v in net_trace.y))
         pol_names = {t.name for t in payload.polarization_figure.data}
         self.assertIn("Net |i_net| 50% Band (p25–p75)", pol_names)
-        self.assertIn("Net |i_net| 90% Band (p05–p95)", pol_names)
+        self.assertNotIn("Net |i_net| 90% Band (p05–p95)", pol_names)
         marker_trace = [t for t in payload.polarization_figure.data if (t.name or "").startswith("(E_corr, i_corr)")][0]
-        self.assertIsNotNone(marker_trace.error_x.array)
-        self.assertIsNotNone(marker_trace.error_y.array)
+        self.assertIsNone(marker_trace.error_x.array)
+        self.assertIsNone(marker_trace.error_y.array)
 
         self.assertIsInstance(payload.kinetics_risk_figure, go.Figure)
         self.assertGreaterEqual(len(payload.kinetics_risk_figure.data), 2)
@@ -194,6 +194,20 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertIsInstance(payload.risk_figure, go.Figure)
         self.assertEqual(payload.depth_figure.layout.legend.orientation, "h")
         self.assertEqual(payload.risk_figure.layout.legend.orientation, "h")
+        depth_names = {t.name for t in payload.depth_figure.data}
+        risk_names = {t.name for t in payload.risk_figure.data}
+        self.assertIn("Depth 50% Band (p25–p75)", depth_names)
+        self.assertNotIn("Depth 90% Band (p05–p95)", depth_names)
+        self.assertIn("Risk 50% Band (p25–p75)", risk_names)
+        self.assertNotIn("Risk 90% Band (p05–p95)", risk_names)
+
+        from corrosion_simulator.platform_controller import apply_depth_yaxis_scale
+
+        log_fig = apply_depth_yaxis_scale(payload.depth_figure, "log")
+        self.assertEqual(log_fig.layout.yaxis.type, "log")
+        for trace in log_fig.data:
+            if getattr(trace, "y", None) is not None:
+                self.assertTrue(all(float(v) > 0.0 for v in trace.y))
         depth_line = [t for t in payload.depth_figure.data if "Depth (" in (t.name or "")][0]
         self.assertEqual(depth_line.line.color, "#1f77b4")
         self.assertEqual(depth_line.line.dash, "solid")
@@ -336,6 +350,29 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertIsInstance(payload.galvanic_risk_figure, go.Figure)
         self.assertEqual(payload.galvanic_depth_figure.layout.legend.orientation, "h")
         self.assertEqual(payload.galvanic_risk_figure.layout.legend.orientation, "h")
+        galv_depth_names = {t.name for t in payload.galvanic_depth_figure.data}
+        galv_risk_names = {t.name for t in payload.galvanic_risk_figure.data}
+        self.assertIn("Coupled Depth 50% Band (p25–p75)", galv_depth_names)
+        self.assertNotIn("Coupled Depth 90% Band (p05–p95)", galv_depth_names)
+        self.assertIn("Coupled Risk 50% Band (p25–p75)", galv_risk_names)
+        self.assertNotIn("Coupled Risk 90% Band (p05–p95)", galv_risk_names)
+
+        # Galvanic electrochemical parameter table contains Anode, Cathode (4 params) + Mixed (E_galv, i_galv)
+        galv_table = payload.electrochemical_parameter_table
+        self.assertEqual(len(galv_table), 3)
+        self.assertTrue(str(galv_table.iloc[0]["Role"]).startswith("Anode (Active):"))
+        self.assertTrue(str(galv_table.iloc[1]["Role"]).startswith("Cathode (Noble):"))
+        self.assertTrue(str(galv_table.iloc[2]["Role"]).startswith("Mixed (Coupled"))
+        self.assertAlmostEqual(
+            float(galv_table.iloc[2]["E_corr / E_galv (V vs. SHE)"]),
+            round(payload.mixed_potential_V_SHE, 4),
+            places=4,
+        )
+        self.assertAlmostEqual(
+            float(galv_table.iloc[2]["i_corr / i_galv (µA/cm²)"]),
+            payload.galvanic_current_density_uA_cm2,
+            places=6,
+        )
         galv_coupled_depth = [t for t in payload.galvanic_depth_figure.data if (t.name or "").endswith("Coupled Depth")][0]
         self.assertEqual(galv_coupled_depth.line.color, "#1f77b4")
         self.assertEqual(galv_coupled_depth.line.dash, "solid")

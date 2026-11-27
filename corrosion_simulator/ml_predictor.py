@@ -1594,6 +1594,48 @@ def _summarize_samples(samples: np.ndarray) -> dict[str, float]:
     }
 
 
+DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2: Final[float] = 1e5
+DEFAULT_ECORR_CORRELATION: Final[float] = 0.6
+
+
+def sample_lognormal_tafel_slope(
+    mean_mV_dec: float,
+    std_mV_dec: float,
+    size: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Sample strictly positive Tafel slopes (mV/dec) via log-normal distribution with physical bounds."""
+    center = float(np.clip(mean_mV_dec, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
+    sigma = max(float(std_mV_dec), 0.0)
+    if sigma == 0.0:
+        return np.full(size, center, dtype=float)
+    sigma_ln = math.sqrt(math.log1p((sigma / center) ** 2))
+    draws = rng.lognormal(mean=math.log(center), sigma=sigma_ln, size=size)
+    return np.clip(draws, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC)
+
+
+def sample_clipped_icorr(
+    mean_log10: float,
+    std_log10: float,
+    size: int,
+    rng: np.random.Generator,
+    *,
+    limiting_current_uA_cm2: float = DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample (log10_icorr, icorr_uA_cm2) with log-space clipping and mass-transport limit i_lim."""
+    i_lim = float(limiting_current_uA_cm2)
+    if not math.isfinite(i_lim) or i_lim <= 0.0:
+        raise ValueError(
+            f"limiting_current_uA_cm2 must be strictly positive and finite, got {limiting_current_uA_cm2!r}"
+        )
+    log_i = np.clip(
+        rng.normal(mean_log10, max(float(std_log10), 0.0), size=size),
+        -6.0,
+        math.log10(i_lim),
+    )
+    return log_i, np.minimum(np.power(10.0, log_i), i_lim)
+
+
 def propagate_uncertainty_monte_carlo(
     prediction: MLParameterPrediction,
     *,
@@ -1605,6 +1647,7 @@ def propagate_uncertainty_monte_carlo(
     overpotential_max_V: float = 0.25,
     num_potential_points: int = 201,
     potentials_V_SHE: np.ndarray | None = None,
+    limiting_current_uA_cm2: float = DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
 ) -> MonteCarloPropagationResult:
     """Propagate ML parameter uncertainties via log-space i_corr and physics-clipped Monte Carlo (ADR-0003)."""
     if n_draws < 1:
@@ -1612,37 +1655,26 @@ def propagate_uncertainty_monte_carlo(
 
     rng = np.random.default_rng(seed)
 
-    # Sample E_corr, beta_a, beta_c in linear space with thermodynamic/physical clipping
+    # Sample E_corr in linear space and Tafel slopes via log-normal distribution with physical bounds
     ecorr_draws = np.clip(
         rng.normal(prediction.Ecorr_V_SHE.mean, max(prediction.Ecorr_V_SHE.std, 0.0), size=n_draws),
         ECORR_THERMO_MIN_V_SHE,
         ECORR_THERMO_MAX_V_SHE,
     )
-    beta_a_draws = np.clip(
-        rng.normal(
-            prediction.beta_a_mV_dec.mean, max(prediction.beta_a_mV_dec.std, 0.0), size=n_draws
-        ),
-        TAFEL_SLOPE_MIN_MV_DEC,
-        TAFEL_SLOPE_MAX_MV_DEC,
+    beta_a_draws = sample_lognormal_tafel_slope(
+        prediction.beta_a_mV_dec.mean, prediction.beta_a_mV_dec.std, n_draws, rng
     )
-    beta_c_draws = np.clip(
-        rng.normal(
-            prediction.beta_c_mV_dec.mean, max(prediction.beta_c_mV_dec.std, 0.0), size=n_draws
-        ),
-        TAFEL_SLOPE_MIN_MV_DEC,
-        TAFEL_SLOPE_MAX_MV_DEC,
+    beta_c_draws = sample_lognormal_tafel_slope(
+        prediction.beta_c_mV_dec.mean, prediction.beta_c_mV_dec.std, n_draws, rng
     )
-    # Sample log10(i_corr) in log-space before exponentiating -> strictly positive i_corr
-    log_i_draws = np.clip(
-        rng.normal(
-            prediction.log10_icorr_uA_cm2.mean,
-            max(prediction.log10_icorr_uA_cm2.std, 0.0),
-            size=n_draws,
-        ),
-        -6.0,
-        6.0,
+    # Sample log10(i_corr) in log-space before exponentiating, capped at mass-transport limit i_lim
+    log_i_draws, icorr_draws = sample_clipped_icorr(
+        prediction.log10_icorr_uA_cm2.mean,
+        prediction.log10_icorr_uA_cm2.std,
+        n_draws,
+        rng,
+        limiting_current_uA_cm2=limiting_current_uA_cm2,
     )
-    icorr_draws = np.power(10.0, log_i_draws)
 
     # Faraday's law conversion using exact Phase 1 unit-current scaling factor
     unit_faraday = calculate_faraday_corrosion_rate(

@@ -211,10 +211,12 @@ class TestGalvanicDatabaseAndMonteCarlo(unittest.TestCase):
         self.assertEqual(mc.n_draws, 200)
         self.assertEqual(len(mc.mixed_potential_samples_V_SHE), 200)
 
-        # Physical bounds on every draw
+        # Physical bounds on every draw (well-separated E_corr -> no polarity flips, i_galv <= i_lim)
         self.assertTrue(np.all(mc.galvanic_current_samples_uA_cm2 > 0.0))
+        self.assertTrue(np.all(mc.galvanic_current_samples_uA_cm2 <= 1e5))
         self.assertTrue(np.all(mc.coupled_cr_nm_min_samples >= 0.0))
         self.assertTrue(np.all(mc.acceleration_factor_samples >= 1.0))
+        self.assertAlmostEqual(mc.polarity_flip_fraction, 0.0)
 
         # Summary statistics present and monotonically ordered p05 <= p50 <= p95 with positive spread
         for summary in (
@@ -228,7 +230,8 @@ class TestGalvanicDatabaseAndMonteCarlo(unittest.TestCase):
             self.assertLessEqual(summary["p50"], summary["p95"])
             self.assertGreater(summary["std"], 0.0)
 
-        # Overlapping E_corr distributions must still guarantee Acceleration Factor >= 1.0 on every draw
+        # Overlapping E_corr distributions: fixed-anode tracking allows AF < 1.0 (cathodic protection)
+        # on polarity-flipped draws and reports polarity_flip_fraction > 0
         close_a = MLParameterPrediction(
             metal="Co",
             Ecorr_V_SHE=ParameterEstimate(mean=0.10, std=0.08),
@@ -250,7 +253,21 @@ class TestGalvanicDatabaseAndMonteCarlo(unittest.TestCase):
             applicability=ad_dummy,
         )
         mc_overlap = propagate_galvanic_uncertainty_monte_carlo(close_a, close_b, n_draws=200, seed=99)
-        self.assertTrue(np.all(mc_overlap.acceleration_factor_samples >= 1.0))
+        self.assertGreater(mc_overlap.polarity_flip_fraction, 0.0)
+        self.assertTrue(np.any(mc_overlap.acceleration_factor_samples < 1.0))
+        self.assertTrue(np.all(mc_overlap.galvanic_current_samples_uA_cm2 > 0.0))
+
+        # Shared-solution E_corr correlation reduces galvanic current spread relative to uncorrelated draws
+        mc_uncorr = propagate_galvanic_uncertainty_monte_carlo(
+            close_a, close_b, n_draws=300, seed=99, ecorr_correlation=0.0
+        )
+        mc_corr = propagate_galvanic_uncertainty_monte_carlo(
+            close_a, close_b, n_draws=300, seed=99, ecorr_correlation=0.7
+        )
+        self.assertLess(
+            mc_corr.galvanic_current_summary["std"],
+            mc_uncorr.galvanic_current_summary["std"],
+        )
 
 
 class TestGalvanicTafelOverlayPlot(unittest.TestCase):
