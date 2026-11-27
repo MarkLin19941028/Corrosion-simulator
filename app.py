@@ -13,28 +13,26 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from corrosion_simulator.build_artifacts import (
-    build_processed_artifacts,
-    check_artifacts_freshness,
-)
+from corrosion_simulator.artifact_repository import ArtifactRepository
 from corrosion_simulator.lab_calibration import CALIBRATION_MODE_LABELS, ResidualBreakdown
 from corrosion_simulator.ml_predictor import MODEL_FAMILY_LABELS, ApplicabilityDomainResult
-from corrosion_simulator.paths import (
-    iter_raw_csv_files,
-    resolve_data_dirs,
-)
+from corrosion_simulator.paths import resolve_data_dirs
 from corrosion_simulator.platform_controller import (
     CALIBRATION_MODE_DEFAULT_MODELS,
     NON_AQUEOUS_WARNING_PREFIX,
     CorrosionPlatformController,
-    GalvanicViewPayload,
+    GalvanicAnalysisResult,
     ManualElectrochemicalInput,
     SimulationRequest,
-    SingleMetalViewPayload,
-    apply_depth_yaxis_scale,
+    SingleMetalAnalysisResult,
     build_non_aqueous_physics_warning,
     format_active_model_label,
     resolve_active_model_family,
+)
+from corrosion_simulator.plotly_charts import (
+    apply_depth_yaxis_scale,
+    build_galvanic_figures,
+    build_single_metal_figures,
 )
 from corrosion_simulator.reporting import (
     CleaningRecipeSpec,
@@ -96,36 +94,32 @@ def get_controller() -> CorrosionPlatformController:
     raw_path, proc_path, lab_path = resolve_data_dirs()
     data_dir_key = (str(raw_path), str(proc_path), str(lab_path))
     if not st.session_state.get("_controller_verified", False):
-        status, _ = check_artifacts_freshness(raw_path, proc_path)
-        if status in ("stale", "missing") and iter_raw_csv_files(raw_path):
-            _load_cached_controller.clear(data_dir_key)
-            progress_slot = st.empty()
-            progress_bar = progress_slot.progress(
-                0.0,
-                text="Detected updated CSV data in data/raw/ — preparing full ML model build...",
+        progress_slot = st.empty()
+        progress_bar = None
+
+        def _on_progress(step: int, total: int, message: str) -> None:
+            nonlocal progress_bar
+            if progress_bar is None:
+                progress_bar = progress_slot.progress(
+                    0.0,
+                    text="Detected updated CSV data in data/raw/ — preparing full ML model build...",
+                )
+            fraction = min(max(step / max(total, 1), 0.0), 1.0)
+            progress_bar.progress(fraction, text=message)
+
+        try:
+            rebuild_banner = ArtifactRepository.ensure_fresh_on_disk(
+                raw_dir=raw_path,
+                processed_dir=proc_path,
+                lab_dir=lab_path,
+                rebuild_models=("all",),
+                progress_callback=_on_progress,
+                before_rebuild=lambda: _load_cached_controller.clear(data_dir_key),
             )
-
-            def _on_progress(step: int, total: int, message: str) -> None:
-                fraction = min(max(step / max(total, 1), 0.0), 1.0)
-                progress_bar.progress(fraction, text=message)
-
-            try:
-                summary = build_processed_artifacts(
-                    raw_dir=raw_path,
-                    output_dir=proc_path,
-                    models=["all"],
-                    export_csv=False,
-                    progress_callback=_on_progress,
-                )
-                st.session_state["_rebuild_banner"] = (
-                    f"Updated CSV data loaded: harmonized {summary.n_records} records across "
-                    f"{summary.n_materials} materials and prebuilt all {len(summary.trained_models)} ML models."
-                )
-            except OSError:
-                # Read-only external directory; _load_cached_controller() will fall back to in-memory training
-                pass
-            finally:
-                progress_slot.empty()
+            if rebuild_banner:
+                st.session_state["_rebuild_banner"] = rebuild_banner
+        finally:
+            progress_slot.empty()
         st.session_state["_controller_verified"] = True
 
     return _load_cached_controller(data_dir_key)
@@ -271,22 +265,23 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     if rebuild_banner:
         st.sidebar.success(rebuild_banner)
 
-    if controller.artifact_status == "seed" and controller.artifact_warning:
-        st.sidebar.error(controller.artifact_warning)
-    elif controller.artifact_status in ("stale", "live_fallback") and controller.artifact_warning:
-        st.sidebar.warning(controller.artifact_warning)
-    elif controller.artifact_status == "rebuilt" and controller.artifact_warning and not rebuild_banner:
-        st.sidebar.success(controller.artifact_warning)
-    elif controller.artifact_warning:
-        st.sidebar.info(controller.artifact_warning)
+    repo = controller.repository
+    if repo.artifact_status == "seed" and repo.artifact_warning:
+        st.sidebar.error(repo.artifact_warning)
+    elif repo.artifact_status in ("stale", "live_fallback") and repo.artifact_warning:
+        st.sidebar.warning(repo.artifact_warning)
+    elif repo.artifact_status == "rebuilt" and repo.artifact_warning and not rebuild_banner:
+        st.sidebar.success(repo.artifact_warning)
+    elif repo.artifact_warning:
+        st.sidebar.info(repo.artifact_warning)
 
     with st.sidebar.expander("External Data & Model Cache", expanded=False):
         n_records = len(controller.database.electrochemical_database)
         st.markdown("**Literature Prior (`data/raw/`)**")
         st.caption(
-            f"**Status:** `{controller.artifact_status}`  \n"
+            f"**Status:** `{repo.artifact_status}`  \n"
             f"**Records:** `{n_records}` across `{len(all_metals)}` materials  \n"
-            f"**Raw CSV Dir:** `{controller.raw_dir or 'N/A'}`"
+            f"**Raw CSV Dir:** `{repo.raw_dir or 'N/A'}`"
         )
         lab_project_names: list[str] = options.get("lab_projects", [])
         st.markdown("**Lab Data (`data/lab/`)**")
@@ -297,18 +292,18 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
                 index=0,
                 key="sidebar_active_lab_project",
             )
-            active_ds = controller.get_lab_project(selected_lab)
+            active_ds = repo.get_lab_project(selected_lab)
             active_n = active_ds.n_records if active_ds is not None else 0
             st.caption(
-                f"**Lab Status:** `{controller.lab_status}`  \n"
+                f"**Lab Status:** `{repo.lab_status}`  \n"
                 f"**Active Project:** `{selected_lab}` (`{active_n}` records; `{len(lab_project_names)}` project(s))  \n"
-                f"**Lab CSV Dir:** `{controller.lab_dir or 'N/A'}`"
+                f"**Lab CSV Dir:** `{repo.lab_dir or 'N/A'}`"
             )
         else:
             st.caption(
-                f"**Lab Status:** `{controller.lab_status}` (`0` projects)  \n"
+                f"**Lab Status:** `{repo.lab_status}` (`0` projects)  \n"
                 f"**Active Project:** `None` (`0` records)  \n"
-                f"**Lab CSV Dir:** `{controller.lab_dir or 'N/A'}`"
+                f"**Lab CSV Dir:** `{repo.lab_dir or 'N/A'}`"
             )
         if st.button("🔄 Reload External Data", width="stretch"):
             progress_slot = st.empty()
@@ -321,7 +316,7 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
                 fraction = min(max(step / max(total, 1), 0.0), 1.0)
                 progress_bar.progress(fraction, text=message)
 
-            reload_summary = controller.reload_external_data(
+            reload_summary = repo.reload_external_data(
                 progress_callback=_on_reload_progress
             )
             progress_slot.empty()
@@ -657,7 +652,7 @@ def _render_depth_and_risk_charts(
         st.plotly_chart(risk_figure, width="stretch")
 
 
-def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
+def _render_single_metal_view(payload: SingleMetalAnalysisResult) -> None:
     st.subheader(f"Single Metal Analysis — {payload.request.primary_metal}")
     _render_non_aqueous_warning_banner(payload.request)
     if payload.request.parameter_source == "ml":
@@ -741,15 +736,16 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
             [(payload.request.primary_metal, payload.resolved_parameters.residual_breakdown)]
         )
 
-    st.plotly_chart(payload.polarization_figure, width="stretch")
+    figs = build_single_metal_figures(payload)
+    st.plotly_chart(figs.polarization_figure, width="stretch")
     _render_depth_and_risk_charts(
-        payload.depth_figure,
-        payload.risk_figure,
+        figs.depth_figure,
+        figs.risk_figure,
         scale_key="single_depth_yaxis_scale",
     )
 
 
-def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
+def _render_galvanic_view(payload: GalvanicAnalysisResult | None) -> None:
     if payload is None:
         st.info("Select a Secondary Metal in the sidebar to run Bimetallic Galvanic Analysis.")
         return
@@ -881,10 +877,11 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
             )
         _render_residual_breakdown_section(galv_breakdowns)
 
-    st.plotly_chart(payload.galvanic_polarization_figure, width="stretch")
+    figs = build_galvanic_figures(payload)
+    st.plotly_chart(figs.galvanic_polarization_figure, width="stretch")
     _render_depth_and_risk_charts(
-        payload.galvanic_depth_figure,
-        payload.galvanic_risk_figure,
+        figs.galvanic_depth_figure,
+        figs.galvanic_risk_figure,
         scale_key="galvanic_depth_yaxis_scale",
     )
 
@@ -1120,8 +1117,8 @@ def _render_recipe_comparison_view(
 
 
 def _render_report_export_view(
-    single_payload: SingleMetalViewPayload,
-    galvanic_payload: GalvanicViewPayload | None,
+    single_payload: SingleMetalAnalysisResult,
+    galvanic_payload: GalvanicAnalysisResult | None,
     comparison_payload: RecipeComparisonPayload | None,
 ) -> None:
     st.subheader("Multi-Format Technical Report Export")

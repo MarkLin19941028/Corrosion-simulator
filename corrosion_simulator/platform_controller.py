@@ -1,4 +1,4 @@
-"""Application controller and interactive Plotly figure builders for the Corrosion Simulator UI."""
+"""Simulation orchestrator for Single Metal and Galvanic Corrosion Analysis."""
 
 from __future__ import annotations
 
@@ -6,14 +6,16 @@ from collections.abc import Callable, Sequence
 import math
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-import time
 from typing import Any, Final, Literal
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 
+from corrosion_simulator.artifact_repository import (
+    ArtifactRepository,
+    ArtifactStatus,
+    LabProjectDataset,
+)
 from corrosion_simulator.database import (
     CORE_METALS,
     DEFAULT_NON_AQUEOUS_WATER_WT_PCT,
@@ -45,17 +47,9 @@ from corrosion_simulator.kinetics import (
     propagate_kinetics_uncertainty_monte_carlo,
     simulate_time_resolved_kinetics,
 )
-from corrosion_simulator.lab_data import (
-    LabProjectDataset,
-    compute_lab_project_fingerprint,
-    discover_and_load_lab_projects,
-    load_lab_project,
-)
 from corrosion_simulator.lab_calibration import (
     CALIBRATION_MODES,
     CalibrationMode,
-    InsufficientLabSamplesError,
-    LabCalibratedPredictor,
     ResidualBreakdown,
 )
 from corrosion_simulator.ml_predictor import (
@@ -71,12 +65,6 @@ from corrosion_simulator.ml_predictor import (
     PredictedModelFamily,
     propagate_uncertainty_monte_carlo,
 )
-from corrosion_simulator.paths import (
-    discover_lab_projects,
-    iter_raw_csv_files,
-    resolve_data_dirs,
-    resolve_raw_and_processed_dirs,
-)
 from corrosion_simulator.physics import (
     FaradayCorrosionResult,
     GalvanicDrivingForceResult,
@@ -90,22 +78,6 @@ from corrosion_simulator.physics import (
 
 ParameterSource = Literal["database", "ml", "manual"]
 KineticsSelection = Literal["auto", "linear", "passivation", "power_law"]
-ArtifactStatus = Literal["fresh", "rebuilt", "stale", "live_fallback", "live", "seed"]
-LabReloadStatus = Literal["none", "fresh", "reloaded"]
-
-
-@dataclass(frozen=True)
-class ExternalDataReloadSummary:
-    """Structured result of dual-fingerprint Reload External Data."""
-
-    raw_rebuilt: bool
-    raw_status: ArtifactStatus
-    lab_status: LabReloadStatus
-    lab_projects: tuple[str, ...]
-    lab_added_or_updated: tuple[str, ...]
-    lab_removed: tuple[str, ...]
-    lab_cache_invalidated: bool
-    elapsed_s: float
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 _CONFIDENCE_BY_RANK = {0: "Low", 1: "Medium", 2: "High"}
@@ -451,8 +423,8 @@ def _serialize_ad_summary(ad: ApplicabilityDomainResult | None) -> dict[str, Any
 
 
 @dataclass
-class SingleMetalViewPayload:
-    """Complete view payload for the Single Metal Analysis tab."""
+class SingleMetalAnalysisResult:
+    """Pure, Plotly-free simulation result for Single Metal Analysis."""
 
     request: SimulationRequest
     resolved_parameters: ResolvedMetalParameters
@@ -471,10 +443,6 @@ class SingleMetalViewPayload:
     confidence_tier: str
     warnings: list[str]
     experimental_recommendations: list[str]
-    polarization_figure: go.Figure
-    kinetics_risk_figure: go.Figure
-    depth_figure: go.Figure
-    risk_figure: go.Figure
 
     def to_summary_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable summary of the single-metal analysis."""
@@ -536,8 +504,8 @@ class SingleMetalViewPayload:
 
 
 @dataclass
-class GalvanicViewPayload:
-    """Complete view payload for the Galvanic Analysis tab."""
+class GalvanicAnalysisResult:
+    """Pure, Plotly-free simulation result for Bimetallic Galvanic Analysis."""
 
     request: SimulationRequest
     primary_resolved: ResolvedMetalParameters
@@ -567,10 +535,6 @@ class GalvanicViewPayload:
     confidence_tier: str
     warnings: list[str]
     experimental_recommendations: list[str]
-    galvanic_polarization_figure: go.Figure
-    comparative_kinetics_figure: go.Figure
-    galvanic_depth_figure: go.Figure
-    galvanic_risk_figure: go.Figure
 
     @property
     def electrochemical_parameter_table(self) -> pd.DataFrame:
@@ -708,730 +672,12 @@ def _build_time_grid(immersion_time_s: float, num_points: int = 121) -> np.ndarr
     return np.linspace(0.0, float(immersion_time_s), num_points)
 
 
-def build_single_metal_polarization_figure(
-    curve: PolarizationCurve,
-    *,
-    mc_result: MonteCarloPropagationResult | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build an interactive Plotly Tafel Polarization Curve figure with optional 5th–95th %ile band."""
-    fig = go.Figure()
-    metal = curve.parameters.metal or "Metal"
-
-    # Fill the exact E == E_corr NaN point with a finite cusp floor so the V-notch renders continuously
-    net_log10 = np.array(curve.log10_abs_net_uA_cm2, dtype=float, copy=True)
-    finite_mask = np.isfinite(net_log10)
-    if np.any(finite_mask):
-        cusp_floor = float(np.min(net_log10[finite_mask])) - 0.75
-        net_log10[~finite_mask] = cusp_floor
-        y_min = cusp_floor - 0.4
-        y_max = float(np.max(net_log10[finite_mask])) + 1.2
-    else:
-        y_min, y_max = -2.0, 4.0
-
-    if mc_result is not None and mc_result.polarization_band is not None:
-        band = mc_result.polarization_band
-        e_band = curve.parameters.Ecorr_V_SHE + band.overpotential_V
-        p25 = np.maximum(band.eta_log10_abs_net_p25, cusp_floor)
-        p75 = np.maximum(band.eta_log10_abs_net_p75, cusp_floor)
-        fig.add_trace(
-            go.Scatter(
-                x=e_band,
-                y=p75,
-                mode="lines",
-                line={"color": "rgba(31, 119, 180, 0.45)", "width": 0.9},
-                showlegend=False,
-                hoverinfo="skip",
-                name="p75",
-            )
-        )
-        fig.add_trace(
-            go.Scatter(
-                x=e_band,
-                y=p25,
-                mode="lines",
-                line={"color": "rgba(31, 119, 180, 0.45)", "width": 0.9},
-                fill="tonexty",
-                fillcolor="rgba(31, 119, 180, 0.28)",
-                name="Net |i_net| 50% Band (p25–p75)",
-                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i| (p25): %{y:.2f}<extra></extra>",
-            )
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=curve.potential_V_SHE,
-            y=curve.log10_anodic_uA_cm2,
-            mode="lines",
-            line={"color": "#d62728", "dash": "dash", "width": 1.6},
-            name="Anodic Branch (i_a)",
-            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10(i_a): %{y:.2f}<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=curve.potential_V_SHE,
-            y=curve.log10_cathodic_uA_cm2,
-            mode="lines",
-            line={"color": "#2ca02c", "dash": "dot", "width": 1.6},
-            name="Cathodic Branch (i_c)",
-            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10(i_c): %{y:.2f}<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=curve.potential_V_SHE,
-            y=net_log10,
-            mode="lines",
-            line={"color": "#1f77b4", "width": 2.6},
-            name=f"{metal} Net |i_net|",
-            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i_net|: %{y:.2f}<extra></extra>",
-        )
-    )
-    x_ecorr = float(curve.parameters.Ecorr_V_SHE)
-    y_icorr = float(math.log10(curve.parameters.icorr_uA_cm2))
-    fig.add_trace(
-        go.Scatter(
-            x=[x_ecorr],
-            y=[y_icorr],
-            mode="markers",
-            marker={"color": "#111111", "size": 9, "symbol": "diamond"},
-            name=f"(E_corr, i_corr) = ({x_ecorr:.3f} V, {curve.parameters.icorr_uA_cm2:.2g} µA/cm²)",
-        )
-    )
-
-    fig.update_layout(
-        title=title or f"{metal} Polarization Curve (Tafel Plot)",
-        xaxis_title="Potential E (V vs. SHE)",
-        yaxis_title="log10(|i| / µA·cm⁻²)",
-        yaxis={"range": [y_min, y_max]},
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 70, "b": 55},
-        height=440,
-    )
-    return fig
-
-
-def _add_50pct_band_trace(
-    fig: go.Figure,
-    times: np.ndarray,
-    p25: np.ndarray,
-    p75: np.ndarray,
-    *,
-    label_prefix: str,
-    fillcolor_50: str,
-    row: int | None = None,
-    col: int | None = None,
-) -> None:
-    """Add a 50% (p25–p75) interquartile uncertainty band trace."""
-    loc_kwargs = {"row": row, "col": col} if row is not None and col is not None else {}
-    fig.add_trace(
-        go.Scatter(
-            x=np.concatenate([times, times[::-1]]),
-            y=np.concatenate([p75, p25[::-1]]),
-            fill="toself",
-            fillcolor=fillcolor_50,
-            line={"width": 0},
-            name=f"{label_prefix} 50% Band (p25–p75)",
-            hoverinfo="skip",
-        ),
-        **loc_kwargs,
-    )
-
-
-def apply_depth_yaxis_scale(
-    fig: go.Figure,
-    scale: Literal["linear", "log"] = "linear",
-    *,
-    log_floor_nm: float = 1e-4,
-) -> go.Figure:
-    """Return a copy of a Corrosion Depth Plotly figure formatted for linear or log Y-axis display."""
-    if scale not in ("linear", "log"):
-        raise ValueError(f"Unsupported depth Y-axis scale {scale!r}. Expected 'linear' or 'log'.")
-    out = go.Figure(fig)
-    if scale == "linear":
-        out.update_yaxes(type="linear", rangemode="tozero")
-        return out
-
-    for trace in out.data:
-        y_vals = getattr(trace, "y", None)
-        if y_vals is None:
-            continue
-        y_arr = np.asarray(y_vals, dtype=float)
-        if np.any(y_arr <= 0.0):
-            trace.y = np.maximum(y_arr, log_floor_nm)
-    out.update_yaxes(type="log", rangemode="normal")
-    return out
-
-
-def _apply_kinetics_panel_layout(
-    fig: go.Figure,
-    *,
-    title_text: str,
-    yaxis_title: str,
-    yaxis: dict[str, Any],
-) -> None:
-    """Apply consistent top-title and top-legend layout for side-by-side Depth/Risk figures."""
-    fig.update_layout(
-        title={
-            "text": title_text,
-            "y": 0.96,
-            "x": 0.0,
-            "xanchor": "left",
-            "yanchor": "top",
-        },
-        xaxis_title="Immersion Time (s)",
-        yaxis_title=yaxis_title,
-        yaxis=yaxis,
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 55, "r": 20, "t": 90, "b": 55},
-        height=380,
-    )
-
-
-def build_single_metal_depth_figure(
-    kinetics: TimeResolvedKineticsResult,
-    *,
-    mc_kinetics: MonteCarloKineticsResult | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build standalone interactive Plotly Corrosion Depth figure with 50% uncertainty band."""
-    fig = go.Figure()
-    times = kinetics.times_s
-    metal = kinetics.metal or "Metal"
-
-    if mc_kinetics is not None:
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_kinetics.depth_p25_nm,
-            mc_kinetics.depth_p75_nm,
-            label_prefix="Depth",
-            fillcolor_50="rgba(31, 119, 180, 0.28)",
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=kinetics.depth_nm,
-            mode="lines",
-            line={"color": "#1f77b4", "dash": "solid", "width": 2.6},
-            name=f"{metal} Depth ({kinetics.model})",
-            hovertemplate="t: %{x:.1f} s<br>Depth: %{y:.3f} nm<extra></extra>",
-        )
-    )
-    fig.add_hline(
-        y=kinetics.d_crit_nm,
-        line_dash="dash",
-        line_color="#475569",
-        annotation_text=f"d_crit = {kinetics.d_crit_nm:.2f} nm",
-        annotation_position="top left",
-    )
-    _apply_kinetics_panel_layout(
-        fig,
-        title_text=title or f"{metal} Corrosion Depth vs. Immersion Time ({kinetics.model})",
-        yaxis_title="Corrosion Depth (nm)",
-        yaxis={"rangemode": "tozero"},
-    )
-    return fig
-
-
-def build_single_metal_risk_figure(
-    kinetics: TimeResolvedKineticsResult,
-    *,
-    mc_kinetics: MonteCarloKineticsResult | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build standalone interactive Plotly Thickness Loss Risk figure with 50% uncertainty band."""
-    fig = go.Figure()
-    times = kinetics.times_s
-    metal = kinetics.metal or "Metal"
-
-    if mc_kinetics is not None:
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_kinetics.risk_p25,
-            mc_kinetics.risk_p75,
-            label_prefix="Risk",
-            fillcolor_50="rgba(217, 95, 2, 0.28)",
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=kinetics.risk_score,
-            mode="lines",
-            line={"color": "#d95f02", "dash": "dashdot", "width": 2.6},
-            name="Thickness Loss Risk R(t)",
-            hovertemplate="t: %{x:.1f} s<br>Risk R(t): %{y:.3f}<extra></extra>",
-        )
-    )
-    fig.add_hline(
-        y=0.5,
-        line_dash="dot",
-        line_color="#94a3b8",
-        annotation_text="R(d_crit) = 0.50",
-        annotation_position="bottom right",
-    )
-    _apply_kinetics_panel_layout(
-        fig,
-        title_text=title or f"{metal} Thickness Loss Risk vs. Immersion Time ({kinetics.model})",
-        yaxis_title="Thickness Loss Risk R(t)",
-        yaxis={"range": [0.0, 1.05]},
-    )
-    return fig
-
-
-def build_single_metal_kinetics_figure(
-    kinetics: TimeResolvedKineticsResult,
-    *,
-    mc_kinetics: MonteCarloKineticsResult | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build dual-panel interactive Plotly Corrosion Depth and Thickness Loss Risk trajectories."""
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=("Corrosion Depth vs. Immersion Time", "Thickness Loss Risk vs. Immersion Time"),
-        horizontal_spacing=0.12,
-    )
-
-    times = kinetics.times_s
-    metal = kinetics.metal or "Metal"
-
-    if mc_kinetics is not None:
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_kinetics.depth_p25_nm,
-            mc_kinetics.depth_p75_nm,
-            label_prefix="Depth",
-            fillcolor_50="rgba(31, 119, 180, 0.28)",
-            row=1,
-            col=1,
-        )
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_kinetics.risk_p25,
-            mc_kinetics.risk_p75,
-            label_prefix="Risk",
-            fillcolor_50="rgba(217, 95, 2, 0.28)",
-            row=1,
-            col=2,
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=kinetics.depth_nm,
-            mode="lines",
-            line={"color": "#1f77b4", "dash": "solid", "width": 2.6},
-            name=f"{metal} Depth ({kinetics.model})",
-            hovertemplate="t: %{x:.1f} s<br>Depth: %{y:.3f} nm<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_hline(
-        y=kinetics.d_crit_nm,
-        line_dash="dash",
-        line_color="#475569",
-        annotation_text=f"d_crit = {kinetics.d_crit_nm:.2f} nm",
-        annotation_position="top left",
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=kinetics.risk_score,
-            mode="lines",
-            line={"color": "#d95f02", "dash": "dashdot", "width": 2.6},
-            name="Thickness Loss Risk R(t)",
-            hovertemplate="t: %{x:.1f} s<br>Risk R(t): %{y:.3f}<extra></extra>",
-        ),
-        row=1,
-        col=2,
-    )
-    fig.add_hline(
-        y=0.5,
-        line_dash="dot",
-        line_color="#94a3b8",
-        annotation_text="R(d_crit) = 0.50",
-        annotation_position="bottom right",
-        row=1,
-        col=2,
-    )
-
-    fig.update_xaxes(title_text="Immersion Time (s)", row=1, col=1)
-    fig.update_yaxes(title_text="Corrosion Depth (nm)", rangemode="tozero", row=1, col=1)
-    fig.update_xaxes(title_text="Immersion Time (s)", row=1, col=2)
-    fig.update_yaxes(title_text="Thickness Loss Risk R(t)", range=[0.0, 1.05], row=1, col=2)
-    fig.update_layout(
-        title=title or f"{metal} Time-Resolved Kinetics ({kinetics.model})",
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.06, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 85, "b": 55},
-        height=420,
-    )
-    return fig
-
-
-def build_galvanic_polarization_figure(
-    coupling: GalvanicCouplingResult,
-    *,
-    mc_galvanic: MonteCarloGalvanicResult | None = None,
-    title: str | None = None,
-    potential_padding_V: float = 0.15,
-    num_points: int = 301,
-) -> go.Figure:
-    """Build interactive overlaid bimetallic Polarization Curves with Mixed Potential (E_galv) line."""
-    e_min = min(coupling.active_parameters.Ecorr_V_SHE, coupling.noble_parameters.Ecorr_V_SHE) - potential_padding_V
-    e_max = max(coupling.active_parameters.Ecorr_V_SHE, coupling.noble_parameters.Ecorr_V_SHE) + potential_padding_V
-    potentials = np.linspace(e_min, e_max, num_points)
-
-    active_curve = generate_polarization_curve(coupling.active_parameters, potentials_V_SHE=potentials)
-    noble_curve = generate_polarization_curve(coupling.noble_parameters, potentials_V_SHE=potentials)
-    area_ratio = coupling.cathode_to_anode_area_ratio
-    noble_scaled_log10 = np.log10(np.maximum(noble_curve.abs_net_current_uA_cm2 * area_ratio, 1e-12))
-
-    fig = go.Figure()
-
-    if mc_galvanic is not None:
-        e_p05 = float(mc_galvanic.mixed_potential_summary["p05"])
-        e_p95 = float(mc_galvanic.mixed_potential_summary["p95"])
-        fig.add_vrect(
-            x0=e_p05,
-            x1=e_p95,
-            fillcolor="rgba(148, 103, 189, 0.14)",
-            line_width=0,
-            annotation_text="E_galv 90% CI",
-            annotation_position="top right",
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=potentials,
-            y=active_curve.log10_abs_net_uA_cm2,
-            mode="lines",
-            line={"color": "#d62728", "width": 2.6},
-            name=f"Active Metal: {coupling.active_metal} |i_net|",
-            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i|: %{y:.2f}<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=potentials,
-            y=noble_scaled_log10,
-            mode="lines",
-            line={"color": "#1f77b4", "width": 2.6},
-            name=f"Noble Metal: {coupling.noble_metal} ({area_ratio:g}× |i_net|)",
-            hovertemplate="E: %{x:.3f} V vs. SHE<br>log10(A_ratio·|i|): %{y:.2f}<extra></extra>",
-        )
-    )
-    if not math.isclose(area_ratio, 1.0, rel_tol=1e-6):
-        fig.add_trace(
-            go.Scatter(
-                x=potentials,
-                y=noble_curve.log10_abs_net_uA_cm2,
-                mode="lines",
-                line={"color": "#1f77b4", "dash": "dot", "width": 1.5},
-                name=f"Noble Metal: {coupling.noble_metal} (1× unscaled)",
-                hovertemplate="E: %{x:.3f} V vs. SHE<br>log10|i|: %{y:.2f}<extra></extra>",
-            )
-        )
-
-    fig.add_vline(
-        x=coupling.mixed_potential_V_SHE,
-        line_dash="dash",
-        line_color="#9467bd",
-        line_width=2.0,
-        annotation_text=f"E_galv = {coupling.mixed_potential_V_SHE:.3f} V vs. SHE",
-        annotation_position="top left",
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=[coupling.mixed_potential_V_SHE],
-            y=[math.log10(max(coupling.galvanic_current_density_uA_cm2, 1e-12))],
-            mode="markers",
-            marker={"color": "#9467bd", "size": 11, "symbol": "star"},
-            name=(
-                f"Galvanic Operating Point: i_galv = {coupling.galvanic_current_density_uA_cm2:.2g} µA/cm² "
-                f"(AF = {coupling.acceleration_factor:.2f}×)"
-            ),
-        )
-    )
-
-    fig.update_layout(
-        title=title
-        or f"Galvanic Polarization Overlay: {coupling.active_metal} (Active) vs. {coupling.noble_metal} (Noble)",
-        xaxis_title="Potential E (V vs. SHE)",
-        yaxis_title="log10(|i| / µA·cm⁻²)",
-        xaxis={"range": [float(e_min), float(e_max)]},
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 75, "b": 55},
-        height=460,
-    )
-    return fig
-
-
-def build_galvanic_depth_comparison_figure(
-    uncoupled_kinetics: TimeResolvedKineticsResult,
-    coupled_kinetics: TimeResolvedKineticsResult,
-    *,
-    mc_coupled_kinetics: MonteCarloKineticsResult | None = None,
-    active_metal: str | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build standalone comparative uncoupled vs. coupled Corrosion Depth figure with 50% band."""
-    metal = active_metal or coupled_kinetics.metal or "Active Metal"
-    times = coupled_kinetics.times_s
-    fig = go.Figure()
-
-    if mc_coupled_kinetics is not None:
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_coupled_kinetics.depth_p25_nm,
-            mc_coupled_kinetics.depth_p75_nm,
-            label_prefix="Coupled Depth",
-            fillcolor_50="rgba(31, 119, 180, 0.28)",
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=uncoupled_kinetics.depth_nm,
-            mode="lines",
-            line={"color": "#64748b", "dash": "dash", "width": 2.2},
-            name=f"{metal} Uncoupled Depth",
-            hovertemplate="t: %{x:.1f} s<br>Uncoupled Depth: %{y:.3f} nm<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=coupled_kinetics.depth_nm,
-            mode="lines",
-            line={"color": "#1f77b4", "dash": "solid", "width": 2.8},
-            name=f"{metal} Coupled Depth",
-            hovertemplate="t: %{x:.1f} s<br>Coupled Depth: %{y:.3f} nm<extra></extra>",
-        )
-    )
-    fig.add_hline(
-        y=coupled_kinetics.d_crit_nm,
-        line_dash="dash",
-        line_color="#475569",
-        annotation_text=f"d_crit = {coupled_kinetics.d_crit_nm:.2f} nm",
-        annotation_position="top left",
-    )
-    _apply_kinetics_panel_layout(
-        fig,
-        title_text=title or f"{metal} Corrosion Depth: Uncoupled vs. Coupled ({coupled_kinetics.model})",
-        yaxis_title="Corrosion Depth (nm)",
-        yaxis={"rangemode": "tozero"},
-    )
-    return fig
-
-
-def build_galvanic_risk_comparison_figure(
-    uncoupled_kinetics: TimeResolvedKineticsResult,
-    coupled_kinetics: TimeResolvedKineticsResult,
-    *,
-    mc_coupled_kinetics: MonteCarloKineticsResult | None = None,
-    active_metal: str | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build standalone comparative uncoupled vs. coupled Thickness Loss Risk figure with 50% band."""
-    metal = active_metal or coupled_kinetics.metal or "Active Metal"
-    times = coupled_kinetics.times_s
-    fig = go.Figure()
-
-    if mc_coupled_kinetics is not None:
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_coupled_kinetics.risk_p25,
-            mc_coupled_kinetics.risk_p75,
-            label_prefix="Coupled Risk",
-            fillcolor_50="rgba(217, 95, 2, 0.28)",
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=uncoupled_kinetics.risk_score,
-            mode="lines",
-            line={"color": "#94a3b8", "dash": "dot", "width": 2.2},
-            name=f"{metal} Uncoupled Risk",
-            hovertemplate="t: %{x:.1f} s<br>Uncoupled Risk: %{y:.3f}<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=coupled_kinetics.risk_score,
-            mode="lines",
-            line={"color": "#d95f02", "dash": "dashdot", "width": 2.8},
-            name=f"{metal} Coupled Risk",
-            hovertemplate="t: %{x:.1f} s<br>Coupled Risk: %{y:.3f}<extra></extra>",
-        )
-    )
-    fig.add_hline(
-        y=0.5,
-        line_dash="dot",
-        line_color="#94a3b8",
-        annotation_text="R(d_crit) = 0.50",
-        annotation_position="bottom right",
-    )
-    _apply_kinetics_panel_layout(
-        fig,
-        title_text=title or f"{metal} Thickness Loss Risk: Uncoupled vs. Coupled ({coupled_kinetics.model})",
-        yaxis_title="Thickness Loss Risk R(t)",
-        yaxis={"range": [0.0, 1.05]},
-    )
-    return fig
-
-
-def build_galvanic_kinetics_comparison_figure(
-    uncoupled_kinetics: TimeResolvedKineticsResult,
-    coupled_kinetics: TimeResolvedKineticsResult,
-    *,
-    mc_coupled_kinetics: MonteCarloKineticsResult | None = None,
-    active_metal: str | None = None,
-    title: str | None = None,
-) -> go.Figure:
-    """Build comparative uncoupled vs. coupled Corrosion Depth and Thickness Loss Risk trajectories."""
-    metal = active_metal or coupled_kinetics.metal or "Active Metal"
-    times = coupled_kinetics.times_s
-
-    fig = make_subplots(
-        rows=1,
-        cols=2,
-        subplot_titles=(
-            f"{metal} Corrosion Depth: Uncoupled vs. Coupled",
-            f"{metal} Thickness Loss Risk: Uncoupled vs. Coupled",
-        ),
-        horizontal_spacing=0.12,
-    )
-
-    if mc_coupled_kinetics is not None:
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_coupled_kinetics.depth_p25_nm,
-            mc_coupled_kinetics.depth_p75_nm,
-            label_prefix="Coupled Depth",
-            fillcolor_50="rgba(31, 119, 180, 0.28)",
-            row=1,
-            col=1,
-        )
-        _add_50pct_band_trace(
-            fig,
-            times,
-            mc_coupled_kinetics.risk_p25,
-            mc_coupled_kinetics.risk_p75,
-            label_prefix="Coupled Risk",
-            fillcolor_50="rgba(217, 95, 2, 0.28)",
-            row=1,
-            col=2,
-        )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=uncoupled_kinetics.depth_nm,
-            mode="lines",
-            line={"color": "#64748b", "dash": "dash", "width": 2.2},
-            name=f"{metal} Uncoupled Depth",
-            hovertemplate="t: %{x:.1f} s<br>Uncoupled Depth: %{y:.3f} nm<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=coupled_kinetics.depth_nm,
-            mode="lines",
-            line={"color": "#1f77b4", "dash": "solid", "width": 2.8},
-            name=f"{metal} Coupled Depth",
-            hovertemplate="t: %{x:.1f} s<br>Coupled Depth: %{y:.3f} nm<extra></extra>",
-        ),
-        row=1,
-        col=1,
-    )
-    fig.add_hline(
-        y=coupled_kinetics.d_crit_nm,
-        line_dash="dash",
-        line_color="#475569",
-        annotation_text=f"d_crit = {coupled_kinetics.d_crit_nm:.2f} nm",
-        annotation_position="top left",
-        row=1,
-        col=1,
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=uncoupled_kinetics.risk_score,
-            mode="lines",
-            line={"color": "#94a3b8", "dash": "dot", "width": 2.2},
-            name=f"{metal} Uncoupled Risk",
-            hovertemplate="t: %{x:.1f} s<br>Uncoupled Risk: %{y:.3f}<extra></extra>",
-        ),
-        row=1,
-        col=2,
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=times,
-            y=coupled_kinetics.risk_score,
-            mode="lines",
-            line={"color": "#d95f02", "dash": "dashdot", "width": 2.8},
-            name=f"{metal} Coupled Risk",
-            hovertemplate="t: %{x:.1f} s<br>Coupled Risk: %{y:.3f}<extra></extra>",
-        ),
-        row=1,
-        col=2,
-    )
-    fig.add_hline(
-        y=0.5,
-        line_dash="dot",
-        line_color="#94a3b8",
-        annotation_text="R(d_crit) = 0.50",
-        annotation_position="bottom right",
-        row=1,
-        col=2,
-    )
-
-    fig.update_xaxes(title_text="Immersion Time (s)", row=1, col=1)
-    fig.update_yaxes(title_text="Corrosion Depth (nm)", rangemode="tozero", row=1, col=1)
-    fig.update_xaxes(title_text="Immersion Time (s)", row=1, col=2)
-    fig.update_yaxes(title_text="Thickness Loss Risk R(t)", range=[0.0, 1.05], row=1, col=2)
-    fig.update_layout(
-        title=title or f"Uncoupled vs. Galvanically Coupled Kinetics ({coupled_kinetics.model})",
-        template="plotly_white",
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.06, "xanchor": "left", "x": 0.0},
-        margin={"l": 60, "r": 25, "t": 85, "b": 55},
-        height=430,
-    )
-    return fig
-
-
 class CorrosionPlatformController:
-    """High-level application controller backing the Streamlit UI and reporting workflows."""
+    """Simulation orchestrator backing the Streamlit UI and reporting workflows."""
 
     def __init__(
         self,
-        database: HarmonizedDatabase,
+        database_or_repository: ArtifactRepository | HarmonizedDatabase,
         predictor: HybridMLPredictor | None = None,
         *,
         raw_dir: str | Path | None = None,
@@ -1442,119 +688,45 @@ class CorrosionPlatformController:
         raw_fingerprint: dict[str, Any] | None = None,
         lab_projects: dict[str, LabProjectDataset] | None = None,
     ) -> None:
-        self.database = database
-        self.raw_dir: Path | None = Path(raw_dir) if raw_dir is not None else None
-        self.artifact_dir: Path | None = Path(artifact_dir) if artifact_dir is not None else None
-        self.artifact_status: ArtifactStatus = artifact_status
-        self.artifact_warning: str | None = artifact_warning
-        self.lab_dir: Path | None = Path(lab_dir) if lab_dir is not None else None
-        if raw_fingerprint is not None:
-            self.raw_fingerprint: dict[str, Any] | None = raw_fingerprint
-        elif self.raw_dir is not None and iter_raw_csv_files(self.raw_dir):
-            self.raw_fingerprint = HarmonizedDatabase.compute_raw_directory_fingerprint(self.raw_dir)
+        if isinstance(database_or_repository, ArtifactRepository):
+            extra_args = [
+                name
+                for name, val in (
+                    ("predictor", predictor),
+                    ("raw_dir", raw_dir),
+                    ("artifact_dir", artifact_dir),
+                    ("artifact_warning", artifact_warning),
+                    ("lab_dir", lab_dir),
+                    ("raw_fingerprint", raw_fingerprint),
+                    ("lab_projects", lab_projects),
+                )
+                if val is not None
+            ]
+            if artifact_status != "live":
+                extra_args.append("artifact_status")
+            if extra_args:
+                raise TypeError(
+                    "Cannot pass repository configuration arguments "
+                    f"({', '.join(extra_args)}) alongside an existing ArtifactRepository."
+                )
+            self.repository = database_or_repository
         else:
-            self.raw_fingerprint = None
-
-        if lab_projects is not None:
-            self.lab_projects: dict[str, LabProjectDataset] = dict(lab_projects)
-        elif self.lab_dir is not None:
-            self.lab_projects = discover_and_load_lab_projects(self.lab_dir)
-        else:
-            self.lab_projects = {}
-        self.lab_fingerprints: dict[str, dict[str, Any]] = {
-            name: ds.fingerprint for name, ds in self.lab_projects.items()
-        }
-        self.lab_status: LabReloadStatus = "fresh" if self.lab_projects else "none"
-        self.lab_status_message: str | None = (
-            f"Loaded {len(self.lab_projects)} lab project(s)."
-            if self.lab_projects
-            else None
-        )
-        self._lab_calibration_cache: dict[str, Any] = {}
-
-        if predictor is None:
-            self.predictor = self._load_or_fit_predictor("rf_gp_ensemble")
-        else:
-            self.predictor = predictor
-        self._predictors: dict[ModelFamily, HybridMLPredictor] = {
-            self.predictor.model_family: self.predictor
-        }
-
-    def _load_or_fit_predictor(self, model_family: ModelFamily) -> HybridMLPredictor:
-        sample_metal = (
-            self.database.available_metals[0]
-            if self.database.available_metals
-            else CORE_METALS[0]
-        )
-        if self.artifact_dir is not None:
-            prebuilt_path = self.artifact_dir / "models" / f"{model_family}.joblib"
-            if prebuilt_path.exists():
-                try:
-                    loaded = HybridMLPredictor.load(prebuilt_path)
-                    if loaded.model_family != model_family:
-                        raise ValueError(
-                            f"Model family mismatch in {prebuilt_path.name}: expected {model_family!r}, got {loaded.model_family!r}"
-                        )
-                    # Smoke-test prediction to catch cross-OS / scikit-learn pickle incompatibilities early
-                    loaded.predict(MLFeatureQuery(metal=sample_metal))
-                    return loaded
-                except Exception as exc:
-                    heal_note = (
-                        f"Prebuilt model '{prebuilt_path.name}' could not be loaded ({exc}); "
-                        "automatically retrained on the current database."
-                    )
-                    self.artifact_warning = (
-                        f"{self.artifact_warning} {heal_note}".strip()
-                        if self.artifact_warning
-                        else heal_note
-                    )
-
-        predictor = HybridMLPredictor(model_family=model_family, random_state=42)
-        predictor.fit(self.database)
-        if self.artifact_dir is not None:
-            try:
-                models_dir = self.artifact_dir / "models"
-                models_dir.mkdir(parents=True, exist_ok=True)
-                tmp_path = models_dir / f".tmp_{model_family}.joblib"
-                target_path = models_dir / f"{model_family}.joblib"
-                predictor.save(tmp_path)
-                tmp_path.replace(target_path)
-            except OSError:
-                pass
-        return predictor
-
-    def get_predictor(self, model_family: ModelFamily | None = None) -> HybridMLPredictor:
-        """Return a fitted predictor for ``model_family``, loading prebuilt artifact or fitting on first use."""
-        target_family = model_family or self.predictor.model_family
-        if target_family not in SUPPORTED_MODEL_FAMILIES:
-            raise ValueError(
-                f"Unsupported model_family '{target_family}'. Supported: {SUPPORTED_MODEL_FAMILIES}"
+            self.repository = ArtifactRepository(
+                database=database_or_repository,
+                predictor=predictor,
+                raw_dir=raw_dir,
+                artifact_dir=artifact_dir,
+                artifact_status=artifact_status,
+                artifact_warning=artifact_warning,
+                lab_dir=lab_dir,
+                raw_fingerprint=raw_fingerprint,
+                lab_projects=lab_projects,
             )
-        cached = self._predictors.get(target_family)
-        if cached is not None:
-            return cached
-        predictor = self._load_or_fit_predictor(target_family)
-        self._predictors[target_family] = predictor
-        return predictor
 
-    def _get_cached_or_prebuilt_predictor(self, model_family: ModelFamily) -> HybridMLPredictor | None:
-        """Return an in-memory or prebuilt on-disk predictor without ever triggering on-the-fly training."""
-        cached = self._predictors.get(model_family)
-        if cached is not None:
-            return cached
-        if self.artifact_dir is None:
-            return None
-        prebuilt_path = self.artifact_dir / "models" / f"{model_family}.joblib"
-        if not prebuilt_path.exists():
-            return None
-        try:
-            loaded = HybridMLPredictor.load(prebuilt_path)
-            if loaded.model_family != model_family:
-                return None
-            self._predictors[model_family] = loaded
-            return loaded
-        except Exception:
-            return None
+    @property
+    def database(self) -> HarmonizedDatabase:
+        """Return the active harmonized database owned by the underlying ArtifactRepository."""
+        return self.repository.database
 
     @classmethod
     def from_default_data(
@@ -1569,321 +741,18 @@ class CorrosionPlatformController:
         rebuild_models: Sequence[str] = ("all",),
         progress_callback: Callable[[int, int, str], None] | None = None,
     ) -> CorrosionPlatformController:
-        """Load prebuilt artifacts when fresh, auto-rebuild all models when raw CSVs change, or fall back cleanly."""
-        from corrosion_simulator.build_artifacts import (
-            build_processed_artifacts,
-            check_artifacts_freshness,
-        )
-
-        raw_path, proc_path, lab_path = resolve_data_dirs(
-            data_dir,
+        """Build a controller backed by an ArtifactRepository loaded from the default data layout."""
+        repo = ArtifactRepository.from_default_data(
             raw_dir=raw_dir,
             processed_dir=processed_dir,
             lab_dir=lab_dir,
+            data_dir=data_dir,
+            model_family=model_family,
+            auto_rebuild=auto_rebuild,
+            rebuild_models=rebuild_models,
+            progress_callback=progress_callback,
         )
-        has_raw_csvs = bool(iter_raw_csv_files(raw_path))
-        raw_fp = (
-            HarmonizedDatabase.compute_raw_directory_fingerprint(raw_path)
-            if has_raw_csvs
-            else None
-        )
-        loaded_lab_projects = discover_and_load_lab_projects(lab_path)
-        status, warning_msg = check_artifacts_freshness(raw_path, proc_path)
-
-        if status == "fresh" or (status == "stale" and not auto_rebuild):
-            try:
-                database = HarmonizedDatabase.from_processed_directory(proc_path)
-                ctrl = cls(
-                    database=database,
-                    predictor=None,
-                    raw_dir=raw_path,
-                    artifact_dir=proc_path,
-                    artifact_status=status,
-                    artifact_warning=warning_msg,
-                    lab_dir=lab_path,
-                    raw_fingerprint=raw_fp,
-                    lab_projects=loaded_lab_projects,
-                )
-                if model_family != ctrl.predictor.model_family:
-                    ctrl.predictor = ctrl.get_predictor(model_family)
-                return ctrl
-            except Exception as exc:
-                if not has_raw_csvs:
-                    raise
-                warning_msg = f"Failed to read cached artifacts in '{proc_path}' ({exc}); rebuilding from '{raw_path}'."
-
-        # Raw CSVs exist and artifacts are missing/stale -> rebuild full artifact & model suite when auto_rebuild=True
-        if has_raw_csvs and auto_rebuild:
-            try:
-                summary = build_processed_artifacts(
-                    raw_dir=raw_path,
-                    output_dir=proc_path,
-                    models=rebuild_models,
-                    export_csv=False,
-                    progress_callback=progress_callback,
-                )
-                database = HarmonizedDatabase.from_processed_directory(proc_path)
-                rebuilt_msg = (
-                    f"Detected updated CSV data in '{raw_path}' — rebuilt database "
-                    f"({summary.n_records} records across {summary.n_materials} materials) "
-                    f"and trained {len(summary.trained_models)} ML model(s)."
-                )
-                ctrl = cls(
-                    database=database,
-                    predictor=None,
-                    raw_dir=raw_path,
-                    artifact_dir=proc_path,
-                    artifact_status="rebuilt",
-                    artifact_warning=rebuilt_msg,
-                    lab_dir=lab_path,
-                    raw_fingerprint=raw_fp,
-                    lab_projects=loaded_lab_projects,
-                )
-                if model_family != ctrl.predictor.model_family:
-                    ctrl.predictor = ctrl.get_predictor(model_family)
-                return ctrl
-            except OSError as exc:
-                warning_msg = (
-                    f"Could not write prebuilt cache to '{proc_path}' ({exc}); "
-                    f"loaded '{raw_path}' in memory instead."
-                )
-
-        # Fallback: build live in memory from raw_path, or from built-in seed data if no external CSVs exist
-        if has_raw_csvs:
-            database = HarmonizedDatabase.from_directory(raw_path)
-            live_status: ArtifactStatus = "live_fallback"
-            live_warning = warning_msg
-        else:
-            database = HarmonizedDatabase.from_seed()
-            live_status = "seed"
-            live_warning = (
-                f"No CSV training files were found in '{raw_path}' (and no prebuilt cache in '{proc_path}'). "
-                "Running on the built-in 8-metal seed dataset (n < 10 -> low data). "
-                f"Place your CSV files in '{raw_path}' and restart or click Reload Data."
-            )
-        predictor = HybridMLPredictor(model_family=model_family, random_state=42)
-        predictor.fit(database)
-        return cls(
-            database=database,
-            predictor=predictor,
-            raw_dir=raw_path,
-            artifact_dir=None,
-            artifact_status=live_status,
-            artifact_warning=live_warning,
-            lab_dir=lab_path,
-            raw_fingerprint=raw_fp,
-            lab_projects=loaded_lab_projects,
-        )
-
-    def _invalidate_lab_cache_for_project(self, project_name: str) -> bool:
-        keys_to_drop = [
-            key
-            for key in self._lab_calibration_cache
-            if key == project_name or str(key).startswith(f"{project_name}:")
-        ]
-        for key in keys_to_drop:
-            del self._lab_calibration_cache[key]
-        return bool(keys_to_drop)
-
-    def reload_external_data(
-        self,
-        *,
-        rebuild_models: Sequence[str] = ("all",),
-        progress_callback: Callable[[int, int, str], None] | None = None,
-    ) -> ExternalDataReloadSummary:
-        """Check independent ``data/raw/`` and ``data/lab/`` fingerprints and reload only what changed."""
-        from corrosion_simulator.build_artifacts import (
-            build_processed_artifacts,
-            check_artifacts_freshness,
-        )
-
-        start_time = time.perf_counter()
-        raw_path = self.raw_dir
-        proc_path = self.artifact_dir
-        has_raw_csvs = bool(raw_path is not None and iter_raw_csv_files(raw_path))
-        current_raw_fp = (
-            HarmonizedDatabase.compute_raw_directory_fingerprint(raw_path)
-            if has_raw_csvs
-            else None
-        )
-        prev_sha = self.raw_fingerprint.get("combined_sha256") if self.raw_fingerprint else None
-        curr_sha = current_raw_fp.get("combined_sha256") if current_raw_fp else None
-
-        raw_changed = prev_sha != curr_sha
-        if not raw_changed and has_raw_csvs and proc_path is not None:
-            disk_status, _ = check_artifacts_freshness(raw_path, proc_path)
-            if disk_status in ("stale", "missing"):
-                raw_changed = True
-
-        active_family = self.predictor.model_family
-        raw_rebuilt = False
-        lab_cache_invalidated = False
-        added_or_updated: list[str] = []
-        removed: list[str] = []
-
-        if raw_changed:
-            if has_raw_csvs and raw_path is not None:
-                target_proc = proc_path or (
-                    raw_path.parent / "processed" if raw_path.name == "raw" else None
-                )
-                if target_proc is not None:
-                    try:
-                        summary = build_processed_artifacts(
-                            raw_dir=raw_path,
-                            output_dir=target_proc,
-                            models=rebuild_models,
-                            export_csv=False,
-                            progress_callback=progress_callback,
-                        )
-                        self.database = HarmonizedDatabase.from_processed_directory(target_proc)
-                        self.artifact_dir = target_proc
-                        self.artifact_status = "rebuilt"
-                        self.artifact_warning = (
-                            f"Detected updated CSV data in '{raw_path}' — rebuilt database "
-                            f"({summary.n_records} records across {summary.n_materials} materials) "
-                            f"and trained {len(summary.trained_models)} ML model(s)."
-                        )
-                        raw_rebuilt = True
-                    except OSError as exc:
-                        self.database = HarmonizedDatabase.from_directory(raw_path)
-                        self.artifact_dir = None
-                        self.artifact_status = "live_fallback"
-                        self.artifact_warning = (
-                            f"Could not write prebuilt cache ({exc}); loaded '{raw_path}' in memory."
-                        )
-                else:
-                    self.database = HarmonizedDatabase.from_directory(raw_path)
-                    self.artifact_status = "live_fallback"
-            else:
-                self.database = HarmonizedDatabase.from_seed()
-                self.artifact_dir = None
-                self.artifact_status = "seed"
-                self.artifact_warning = (
-                    f"No CSV training files were found in '{raw_path}'. Running on built-in seed data."
-                )
-
-            self.raw_fingerprint = current_raw_fp
-            self._predictors.clear()
-            self.predictor = self._load_or_fit_predictor(active_family)
-            self._predictors[active_family] = self.predictor
-
-            # Clear all cached lab calibration models so they re-anchor to the rebuilt prior
-            self._lab_calibration_cache.clear()
-            lab_cache_invalidated = True
-
-            if self.lab_dir is not None:
-                reloaded_projects = discover_and_load_lab_projects(self.lab_dir)
-                added_or_updated = sorted(reloaded_projects.keys())
-                removed = sorted(set(self.lab_projects) - set(reloaded_projects))
-                self.lab_projects = reloaded_projects
-                self.lab_fingerprints = {
-                    name: ds.fingerprint for name, ds in reloaded_projects.items()
-                }
-            self.lab_status = "reloaded" if self.lab_projects else "none"
-            self.lab_status_message = (
-                f"Re-anchored {len(self.lab_projects)} lab project(s) to updated literature prior."
-                if self.lab_projects
-                else None
-            )
-        else:
-            # Fast path (< 1 s): literature prior unchanged -> skip base rebuild and rescan data/lab/ only
-            if self.lab_dir is not None:
-                discovered = discover_lab_projects(self.lab_dir)
-                removed = sorted(set(self.lab_projects) - set(discovered))
-                for name in removed:
-                    self.lab_projects.pop(name, None)
-                    self.lab_fingerprints.pop(name, None)
-                    if self._invalidate_lab_cache_for_project(name):
-                        lab_cache_invalidated = True
-
-                for name, files in discovered.items():
-                    new_fp = compute_lab_project_fingerprint(name, files, self.lab_dir)
-                    old_sha = self.lab_fingerprints.get(name, {}).get("combined_sha256")
-                    if old_sha != new_fp["combined_sha256"]:
-                        self.lab_projects[name] = load_lab_project(
-                            name, files, lab_dir=self.lab_dir
-                        )
-                        self.lab_fingerprints[name] = new_fp
-                        added_or_updated.append(name)
-                        if self._invalidate_lab_cache_for_project(name):
-                            lab_cache_invalidated = True
-                if added_or_updated and self._invalidate_lab_cache_for_project("__none__"):
-                    lab_cache_invalidated = True
-
-            if added_or_updated or removed:
-                self.lab_status = "reloaded"
-                self.lab_status_message = (
-                    f"Reloaded {len(added_or_updated)} lab project(s), removed {len(removed)}."
-                )
-            elif self.lab_projects:
-                self.lab_status = "fresh"
-                self.lab_status_message = f"{len(self.lab_projects)} lab project(s) up to date."
-            else:
-                self.lab_status = "none"
-                self.lab_status_message = None
-
-        elapsed = time.perf_counter() - start_time
-        return ExternalDataReloadSummary(
-            raw_rebuilt=raw_rebuilt,
-            raw_status=self.artifact_status,
-            lab_status=self.lab_status,
-            lab_projects=tuple(sorted(self.lab_projects.keys())),
-            lab_added_or_updated=tuple(sorted(added_or_updated)),
-            lab_removed=tuple(sorted(removed)),
-            lab_cache_invalidated=lab_cache_invalidated,
-            elapsed_s=elapsed,
-        )
-
-    def get_lab_project(self, project_name: str | None = None) -> LabProjectDataset | None:
-        """Return a loaded lab project dataset by name (or the first sorted project if omitted)."""
-        if not self.lab_projects:
-            return None
-        if project_name is None:
-            return self.lab_projects[sorted(self.lab_projects)[0]]
-        return self.lab_projects.get(project_name)
-
-    def get_calibrated_predictor(
-        self,
-        *,
-        calibration_mode: CalibrationMode = "literature_only",
-        lab_project: str | None = None,
-        model_family: ModelFamily | None = None,
-    ) -> HybridMLPredictor | LabCalibratedPredictor:
-        """Return a base or lab-calibrated predictor for the requested calibration mode and project."""
-        if calibration_mode not in CALIBRATION_MODES:
-            raise ValueError(
-                f"Unsupported calibration_mode '{calibration_mode}'. Supported: {CALIBRATION_MODES}"
-            )
-        target_family = model_family or self.predictor.model_family
-        base_predictor = self.get_predictor(target_family)
-        if calibration_mode == "literature_only":
-            return base_predictor
-
-        lab_ds: LabProjectDataset | None
-        if lab_project is not None:
-            lab_ds = self.get_lab_project(lab_project)
-            if lab_ds is None:
-                raise ValueError(
-                    f"Lab project {lab_project!r} was not found in {self.lab_dir}. "
-                    f"Available projects: {sorted(self.lab_projects)}"
-                )
-        else:
-            lab_ds = self.get_lab_project(None)
-
-        proj_key = lab_ds.project_name if lab_ds is not None else "__none__"
-        cache_key = f"{proj_key}:{calibration_mode}:{target_family}"
-        cached = self._lab_calibration_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        calibrated = LabCalibratedPredictor(
-            base_predictor=base_predictor,
-            calibration_mode=calibration_mode,
-            lab_project=lab_ds.project_name if lab_ds is not None else lab_project,
-            allow_fallback=True,
-        ).fit(lab_ds)
-        self._lab_calibration_cache[cache_key] = calibrated
-        return calibrated
+        return cls(repo)
 
     def available_options(self) -> dict[str, Any]:
         """Return sidebar selector options dynamically derived from the harmonized database."""
@@ -1940,7 +809,7 @@ class CorrosionPlatformController:
             "parameter_sources": ["ml", "database", "manual"],
             "ml_model_families": list(SUPPORTED_MODEL_FAMILIES),
             "calibration_modes": list(CALIBRATION_MODES),
-            "lab_projects": sorted(self.lab_projects.keys()),
+            "lab_projects": sorted(self.repository.lab_projects.keys()),
         }
 
     def _build_ml_query(self, request: SimulationRequest, metal: str) -> MLFeatureQuery:
@@ -2078,9 +947,9 @@ class CorrosionPlatformController:
             if family == active_base and request.calibration_mode == "literature_only":
                 peer_preds[family] = pred
             elif family == active_base:
-                peer_preds[family] = self.get_predictor(family).predict(query)
+                peer_preds[family] = self.repository.get_predictor(family).predict(query)
             else:
-                peer_model = self._get_cached_or_prebuilt_predictor(family)
+                peer_model = self.repository.get_cached_or_prebuilt_predictor(family)
                 peer_preds[family] = peer_model.predict(query) if peer_model is not None else None
 
         rgp_pred = peer_preds["rf_gp_ensemble"]
@@ -2177,7 +1046,7 @@ class CorrosionPlatformController:
 
         # ML prediction mode (with optional Delta-Learning or Lab-Only GP calibration)
         query = self._build_ml_query(request, metal)
-        predictor = self.get_calibrated_predictor(
+        predictor = self.repository.get_calibrated_predictor(
             calibration_mode=request.calibration_mode,
             lab_project=request.lab_project,
             model_family=request.ml_model_family,
@@ -2190,7 +1059,7 @@ class CorrosionPlatformController:
         icorr_std = float(pred.icorr_uA_cm2_median * math.log(10.0) * pred.log10_icorr_uA_cm2.std)
         resolved_project = pred.lab_project
         if resolved_project is None and request.calibration_mode != "literature_only":
-            lab_ds = self.get_lab_project(request.lab_project)
+            lab_ds = self.repository.get_lab_project(request.lab_project)
             resolved_project = lab_ds.project_name if lab_ds is not None else request.lab_project
         return ResolvedMetalParameters(
             metal=metal,
@@ -2211,8 +1080,8 @@ class CorrosionPlatformController:
             residual_breakdown=pred.residual_breakdown,
         )
 
-    def run_single_metal_analysis(self, request: SimulationRequest) -> SingleMetalViewPayload:
-        """Execute end-to-end Single Metal Analysis and build interactive Plotly figures."""
+    def run_single_metal_analysis(self, request: SimulationRequest) -> SingleMetalAnalysisResult:
+        """Execute end-to-end Single Metal Analysis and return a pure, Plotly-free result."""
         resolved = self._resolve_metal_parameters(
             request,
             request.primary_metal,
@@ -2241,28 +1110,7 @@ class CorrosionPlatformController:
                 "Faraday corrosion rate (nm/min) and thickness-loss kinetics are unavailable. "
                 "Add a row to data/raw/material_properties.csv to enable rate conversion."
             )
-            pol_fig = build_single_metal_polarization_figure(
-                curve,
-                mc_result=None,
-                title=f"{request.primary_metal} Polarization Curve ({resolved.source.upper()})",
-            )
-            placeholder_fig = go.Figure()
-            placeholder_fig.add_annotation(
-                text=f"Faraday corrosion rate & kinetics unavailable for {request.primary_metal}<br>"
-                "(missing density / equivalent_weight_g_eq in material_properties.csv)",
-                xref="paper",
-                yref="paper",
-                x=0.5,
-                y=0.5,
-                showarrow=False,
-                font=dict(size=14),
-            )
-            placeholder_fig.update_layout(
-                title=f"{request.primary_metal} Time-Resolved Kinetics (Unavailable)",
-                template="plotly_white",
-                height=360,
-            )
-            return SingleMetalViewPayload(
+            return SingleMetalAnalysisResult(
                 request=request,
                 resolved_parameters=resolved,
                 parameter_table=resolved.to_parameter_table(),
@@ -2280,10 +1128,6 @@ class CorrosionPlatformController:
                 confidence_tier=resolved.confidence_tier,
                 warnings=_dedupe_preserve_order(warnings_list),
                 experimental_recommendations=_dedupe_preserve_order(recs_list),
-                polarization_figure=pol_fig,
-                kinetics_risk_figure=placeholder_fig,
-                depth_figure=placeholder_fig,
-                risk_figure=placeholder_fig,
             )
 
         faraday = calculate_faraday_corrosion_rate(
@@ -2342,28 +1186,7 @@ class CorrosionPlatformController:
         final_risk = float(kinetics.risk_score[-1])
         final_tier = classify_thickness_loss_risk_tier(final_depth, request.d_crit_nm)
 
-        pol_fig = build_single_metal_polarization_figure(
-            curve,
-            mc_result=mc_propagation,
-            title=f"{request.primary_metal} Polarization Curve ({resolved.source.upper()})",
-        )
-        kin_fig = build_single_metal_kinetics_figure(
-            kinetics,
-            mc_kinetics=mc_kinetics,
-            title=f"{request.primary_metal} Time-Resolved Kinetics & Thickness Loss Risk ({kinetics.model})",
-        )
-        depth_fig = build_single_metal_depth_figure(
-            kinetics,
-            mc_kinetics=mc_kinetics,
-            title=f"{request.primary_metal} Corrosion Depth vs. Immersion Time ({kinetics.model})",
-        )
-        risk_fig = build_single_metal_risk_figure(
-            kinetics,
-            mc_kinetics=mc_kinetics,
-            title=f"{request.primary_metal} Thickness Loss Risk vs. Immersion Time ({kinetics.model})",
-        )
-
-        return SingleMetalViewPayload(
+        return SingleMetalAnalysisResult(
             request=request,
             resolved_parameters=resolved,
             parameter_table=resolved.to_parameter_table(),
@@ -2381,14 +1204,10 @@ class CorrosionPlatformController:
             confidence_tier=resolved.confidence_tier,
             warnings=_dedupe_preserve_order(warnings_list),
             experimental_recommendations=_dedupe_preserve_order(recs_list),
-            polarization_figure=pol_fig,
-            kinetics_risk_figure=kin_fig,
-            depth_figure=depth_fig,
-            risk_figure=risk_fig,
         )
 
-    def run_galvanic_analysis(self, request: SimulationRequest) -> GalvanicViewPayload:
-        """Execute end-to-end Bimetallic Galvanic Analysis and build interactive Plotly figures."""
+    def run_galvanic_analysis(self, request: SimulationRequest) -> GalvanicAnalysisResult:
+        """Execute end-to-end Bimetallic Galvanic Analysis and return a pure, Plotly-free result."""
         if request.secondary_metal is None:
             raise ValueError("secondary_metal must be specified for Galvanic Analysis.")
         if request.secondary_metal == request.primary_metal:
@@ -2511,11 +1330,6 @@ class CorrosionPlatformController:
             allow_missing_faraday=True,
         )
 
-        galv_pol_fig = build_galvanic_polarization_figure(
-            coupling,
-            mc_galvanic=None,
-        )
-
         if coupling.uncoupled_faraday is None or coupling.coupled_faraday is None:
             extra_warnings.append(
                 f"Missing physical properties (density / equivalent weight) for Active Metal {coupling.active_metal}; "
@@ -2537,23 +1351,7 @@ class CorrosionPlatformController:
                 + primary_resolved.experimental_recommendations
                 + secondary_resolved.experimental_recommendations
             )
-            placeholder_fig = go.Figure()
-            placeholder_fig.add_annotation(
-                text=f"Coupled Faraday corrosion rate & kinetics unavailable for {coupling.active_metal}<br>"
-                "(missing density / equivalent_weight_g_eq in material_properties.csv)",
-                xref="paper",
-                yref="paper",
-                x=0.5,
-                y=0.5,
-                showarrow=False,
-                font=dict(size=14),
-            )
-            placeholder_fig.update_layout(
-                title=f"Galvanic Kinetics Comparison — {coupling.active_metal} (Unavailable)",
-                template="plotly_white",
-                height=360,
-            )
-            return GalvanicViewPayload(
+            return GalvanicAnalysisResult(
                 request=request,
                 primary_resolved=primary_resolved,
                 secondary_resolved=secondary_resolved,
@@ -2582,10 +1380,6 @@ class CorrosionPlatformController:
                 confidence_tier=combined_confidence,
                 warnings=combined_warnings,
                 experimental_recommendations=combined_recs,
-                galvanic_polarization_figure=galv_pol_fig,
-                comparative_kinetics_figure=placeholder_fig,
-                galvanic_depth_figure=placeholder_fig,
-                galvanic_risk_figure=placeholder_fig,
             )
 
         mc_galvanic: MonteCarloGalvanicResult | None = None
@@ -2670,30 +1464,7 @@ class CorrosionPlatformController:
             + secondary_resolved.experimental_recommendations
         )
 
-        galv_pol_fig = build_galvanic_polarization_figure(
-            coupling,
-            mc_galvanic=mc_galvanic,
-        )
-        comp_kin_fig = build_galvanic_kinetics_comparison_figure(
-            uncoupled_kinetics,
-            coupled_kinetics,
-            mc_coupled_kinetics=mc_coupled_kinetics,
-            active_metal=coupling.active_metal,
-        )
-        galv_depth_fig = build_galvanic_depth_comparison_figure(
-            uncoupled_kinetics,
-            coupled_kinetics,
-            mc_coupled_kinetics=mc_coupled_kinetics,
-            active_metal=coupling.active_metal,
-        )
-        galv_risk_fig = build_galvanic_risk_comparison_figure(
-            uncoupled_kinetics,
-            coupled_kinetics,
-            mc_coupled_kinetics=mc_coupled_kinetics,
-            active_metal=coupling.active_metal,
-        )
-
-        return GalvanicViewPayload(
+        return GalvanicAnalysisResult(
             request=request,
             primary_resolved=primary_resolved,
             secondary_resolved=secondary_resolved,
@@ -2722,8 +1493,4 @@ class CorrosionPlatformController:
             confidence_tier=combined_confidence,
             warnings=combined_warnings,
             experimental_recommendations=combined_recs,
-            galvanic_polarization_figure=galv_pol_fig,
-            comparative_kinetics_figure=comp_kin_fig,
-            galvanic_depth_figure=galv_depth_fig,
-            galvanic_risk_figure=galv_risk_fig,
         )

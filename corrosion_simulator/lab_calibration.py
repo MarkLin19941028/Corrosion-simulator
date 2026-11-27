@@ -38,7 +38,7 @@ from corrosion_simulator.ml_predictor import (
 )
 
 if TYPE_CHECKING:
-    from corrosion_simulator.lab_data import LabProjectDataset
+    from corrosion_simulator.artifact_repository import LabProjectDataset
 
 CalibrationMode = Literal["literature_only", "delta_learning", "lab_only_gp"]
 ResidualMethod = Literal["gp_residual", "constant_bias", "prior_only"]

@@ -28,9 +28,9 @@ from corrosion_simulator.lab_calibration import CALIBRATION_MODE_LABELS, Residua
 from corrosion_simulator.physics import generate_polarization_curve
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
-    GalvanicViewPayload,
+    GalvanicAnalysisResult,
     SimulationRequest,
-    SingleMetalViewPayload,
+    SingleMetalAnalysisResult,
     resolve_consistent_solvent_settings,
 )
 
@@ -108,8 +108,8 @@ class RecipeEvaluationEntry:
     parameter_source: str
     warnings: list[str] = field(default_factory=list)
     experimental_recommendations: list[str] = field(default_factory=list)
-    single_payload: SingleMetalViewPayload | None = None
-    galvanic_payload: GalvanicViewPayload | None = None
+    single_payload: SingleMetalAnalysisResult | None = None
+    galvanic_payload: GalvanicAnalysisResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -487,9 +487,9 @@ def compare_cleaning_recipes(
 
 
 def _render_composite_figure(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
 ) -> Figure:
     """Render a publication-ready composite Matplotlib figure (Single Tafel + Depth/Risk + optional Galvanic Tafel/Depth + Comparison)."""
@@ -693,8 +693,8 @@ def _render_composite_figure(
 
 
 def _collect_warnings_and_recommendations(
-    single_payload: SingleMetalViewPayload,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    single_payload: SingleMetalAnalysisResult,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
 ) -> tuple[list[str], list[str]]:
     warnings = list(single_payload.warnings)
     recs = list(single_payload.experimental_recommendations)
@@ -709,8 +709,8 @@ def _collect_warnings_and_recommendations(
 
 
 def _collect_calibration_metadata(
-    single_payload: SingleMetalViewPayload,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    single_payload: SingleMetalAnalysisResult,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
 ) -> dict[str, Any]:
     """Collect active calibration mode, lab project name, and ResidualBreakdown summaries."""
     req = single_payload.request
@@ -757,8 +757,8 @@ def _collect_calibration_metadata(
 
 
 def _build_uncertainty_intervals(
-    single_payload: SingleMetalViewPayload,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    single_payload: SingleMetalAnalysisResult,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
 ) -> dict[str, Any]:
     intervals: dict[str, Any] = {}
     if single_payload.mc_propagation is not None:
@@ -881,7 +881,7 @@ def _methodology_guide_dataframe() -> pd.DataFrame:
     return pd.DataFrame(list(_METHODOLOGY_GUIDE_ENTRIES))
 
 
-def _format_galvanic_param_table_text(galvanic_payload: GalvanicViewPayload) -> list[str]:
+def _format_galvanic_param_table_text(galvanic_payload: GalvanicAnalysisResult) -> list[str]:
     """Format Anode, Cathode & Mixed electrochemical parameters as compact aligned monospace lines (<=86 chars) for PDF."""
     if galvanic_payload.primary_resolved.metal == galvanic_payload.active_metal:
         active_src = galvanic_payload.primary_resolved.source_label
@@ -977,9 +977,9 @@ def _write_paginated_text_pages(
 
 
 def export_report_png(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
     _figure: Figure | None = None,
 ) -> bytes:
@@ -995,9 +995,9 @@ def export_report_png(
 
 
 def export_report_svg(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
     _figure: Figure | None = None,
 ) -> bytes:
@@ -1013,9 +1013,9 @@ def export_report_svg(
 
 
 def export_report_json(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
 ) -> bytes:
     """Export complete structured JSON report with provenance, uncertainties, warnings, and rankings."""
@@ -1095,9 +1095,9 @@ def export_report_json(
 
 
 def export_report_csv(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
 ) -> bytes:
     """Export tabular CSV summary of inputs, metrics, uncertainties, provenance, warnings, and rankings."""
@@ -1240,9 +1240,9 @@ def export_report_csv(
 
 
 def export_report_raw_data_csv(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
 ) -> bytes:
     """Export raw simulation curve data for all report charts in tidy CSV format."""
@@ -1349,9 +1349,9 @@ def export_report_raw_data_csv(
 
 
 def export_report_pdf(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
     _figure: Figure | None = None,
 ) -> bytes:
@@ -1505,9 +1505,9 @@ def export_report_pdf(
 
 
 def export_report_html(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
     _png_bytes: bytes | None = None,
 ) -> bytes:
@@ -1698,9 +1698,9 @@ def export_report_html(
 
 
 def generate_all_report_exports(
-    single_payload: SingleMetalViewPayload,
+    single_payload: SingleMetalAnalysisResult,
     *,
-    galvanic_payload: GalvanicViewPayload | None = None,
+    galvanic_payload: GalvanicAnalysisResult | None = None,
     comparison_payload: RecipeComparisonPayload | None = None,
 ) -> dict[str, bytes]:
     """Generate all six downloadable report formats: HTML, PDF, CSV, JSON, PNG, and SVG."""

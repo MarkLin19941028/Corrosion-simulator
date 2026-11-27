@@ -361,7 +361,7 @@ class TestOfflineBuildPipelineAndStaleDetection(unittest.TestCase):
             ctrl = CorrosionPlatformController.from_default_data(
                 raw_dir=raw_dir, processed_dir=out_dir
             )
-            self.assertEqual(ctrl.artifact_status, "fresh")
+            self.assertEqual(ctrl.repository.artifact_status, "fresh")
             self.assertEqual(set(ctrl.available_options()["metals"]), {"Cu", "TiN"})
 
             # Mutating raw CSV marks artifacts as stale without breaking startup
@@ -461,7 +461,7 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
                 data_dir=data_dir,
                 progress_callback=lambda step, total, msg: progress_events.append((step, total, msg)),
             )
-            self.assertEqual(ctrl_first.artifact_status, "rebuilt")
+            self.assertEqual(ctrl_first.repository.artifact_status, "rebuilt")
             self.assertEqual(set(ctrl_first.available_options()["metals"]), {"Cu", "Co"})
             self.assertGreater(len(progress_events), len(SUPPORTED_MODEL_FAMILIES))
             self.assertEqual(progress_events[-1][0], progress_events[-1][1])
@@ -475,22 +475,22 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
 
             # Second startup with unchanged raw/ hits fast 'fresh' path directly
             ctrl_second = CorrosionPlatformController.from_default_data(data_dir=data_dir)
-            self.assertEqual(ctrl_second.artifact_status, "fresh")
+            self.assertEqual(ctrl_second.repository.artifact_status, "fresh")
 
             # Direct replacement of a model inside processed/models/ is used directly when raw/ is unchanged
             custom_hgb = HybridMLPredictor(model_family="hist_gradient_boosting", n_estimators=17, random_state=7)
             custom_hgb.fit(ctrl_second.database)
             custom_hgb.save(proc_dir / "models" / "hist_gradient_boosting.joblib")
             ctrl_custom = CorrosionPlatformController.from_default_data(data_dir=data_dir)
-            self.assertEqual(ctrl_custom.artifact_status, "fresh")
-            self.assertEqual(ctrl_custom.get_predictor("hist_gradient_boosting").n_estimators, 17)
+            self.assertEqual(ctrl_custom.repository.artifact_status, "fresh")
+            self.assertEqual(ctrl_custom.repository.get_predictor("hist_gradient_boosting").n_estimators, 17)
 
             # Corrupted .joblib auto-heals without crashing
             (proc_dir / "models" / "rf_gp_ensemble.joblib").write_bytes(b"corrupted-pickle-bytes")
             ctrl_healed = CorrosionPlatformController.from_default_data(data_dir=data_dir)
-            healed_pred = ctrl_healed.get_predictor("rf_gp_ensemble")
+            healed_pred = ctrl_healed.repository.get_predictor("rf_gp_ensemble")
             self.assertEqual(healed_pred.model_family, "rf_gp_ensemble")
-            self.assertIn("automatically retrained", ctrl_healed.artifact_warning or "")
+            self.assertIn("automatically retrained", ctrl_healed.repository.artifact_warning or "")
 
             # Updating CSV in data/raw/ automatically rebuilds models & ingests new metal on next startup
             updated_rows = base_rows + [
@@ -512,7 +512,7 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
             pd.DataFrame(updated_rows).to_csv(csv_file, index=False)
 
             ctrl_updated = CorrosionPlatformController.from_default_data(data_dir=data_dir)
-            self.assertEqual(ctrl_updated.artifact_status, "rebuilt")
+            self.assertEqual(ctrl_updated.repository.artifact_status, "rebuilt")
             self.assertIn("Ru", ctrl_updated.available_options()["metals"])
             fresh_after, _ = check_artifacts_freshness(raw_dir, proc_dir)
             self.assertEqual(fresh_after, "fresh")
@@ -521,9 +521,9 @@ class TestPyInstallerExternalDataAndAutoRebuild(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             empty_data = Path(tmpdir) / "empty_data"
             ctrl = CorrosionPlatformController.from_default_data(data_dir=empty_data)
-            self.assertEqual(ctrl.artifact_status, "seed")
-            self.assertIsNotNone(ctrl.artifact_warning)
-            self.assertIn("empty_data", ctrl.artifact_warning or "")
+            self.assertEqual(ctrl.repository.artifact_status, "seed")
+            self.assertIsNotNone(ctrl.repository.artifact_warning)
+            self.assertIn("empty_data", ctrl.repository.artifact_warning or "")
 
     def test_main_entry_no_proxy_and_port_selection(self) -> None:
         import os
@@ -599,7 +599,7 @@ class TestLabDirectoryAndDualFingerprintReload(unittest.TestCase):
             self.assertEqual([p.name for p in projects["study_dmso"]], ["tafel.csv"])
 
     def test_lab_projects_harmonize_standalone_through_standard_pipeline(self) -> None:
-        from corrosion_simulator.lab_data import discover_and_load_lab_projects
+        from corrosion_simulator.artifact_repository import discover_and_load_lab_projects
 
         with tempfile.TemporaryDirectory() as tmpdir:
             lab_dir = Path(tmpdir) / "lab"
@@ -730,12 +730,14 @@ class TestLabDirectoryAndDualFingerprintReload(unittest.TestCase):
                 rebuild_models=["random_forest"],
             )
             self.assertEqual(set(ctrl.available_options()["lab_projects"]), {"study_a", "study_b"})
-            self.assertEqual(ctrl.get_lab_project("study_a").n_records, 1)
-            base_pred_before = ctrl.predictor
+            self.assertEqual(ctrl.repository.get_lab_project("study_a").n_records, 1)
+            base_pred_before = ctrl.repository.predictor
 
             # Populate lab calibration cache entries
-            ctrl._lab_calibration_cache["study_a:Cu"] = "cached_a"
-            ctrl._lab_calibration_cache["study_b:Co"] = "cached_b"
+            key_a = ("study_a", "delta_learning", "random_forest")
+            key_b = ("study_b", "delta_learning", "random_forest")
+            ctrl.repository._lab_calibration_cache[key_a] = "cached_a"  # type: ignore[assignment]
+            ctrl.repository._lab_calibration_cache[key_b] = "cached_b"  # type: ignore[assignment]
 
             # 1. Modify only data/lab/study_a/ -> fast < 1 s reload, skips base rebuild, preserves base predictor
             lab_a_rows.append(
@@ -753,15 +755,15 @@ class TestLabDirectoryAndDualFingerprintReload(unittest.TestCase):
             )
             pd.DataFrame(lab_a_rows).to_csv(lab_a_csv, index=False)
 
-            reload_lab_only = ctrl.reload_external_data(rebuild_models=["random_forest"])
+            reload_lab_only = ctrl.repository.reload_external_data(rebuild_models=["random_forest"])
             self.assertFalse(reload_lab_only.raw_rebuilt)
             self.assertEqual(reload_lab_only.lab_status, "reloaded")
             self.assertEqual(reload_lab_only.lab_added_or_updated, ("study_a",))
             self.assertLess(reload_lab_only.elapsed_s, 1.0)
-            self.assertIs(ctrl.predictor, base_pred_before)
-            self.assertEqual(ctrl.get_lab_project("study_a").n_records, 2)
-            self.assertNotIn("study_a:Cu", ctrl._lab_calibration_cache)
-            self.assertIn("study_b:Co", ctrl._lab_calibration_cache)
+            self.assertIs(ctrl.repository.predictor, base_pred_before)
+            self.assertEqual(ctrl.repository.get_lab_project("study_a").n_records, 2)
+            self.assertNotIn(key_a, ctrl.repository._lab_calibration_cache)
+            self.assertIn(key_b, ctrl.repository._lab_calibration_cache)
 
             # 2. Modify data/raw/ -> rebuilds literature artifacts and clears all cached lab calibrations
             raw_rows.append(
@@ -781,12 +783,12 @@ class TestLabDirectoryAndDualFingerprintReload(unittest.TestCase):
             )
             pd.DataFrame(raw_rows).to_csv(raw_csv, index=False)
 
-            reload_raw = ctrl.reload_external_data(rebuild_models=["random_forest"])
+            reload_raw = ctrl.repository.reload_external_data(rebuild_models=["random_forest"])
             self.assertTrue(reload_raw.raw_rebuilt)
             self.assertEqual(reload_raw.raw_status, "rebuilt")
             self.assertTrue(reload_raw.lab_cache_invalidated)
-            self.assertEqual(ctrl._lab_calibration_cache, {})
-            self.assertIsNot(ctrl.predictor, base_pred_before)
+            self.assertEqual(ctrl.repository._lab_calibration_cache, {})
+            self.assertIsNot(ctrl.repository.predictor, base_pred_before)
             self.assertEqual(len(ctrl.database.electrochemical_database), 13)
 
 

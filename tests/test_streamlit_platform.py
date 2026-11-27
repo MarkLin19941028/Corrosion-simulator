@@ -11,10 +11,15 @@ from corrosion_simulator.database import CORE_METALS, HarmonizedDatabase
 from corrosion_simulator.ml_predictor import HybridMLPredictor
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
-    GalvanicViewPayload,
+    GalvanicAnalysisResult,
     ManualElectrochemicalInput,
     SimulationRequest,
-    SingleMetalViewPayload,
+    SingleMetalAnalysisResult,
+)
+from corrosion_simulator.plotly_charts import (
+    apply_depth_yaxis_scale,
+    build_galvanic_figures,
+    build_single_metal_figures,
 )
 
 
@@ -150,7 +155,7 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         )
         payload = self.controller.run_single_metal_analysis(req)
 
-        self.assertIsInstance(payload, SingleMetalViewPayload)
+        self.assertIsInstance(payload, SingleMetalAnalysisResult)
         self.assertEqual(payload.resolved_parameters.metal, "Cu")
         self.assertEqual(payload.resolved_parameters.source, "ml")
         self.assertGreater(payload.initial_corrosion_rate_nm_min, 0.0)
@@ -173,45 +178,47 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertIsNotNone(payload.mc_propagation)
         self.assertIsNotNone(payload.mc_kinetics)
 
-        # Plotly figures are valid and contain traces (Tafel plot has Potential on X, log10|i| on Y)
-        self.assertIsInstance(payload.polarization_figure, go.Figure)
-        self.assertGreaterEqual(len(payload.polarization_figure.data), 3)
-        self.assertIn("Potential", payload.polarization_figure.layout.xaxis.title.text)
-        self.assertIn("log10", payload.polarization_figure.layout.yaxis.title.text)
-        self.assertIsNotNone(payload.polarization_figure.layout.yaxis.range)
-        net_trace = [t for t in payload.polarization_figure.data if (t.name or "").endswith("Net |i_net|")][0]
+        # Pure simulation result carries no Plotly figure attributes
+        self.assertFalse(any(name.endswith("_figure") for name in vars(payload)))
+
+        # Plotly figures are built on demand via plotly_charts and contain valid traces
+        figs = build_single_metal_figures(payload, include_combined=True)
+        self.assertIsInstance(figs.polarization_figure, go.Figure)
+        self.assertGreaterEqual(len(figs.polarization_figure.data), 3)
+        self.assertIn("Potential", figs.polarization_figure.layout.xaxis.title.text)
+        self.assertIn("log10", figs.polarization_figure.layout.yaxis.title.text)
+        self.assertIsNotNone(figs.polarization_figure.layout.yaxis.range)
+        net_trace = [t for t in figs.polarization_figure.data if (t.name or "").endswith("Net |i_net|")][0]
         self.assertTrue(all(math.isfinite(float(v)) for v in net_trace.y))
-        pol_names = {t.name for t in payload.polarization_figure.data}
+        pol_names = {t.name for t in figs.polarization_figure.data}
         self.assertIn("Net |i_net| 50% Band (p25–p75)", pol_names)
         self.assertNotIn("Net |i_net| 90% Band (p05–p95)", pol_names)
-        marker_trace = [t for t in payload.polarization_figure.data if (t.name or "").startswith("(E_corr, i_corr)")][0]
+        marker_trace = [t for t in figs.polarization_figure.data if (t.name or "").startswith("(E_corr, i_corr)")][0]
         self.assertIsNone(marker_trace.error_x.array)
         self.assertIsNone(marker_trace.error_y.array)
 
-        self.assertIsInstance(payload.kinetics_risk_figure, go.Figure)
-        self.assertGreaterEqual(len(payload.kinetics_risk_figure.data), 2)
-        self.assertIsInstance(payload.depth_figure, go.Figure)
-        self.assertIsInstance(payload.risk_figure, go.Figure)
-        self.assertEqual(payload.depth_figure.layout.legend.orientation, "h")
-        self.assertEqual(payload.risk_figure.layout.legend.orientation, "h")
-        depth_names = {t.name for t in payload.depth_figure.data}
-        risk_names = {t.name for t in payload.risk_figure.data}
+        self.assertIsInstance(figs.kinetics_risk_figure, go.Figure)
+        self.assertGreaterEqual(len(figs.kinetics_risk_figure.data), 2)
+        self.assertIsInstance(figs.depth_figure, go.Figure)
+        self.assertIsInstance(figs.risk_figure, go.Figure)
+        self.assertEqual(figs.depth_figure.layout.legend.orientation, "h")
+        self.assertEqual(figs.risk_figure.layout.legend.orientation, "h")
+        depth_names = {t.name for t in figs.depth_figure.data}
+        risk_names = {t.name for t in figs.risk_figure.data}
         self.assertIn("Depth 50% Band (p25–p75)", depth_names)
         self.assertNotIn("Depth 90% Band (p05–p95)", depth_names)
         self.assertIn("Risk 50% Band (p25–p75)", risk_names)
         self.assertNotIn("Risk 90% Band (p05–p95)", risk_names)
 
-        from corrosion_simulator.platform_controller import apply_depth_yaxis_scale
-
-        log_fig = apply_depth_yaxis_scale(payload.depth_figure, "log")
+        log_fig = apply_depth_yaxis_scale(figs.depth_figure, "log")
         self.assertEqual(log_fig.layout.yaxis.type, "log")
         for trace in log_fig.data:
             if getattr(trace, "y", None) is not None:
                 self.assertTrue(all(float(v) > 0.0 for v in trace.y))
-        depth_line = [t for t in payload.depth_figure.data if "Depth (" in (t.name or "")][0]
+        depth_line = [t for t in figs.depth_figure.data if "Depth (" in (t.name or "")][0]
         self.assertEqual(depth_line.line.color, "#1f77b4")
         self.assertEqual(depth_line.line.dash, "solid")
-        risk_line = [t for t in payload.risk_figure.data if (t.name or "") == "Thickness Loss Risk R(t)"][0]
+        risk_line = [t for t in figs.risk_figure.data if (t.name or "") == "Thickness Loss Risk R(t)"][0]
         self.assertEqual(risk_line.line.color, "#d95f02")
         self.assertEqual(risk_line.line.dash, "dashdot")
 
@@ -238,8 +245,9 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         db_payload = self.controller.run_single_metal_analysis(db_req)
         self.assertEqual(db_payload.resolved_parameters.source, "database")
         self.assertIsNone(db_payload.mc_propagation)
-        self.assertIsInstance(db_payload.polarization_figure, go.Figure)
-        self.assertIsInstance(db_payload.kinetics_risk_figure, go.Figure)
+        db_figs = build_single_metal_figures(db_payload, include_combined=True)
+        self.assertIsInstance(db_figs.polarization_figure, go.Figure)
+        self.assertIsInstance(db_figs.kinetics_risk_figure, go.Figure)
 
         manual_req = SimulationRequest(
             primary_metal="Cu",
@@ -321,7 +329,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         )
         payload = self.controller.run_galvanic_analysis(req)
 
-        self.assertIsInstance(payload, GalvanicViewPayload)
+        self.assertIsInstance(payload, GalvanicAnalysisResult)
         self.assertEqual({payload.active_metal, payload.noble_metal}, {"Cu", "Co"})
         self.assertIn(payload.galvanic_driving_force_risk, {"Low", "Medium", "High"})
         self.assertGreaterEqual(payload.acceleration_factor, 1.0)
@@ -337,21 +345,25 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertIsNotNone(payload.mc_galvanic)
         self.assertIsNotNone(payload.mc_coupled_kinetics)
 
-        # Plotly figures are valid and include E_galv vertical line + comparative traces
-        self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
-        self.assertGreaterEqual(len(payload.galvanic_polarization_figure.data), 3)
-        self.assertGreaterEqual(len(payload.galvanic_polarization_figure.layout.shapes), 1)
-        self.assertIn("Potential", payload.galvanic_polarization_figure.layout.xaxis.title.text)
-        self.assertIn("log10", payload.galvanic_polarization_figure.layout.yaxis.title.text)
+        # Pure simulation result carries no Plotly figure attributes
+        self.assertFalse(any(name.endswith("_figure") for name in vars(payload)))
 
-        self.assertIsInstance(payload.comparative_kinetics_figure, go.Figure)
-        self.assertGreaterEqual(len(payload.comparative_kinetics_figure.data), 4)
-        self.assertIsInstance(payload.galvanic_depth_figure, go.Figure)
-        self.assertIsInstance(payload.galvanic_risk_figure, go.Figure)
-        self.assertEqual(payload.galvanic_depth_figure.layout.legend.orientation, "h")
-        self.assertEqual(payload.galvanic_risk_figure.layout.legend.orientation, "h")
-        galv_depth_names = {t.name for t in payload.galvanic_depth_figure.data}
-        galv_risk_names = {t.name for t in payload.galvanic_risk_figure.data}
+        # Plotly figures are built on demand via plotly_charts and include E_galv vertical line + comparative traces
+        galv_figs = build_galvanic_figures(payload, include_combined=True)
+        self.assertIsInstance(galv_figs.galvanic_polarization_figure, go.Figure)
+        self.assertGreaterEqual(len(galv_figs.galvanic_polarization_figure.data), 3)
+        self.assertGreaterEqual(len(galv_figs.galvanic_polarization_figure.layout.shapes), 1)
+        self.assertIn("Potential", galv_figs.galvanic_polarization_figure.layout.xaxis.title.text)
+        self.assertIn("log10", galv_figs.galvanic_polarization_figure.layout.yaxis.title.text)
+
+        self.assertIsInstance(galv_figs.comparative_kinetics_figure, go.Figure)
+        self.assertGreaterEqual(len(galv_figs.comparative_kinetics_figure.data), 4)
+        self.assertIsInstance(galv_figs.galvanic_depth_figure, go.Figure)
+        self.assertIsInstance(galv_figs.galvanic_risk_figure, go.Figure)
+        self.assertEqual(galv_figs.galvanic_depth_figure.layout.legend.orientation, "h")
+        self.assertEqual(galv_figs.galvanic_risk_figure.layout.legend.orientation, "h")
+        galv_depth_names = {t.name for t in galv_figs.galvanic_depth_figure.data}
+        galv_risk_names = {t.name for t in galv_figs.galvanic_risk_figure.data}
         self.assertIn("Coupled Depth 50% Band (p25–p75)", galv_depth_names)
         self.assertNotIn("Coupled Depth 90% Band (p05–p95)", galv_depth_names)
         self.assertIn("Coupled Risk 50% Band (p25–p75)", galv_risk_names)
@@ -373,15 +385,15 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
             payload.galvanic_current_density_uA_cm2,
             places=6,
         )
-        galv_coupled_depth = [t for t in payload.galvanic_depth_figure.data if (t.name or "").endswith("Coupled Depth")][0]
+        galv_coupled_depth = [t for t in galv_figs.galvanic_depth_figure.data if (t.name or "").endswith("Coupled Depth")][0]
         self.assertEqual(galv_coupled_depth.line.color, "#1f77b4")
         self.assertEqual(galv_coupled_depth.line.dash, "solid")
-        galv_uncoupled_depth = [t for t in payload.galvanic_depth_figure.data if (t.name or "").endswith("Uncoupled Depth")][0]
+        galv_uncoupled_depth = [t for t in galv_figs.galvanic_depth_figure.data if (t.name or "").endswith("Uncoupled Depth")][0]
         self.assertEqual(galv_uncoupled_depth.line.dash, "dash")
-        galv_coupled_risk = [t for t in payload.galvanic_risk_figure.data if (t.name or "").endswith("Coupled Risk")][0]
+        galv_coupled_risk = [t for t in galv_figs.galvanic_risk_figure.data if (t.name or "").endswith("Coupled Risk")][0]
         self.assertEqual(galv_coupled_risk.line.color, "#d95f02")
         self.assertEqual(galv_coupled_risk.line.dash, "dashdot")
-        galv_uncoupled_risk = [t for t in payload.galvanic_risk_figure.data if (t.name or "").endswith("Uncoupled Risk")][0]
+        galv_uncoupled_risk = [t for t in galv_figs.galvanic_risk_figure.data if (t.name or "").endswith("Uncoupled Risk")][0]
         self.assertEqual(galv_uncoupled_risk.line.dash, "dot")
 
         summary = payload.to_summary_dict()
@@ -438,8 +450,9 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertEqual(payload.secondary_resolved.source, "database")
         self.assertIsNone(payload.mc_galvanic)
         self.assertGreaterEqual(payload.acceleration_factor, 1.0)
-        self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
-        self.assertIsInstance(payload.comparative_kinetics_figure, go.Figure)
+        db_galv_figs = build_galvanic_figures(payload, include_combined=True)
+        self.assertIsInstance(db_galv_figs.galvanic_polarization_figure, go.Figure)
+        self.assertIsInstance(db_galv_figs.comparative_kinetics_figure, go.Figure)
 
     def test_galvanic_database_source_handles_mismatched_solution_ids_without_error(self) -> None:
         import pandas as pd
@@ -463,7 +476,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
             payload = raw_controller.run_galvanic_analysis(req)
             self.assertEqual({payload.active_metal, payload.noble_metal}, set(pair))
             self.assertGreaterEqual(payload.acceleration_factor, 1.0)
-            self.assertIsInstance(payload.galvanic_polarization_figure, go.Figure)
+            self.assertIsInstance(build_galvanic_figures(payload).galvanic_polarization_figure, go.Figure)
 
         # 2. Deterministically verify mismatched solution_ids / temperatures degrade to Low confidence with warning
         disjoint_db = HarmonizedDatabase.from_raw_tables(
@@ -544,8 +557,8 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
 
         # Calling get_predictor again returns the cached instance
         self.assertIs(
-            self.controller.get_predictor("hist_gradient_boosting"),
-            self.controller.get_predictor("hist_gradient_boosting"),
+            self.controller.repository.get_predictor("hist_gradient_boosting"),
+            self.controller.repository.get_predictor("hist_gradient_boosting"),
         )
 
     def test_controller_calibration_modes_end_to_end_physics_and_reload(self) -> None:
@@ -698,7 +711,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
 
             # Updating lab CSV and calling reload_external_data invalidates cached lab calibration models
             _make_lab_rows(6).to_csv(lab_dir / "study.csv", index=False)
-            reload_summary = ctrl.reload_external_data()
+            reload_summary = ctrl.repository.reload_external_data()
             self.assertFalse(reload_summary.raw_rebuilt)
             self.assertTrue(reload_summary.lab_cache_invalidated)
             refreshed = ctrl.run_single_metal_analysis(
@@ -1052,10 +1065,12 @@ class TestStreamlitAppSmoke(unittest.TestCase):
 
         # 2. Peer-absent no-op: when peer model is neither in memory nor on disk, never train it on the fly
         ctrl = CorrosionPlatformController.from_default_data(model_family="rf_gp_ensemble")
-        ctrl._predictors = {"rf_gp_ensemble": ctrl.get_predictor("rf_gp_ensemble")}
-        ctrl.artifact_dir = None  # No disk artifacts available for peer
+        ctrl.repository._predictors = {
+            "rf_gp_ensemble": ctrl.repository.get_predictor("rf_gp_ensemble")
+        }
+        ctrl.repository.artifact_dir = None  # No disk artifacts available for peer
         with patch.object(
-            ctrl,
+            ctrl.repository,
             "_load_or_fit_predictor",
             side_effect=AssertionError("Must not train missing peer model during prediction"),
         ):
@@ -1106,11 +1121,11 @@ class TestStreamlitAppSmoke(unittest.TestCase):
             )
 
         # Moderate |ΔE_corr| = 0.10 V (> 0.08 V) -> High downgrades to Medium
-        ctrl._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
+        ctrl.repository._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
             model_family="rf_gp_ensemble",
             predict=lambda q: _make_stub_pred("rf_gp_ensemble", 0.20, 0.50),
         )
-        ctrl._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
+        ctrl.repository._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
             model_family="hist_gradient_boosting",
             predict=lambda q: _make_stub_pred("hist_gradient_boosting", 0.30, 0.55),
         )
@@ -1129,11 +1144,11 @@ class TestStreamlitAppSmoke(unittest.TestCase):
 
         # Moderate |Δlog10(i_corr)| = 0.65 (> 0.5) on Medium tier -> Medium downgrades to Low
         base_ad_med = replace(base_ad_high, confidence_tier="Medium")
-        ctrl._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
+        ctrl.repository._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
             model_family="rf_gp_ensemble",
             predict=lambda q: _make_stub_pred("rf_gp_ensemble", 0.20, 0.50, base_ad_med),
         )
-        ctrl._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
+        ctrl.repository._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
             model_family="hist_gradient_boosting",
             predict=lambda q: _make_stub_pred("hist_gradient_boosting", 0.21, 1.15, base_ad_med),
         )
@@ -1143,11 +1158,11 @@ class TestStreamlitAppSmoke(unittest.TestCase):
         self.assertEqual(med_to_low.confidence_tier, "Low")
 
         # Severe |Δlog10(i_corr)| = 1.25 (> 1.0) on High tier -> forced directly to Low
-        ctrl._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
+        ctrl.repository._predictors["rf_gp_ensemble"] = SimpleNamespace(  # type: ignore[assignment]
             model_family="rf_gp_ensemble",
             predict=lambda q: _make_stub_pred("rf_gp_ensemble", 0.20, 0.50, base_ad_high),
         )
-        ctrl._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
+        ctrl.repository._predictors["hist_gradient_boosting"] = SimpleNamespace(  # type: ignore[assignment]
             model_family="hist_gradient_boosting",
             predict=lambda q: _make_stub_pred("hist_gradient_boosting", 0.21, 1.75, base_ad_high),
         )
