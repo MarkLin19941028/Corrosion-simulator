@@ -16,17 +16,20 @@ from corrosion_simulator.build_artifacts import (
     build_processed_artifacts,
     check_artifacts_freshness,
 )
-from corrosion_simulator.ml_predictor import MODEL_FAMILY_LABELS
+from corrosion_simulator.lab_calibration import CALIBRATION_MODE_LABELS, ResidualBreakdown
+from corrosion_simulator.ml_predictor import MODEL_FAMILY_LABELS, ApplicabilityDomainResult
 from corrosion_simulator.paths import (
     iter_raw_csv_files,
     resolve_data_dirs,
 )
 from corrosion_simulator.platform_controller import (
+    NON_AQUEOUS_WARNING_PREFIX,
     CorrosionPlatformController,
     GalvanicViewPayload,
     ManualElectrochemicalInput,
     SimulationRequest,
     SingleMetalViewPayload,
+    build_non_aqueous_physics_warning,
 )
 from corrosion_simulator.reporting import (
     CleaningRecipeSpec,
@@ -47,6 +50,33 @@ KINETICS_LABELS = {
     "passivation": "Passivation (Self-Limiting)",
     "power_law": "Power-Law (Diffusion / Inhibited)",
 }
+
+SOLVENT_REGIME_LABELS = {
+    "aqueous": "Aqueous (≥ 90 wt% Water)",
+    "semi_aqueous": "Semi-aqueous (1–89.9 wt% Water)",
+    "non_aqueous": "Non-aqueous (< 1 wt% Water)",
+}
+
+
+def _solvent_slider_bounds(regime: str, organic_solvent_type: str) -> tuple[float, float, float, float]:
+    """Return ``(min_wt_pct, max_wt_pct, default_wt_pct, step)`` consistent with ``regime``."""
+    if regime == "aqueous":
+        return (90.0, 100.0, 100.0 if organic_solvent_type == "None" else 95.0, 0.5)
+    if regime == "semi_aqueous":
+        return (1.0, 89.9, 50.0, 0.5)
+    return (0.0, 0.99, 0.0, 0.01)
+
+
+def _render_non_aqueous_warning_banner(request: SimulationRequest) -> None:
+    """Render a prominent physics-limitation banner when simulating non-aqueous (<1% water) conditions."""
+    if request.solvent_regime == "non_aqueous" or float(request.water_content_wt_pct) < 1.0:
+        st.warning(
+            build_non_aqueous_physics_warning(
+                float(request.water_content_wt_pct),
+                request.organic_solvent_type,
+            ),
+            icon="⚠️",
+        )
 
 
 @st.cache_resource(show_spinner="Loading prebuilt electrochemical database and ML models...")
@@ -148,6 +178,10 @@ def _render_confidence_and_warnings(
     confidence_tier: str,
     warnings: list[str],
     recommendations: list[str],
+    *,
+    applicability_items: list[tuple[str, ApplicabilityDomainResult]] | None = None,
+    calibration_mode: str = "literature_only",
+    lab_project: str | None = None,
 ) -> None:
     if confidence_tier == "High":
         st.success(f"**Confidence Tier:** {confidence_tier} — Query lies well within the Applicability Domain.")
@@ -156,15 +190,55 @@ def _render_confidence_and_warnings(
     else:
         st.error(f"**Confidence Tier:** {confidence_tier} — Extrapolation or sparse data detected.")
 
-    if warnings:
-        with st.expander(f"Applicability Domain & Data-Sufficiency Warnings ({len(warnings)})", expanded=(confidence_tier != "High")):
-            for item in warnings:
+    if applicability_items and calibration_mode in ("delta_learning", "lab_only_gp"):
+        for metal_label, ad in applicability_items:
+            knn_str = (
+                f"{ad.lab_knn_distance:.3f}"
+                if (ad.lab_knn_distance is not None and math.isfinite(ad.lab_knn_distance))
+                else "∞"
+            )
+            if calibration_mode == "delta_learning":
+                lit_box = "In Literature Box" if ad.in_bounding_box else "Outside Literature Box"
+                st.info(
+                    f"**Applicability Domain ({metal_label} — Delta-Learning):** "
+                    f"Literature coverage: `{lit_box}` (`n={ad.n_metal_training_samples}`) | "
+                    f"Lab proximity (`{lab_project or 'None'}`): **{ad.lab_anchoring_status}** "
+                    f"(`n_lab={ad.n_lab_samples}`, `lab_in_box={ad.lab_in_bounding_box}`, "
+                    f"`lab k-NN distance={knn_str}`)."
+                )
+            else:
+                st.info(
+                    f"**Applicability Domain ({metal_label} — Lab-Only Local GP):** "
+                    f"Evaluated strictly against lab project `{lab_project or 'None'}` — "
+                    f"**{ad.lab_anchoring_status}** (`n_lab={ad.n_lab_samples}`, "
+                    f"`lab_in_box={ad.lab_in_bounding_box}`, `lab k-NN distance={knn_str}`)."
+                )
+
+    secondary_warnings = [
+        w for w in warnings if not w.startswith(NON_AQUEOUS_WARNING_PREFIX)
+    ]
+    if secondary_warnings:
+        with st.expander(f"Applicability Domain & Data-Sufficiency Warnings ({len(secondary_warnings)})", expanded=(confidence_tier != "High")):
+            for item in secondary_warnings:
                 st.warning(item)
 
     if recommendations:
         with st.expander(f"Suggested Follow-Up Experiments ({len(recommendations)})", expanded=(confidence_tier == "Low")):
             for rec in recommendations:
                 st.markdown(f"- {rec}")
+
+
+def _render_residual_breakdown_section(
+    breakdowns: list[tuple[str, ResidualBreakdown]],
+) -> None:
+    """Render an expandable Residual Breakdown table for Delta-Learning calibration."""
+    if not breakdowns:
+        return
+    with st.expander("Residual Breakdown (Prior → Lab Δ → Calibrated Final)", expanded=False):
+        for label, breakdown in breakdowns:
+            if len(breakdowns) > 1:
+                st.markdown(f"**{label}**")
+            st.dataframe(breakdown.to_dataframe(), width="stretch", hide_index=True)
 
 
 def _format_metal_label(metal: str, counts: dict[str, int], has_faraday: dict[str, bool]) -> str:
@@ -368,6 +442,40 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     pH = st.sidebar.slider("Solution pH", min_value=0.0, max_value=14.0, value=3.0, step=0.1)
     temperature_C = st.sidebar.slider("Operating Temperature (°C)", min_value=5.0, max_value=95.0, value=25.0, step=1.0)
 
+    st.sidebar.markdown("**Solvent System**")
+    solvent_regime = st.sidebar.selectbox(
+        "Solvent Regime",
+        options=options["solvent_regimes"],
+        format_func=lambda key: SOLVENT_REGIME_LABELS.get(key, key),
+        index=0,
+        key="sidebar_solvent_regime",
+    )
+    organic_options = options["organic_solvent_types"]
+    organic_solvent_type = st.sidebar.selectbox(
+        "Organic Co-Solvent",
+        options=organic_options,
+        index=0,
+        key="sidebar_organic_solvent",
+    )
+    w_min, w_max, w_default, w_step = _solvent_slider_bounds(
+        solvent_regime, organic_solvent_type
+    )
+    prev_regime = st.session_state.get("_last_sidebar_solvent_regime")
+    if "sidebar_water_content" not in st.session_state:
+        st.session_state["sidebar_water_content"] = w_default
+    elif prev_regime != solvent_regime or not (
+        w_min <= float(st.session_state["sidebar_water_content"]) <= w_max
+    ):
+        st.session_state["sidebar_water_content"] = w_default
+    st.session_state["_last_sidebar_solvent_regime"] = solvent_regime
+    water_content_wt_pct = st.sidebar.slider(
+        "Water Content (wt%)",
+        min_value=w_min,
+        max_value=w_max,
+        step=w_step,
+        key="sidebar_water_content",
+    )
+
     st.sidebar.subheader("3. Immersion Time & Kinetics")
     immersion_time_s = st.sidebar.number_input(
         "Immersion Time (s)",
@@ -417,13 +525,37 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     )
 
     ml_model_family = "random_forest"
+    calibration_mode = "literature_only"
+    selected_lab_project: str | None = None
     if parameter_source == "ml":
+        st.sidebar.markdown("**Lab Calibration**")
+        calibration_mode = st.sidebar.radio(
+            "Lab Calibration Mode",
+            options=options["calibration_modes"],
+            format_func=lambda key: CALIBRATION_MODE_LABELS.get(key, key),
+            index=0,
+            key="sidebar_calibration_mode",
+        )
+        lab_project_choices: list[str] = options.get("lab_projects", [])
+        if lab_project_choices:
+            selected_lab_project = st.sidebar.selectbox(
+                "Lab Dataset (data/lab/)",
+                options=lab_project_choices,
+                index=0,
+                disabled=(calibration_mode == "literature_only"),
+                key="sidebar_lab_project",
+            )
+        elif calibration_mode != "literature_only":
+            st.sidebar.info(
+                "No lab projects found under `data/lab/<project>/`. Add lab CSVs and click **Reload External Data**."
+            )
         ml_model_family = st.sidebar.selectbox(
             "ML Model Algorithm",
             options=options["ml_model_families"],
             format_func=lambda key: MODEL_FAMILY_LABELS.get(key, key),
             index=0,
-            help="Select the ML regressor used for live parameter prediction and uncertainty propagation. Models are cached after first fit.",
+            disabled=(calibration_mode == "lab_only_gp"),
+            help="Select the ML regressor used for Literature Only or Delta-Learning prior. Lab-Only Local GP fits a standalone local Gaussian Process.",
         )
 
     manual_primary: ManualElectrochemicalInput | None = None
@@ -449,6 +581,9 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         inhibitor_concentration=float(inhibitor_conc),
         pH=float(pH),
         temperature_C=float(temperature_C),
+        solvent_regime=solvent_regime,
+        organic_solvent_type=organic_solvent_type,
+        water_content_wt_pct=float(water_content_wt_pct),
         immersion_time_s=float(immersion_time_s),
         d_crit_nm=float(d_crit_nm),
         kinetics_model=kinetics_model,
@@ -456,6 +591,8 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         power_law_n=float(power_law_n),
         parameter_source=parameter_source,
         ml_model_family=ml_model_family,
+        calibration_mode=calibration_mode,
+        lab_project=(selected_lab_project if calibration_mode != "literature_only" else None),
         manual_primary=manual_primary,
         manual_secondary=manual_secondary,
     )
@@ -463,15 +600,36 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
 
 def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
     st.subheader(f"Single Metal Analysis — {payload.request.primary_metal}")
+    _render_non_aqueous_warning_banner(payload.request)
     if payload.request.parameter_source == "ml":
         model_label = MODEL_FAMILY_LABELS.get(
             payload.request.ml_model_family, payload.request.ml_model_family
         )
-        st.caption(f"Active ML Model: **{model_label}**")
+        cal_label = CALIBRATION_MODE_LABELS.get(
+            payload.request.calibration_mode, payload.request.calibration_mode
+        )
+        lab_clause = (
+            f" (`{payload.resolved_parameters.lab_project or 'None'}`)"
+            if payload.request.calibration_mode != "literature_only"
+            else ""
+        )
+        st.caption(
+            f"Active ML Model: **{model_label}** | Calibration: **{cal_label}**{lab_clause} | "
+            f"Solvent Regime: **{payload.request.solvent_regime}** "
+            f"({payload.request.solvent_subclass}, {float(payload.request.water_content_wt_pct):.1f} wt% water)"
+        )
+    ad_items = (
+        [(payload.request.primary_metal, payload.resolved_parameters.applicability)]
+        if payload.resolved_parameters.applicability is not None
+        else None
+    )
     _render_confidence_and_warnings(
         payload.confidence_tier,
         payload.warnings,
         payload.experimental_recommendations,
+        applicability_items=ad_items,
+        calibration_mode=payload.request.calibration_mode,
+        lab_project=payload.resolved_parameters.lab_project,
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -516,6 +674,13 @@ def _render_single_metal_view(payload: SingleMetalViewPayload) -> None:
 
     st.markdown("#### Electrochemical Parameters & Uncertainty (±1σ)")
     st.dataframe(payload.parameter_table, width="stretch", hide_index=True)
+    if (
+        payload.request.calibration_mode == "delta_learning"
+        and payload.resolved_parameters.residual_breakdown is not None
+    ):
+        _render_residual_breakdown_section(
+            [(payload.request.primary_metal, payload.resolved_parameters.residual_breakdown)]
+        )
 
     st.plotly_chart(payload.polarization_figure, width="stretch")
     st.plotly_chart(payload.kinetics_risk_figure, width="stretch")
@@ -529,15 +694,36 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
     st.subheader(
         f"Galvanic Analysis — {payload.active_metal} (Active Metal) coupled with {payload.noble_metal} (Noble Metal)"
     )
+    _render_non_aqueous_warning_banner(payload.request)
     if payload.request.parameter_source == "ml":
         model_label = MODEL_FAMILY_LABELS.get(
             payload.request.ml_model_family, payload.request.ml_model_family
         )
-        st.caption(f"Active ML Model: **{model_label}**")
+        cal_label = CALIBRATION_MODE_LABELS.get(
+            payload.request.calibration_mode, payload.request.calibration_mode
+        )
+        lab_clause = (
+            f" (`{payload.primary_resolved.lab_project or 'None'}`)"
+            if payload.request.calibration_mode != "literature_only"
+            else ""
+        )
+        st.caption(
+            f"Active ML Model: **{model_label}** | Calibration: **{cal_label}**{lab_clause} | "
+            f"Solvent Regime: **{payload.request.solvent_regime}** "
+            f"({payload.request.solvent_subclass}, {float(payload.request.water_content_wt_pct):.1f} wt% water)"
+        )
+    galv_ad_items: list[tuple[str, ApplicabilityDomainResult]] = []
+    if payload.primary_resolved.applicability is not None:
+        galv_ad_items.append((payload.primary_resolved.metal, payload.primary_resolved.applicability))
+    if payload.secondary_resolved.applicability is not None:
+        galv_ad_items.append((payload.secondary_resolved.metal, payload.secondary_resolved.applicability))
     _render_confidence_and_warnings(
         payload.confidence_tier,
         payload.warnings,
         payload.experimental_recommendations,
+        applicability_items=galv_ad_items or None,
+        calibration_mode=payload.request.calibration_mode,
+        lab_project=payload.primary_resolved.lab_project,
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -617,6 +803,17 @@ def _render_galvanic_view(payload: GalvanicViewPayload | None) -> None:
     )
     st.markdown("#### Uncoupled vs. Galvanically Coupled Summary")
     st.dataframe(comparison_df, width="stretch", hide_index=True)
+    if payload.request.calibration_mode == "delta_learning":
+        galv_breakdowns: list[tuple[str, ResidualBreakdown]] = []
+        if payload.primary_resolved.residual_breakdown is not None:
+            galv_breakdowns.append(
+                (payload.primary_resolved.metal, payload.primary_resolved.residual_breakdown)
+            )
+        if payload.secondary_resolved.residual_breakdown is not None:
+            galv_breakdowns.append(
+                (payload.secondary_resolved.metal, payload.secondary_resolved.residual_breakdown)
+            )
+        _render_residual_breakdown_section(galv_breakdowns)
 
     st.plotly_chart(payload.galvanic_polarization_figure, width="stretch")
     st.plotly_chart(payload.comparative_kinetics_figure, width="stretch")
@@ -654,6 +851,9 @@ def _default_recipe_presets(base_request: SimulationRequest) -> list[CleaningRec
             pH=base_request.pH,
             temperature_C=base_request.temperature_C,
             immersion_time_s=base_request.immersion_time_s,
+            solvent_regime=base_request.solvent_regime,
+            organic_solvent_type=base_request.organic_solvent_type,
+            water_content_wt_pct=float(base_request.water_content_wt_pct),
         ),
         CleaningRecipeSpec(
             name="Low-Oxidizer Mild Rinse",
@@ -726,6 +926,9 @@ def _render_recipe_comparison_view(
     presets = _default_recipe_presets(base_request)
     n_recipes = st.slider("Number of Candidate Cleaning Recipes", min_value=2, max_value=5, value=3)
 
+    organic_options = options["organic_solvent_types"]
+    regime_options = options["solvent_regimes"]
+
     recipes: list[CleaningRecipeSpec] = []
     cols = st.columns(n_recipes)
     for idx in range(n_recipes):
@@ -733,6 +936,44 @@ def _render_recipe_comparison_view(
         with cols[idx]:
             st.markdown(f"**Recipe {idx + 1}**")
             name = st.text_input("Name", value=preset.name, key=f"cmp_name_{idx}")
+            r_regime_key = f"cmp_regime_{idx}"
+            r_org_key = f"cmp_org_{idx}"
+            r_water_key = f"cmp_water_{idx}"
+            r_last_key = f"_last_cmp_regime_{idx}"
+            if r_regime_key not in st.session_state:
+                st.session_state[r_regime_key] = preset.solvent_regime
+            cmp_regime = st.selectbox(
+                "Solvent Regime",
+                options=regime_options,
+                format_func=lambda k: SOLVENT_REGIME_LABELS.get(k, k),
+                key=r_regime_key,
+            )
+            if r_org_key not in st.session_state:
+                st.session_state[r_org_key] = (
+                    preset.organic_solvent_type
+                    if preset.organic_solvent_type in organic_options
+                    else "None"
+                )
+            cmp_org = st.selectbox(
+                "Co-Solvent",
+                options=organic_options,
+                key=r_org_key,
+            )
+            cw_min, cw_max, cw_default, cw_step = _solvent_slider_bounds(cmp_regime, cmp_org)
+            if r_water_key not in st.session_state:
+                st.session_state[r_water_key] = float(preset.water_content_wt_pct)
+            elif st.session_state.get(r_last_key) != cmp_regime or not (
+                cw_min <= float(st.session_state[r_water_key]) <= cw_max
+            ):
+                st.session_state[r_water_key] = cw_default
+            st.session_state[r_last_key] = cmp_regime
+            cmp_water = st.number_input(
+                "Water Content (wt%)",
+                min_value=cw_min,
+                max_value=cw_max,
+                step=cw_step,
+                key=r_water_key,
+            )
             ox_idx = options["oxidizer_types"].index(preset.oxidizer_type) if preset.oxidizer_type in options["oxidizer_types"] else 0
             ox_type = st.selectbox("Oxidizer", options=options["oxidizer_types"], index=ox_idx, key=f"cmp_ox_{idx}")
             ox_conc = st.number_input(
@@ -783,6 +1024,9 @@ def _render_recipe_comparison_view(
                     pH=float(ph_val),
                     temperature_C=float(temp_val),
                     immersion_time_s=float(time_val),
+                    solvent_regime=cmp_regime,
+                    organic_solvent_type=cmp_org,
+                    water_content_wt_pct=float(cmp_water),
                 )
             )
 

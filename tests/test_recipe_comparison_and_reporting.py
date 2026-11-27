@@ -133,6 +133,68 @@ class TestRecipeComparison(unittest.TestCase):
         self.assertIsInstance(result.bar_figure, go.Figure)
         self.assertIsInstance(result.radar_figure, go.Figure)
 
+    def test_cross_regime_recipe_comparison_includes_solvent_metadata(self) -> None:
+        base_req = SimulationRequest(
+            primary_metal="Cu",
+            d_crit_nm=1.0,
+            kinetics_model="linear",
+            parameter_source="ml",
+            mc_draws=80,
+        )
+        cross_recipes = [
+            CleaningRecipeSpec(
+                name="Aqueous Citric Clean",
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                acid_type="Citric acid",
+                acid_concentration=1.0,
+                pH=3.5,
+                temperature_C=25.0,
+                immersion_time_s=180.0,
+                solvent_regime="aqueous",
+                organic_solvent_type="None",
+                water_content_wt_pct=100.0,
+            ),
+            CleaningRecipeSpec(
+                name="Semi-Aqueous EG Clean",
+                oxidizer_type="H2O2",
+                oxidizer_concentration=0.5,
+                pH=5.5,
+                temperature_C=35.0,
+                immersion_time_s=180.0,
+                solvent_regime="semi_aqueous",
+                organic_solvent_type="EG",
+                water_content_wt_pct=40.0,
+            ),
+            CleaningRecipeSpec(
+                name="Non-Aqueous DMSO Strip",
+                oxidizer_type="None",
+                oxidizer_concentration=0.0,
+                pH=7.0,
+                temperature_C=45.0,
+                immersion_time_s=180.0,
+                solvent_regime="non_aqueous",
+                organic_solvent_type="DMSO",
+                water_content_wt_pct=0.2,
+            ),
+        ]
+        result = compare_cleaning_recipes(self.controller, base_req, cross_recipes)
+        for col in ("Solvent Regime", "Solvent Subclass", "Co-Solvent", "Water (wt%)"):
+            self.assertIn(col, result.comparison_table.columns)
+
+        by_name = {item["recipe_name"]: item for item in result.to_summary_dict()["rankings"]}
+        self.assertEqual(by_name["Aqueous Citric Clean"]["solvent_regime"], "aqueous")
+        self.assertEqual(by_name["Aqueous Citric Clean"]["solvent_subclass"], "acidic")
+        self.assertEqual(by_name["Semi-Aqueous EG Clean"]["solvent_regime"], "semi_aqueous")
+        self.assertEqual(by_name["Semi-Aqueous EG Clean"]["solvent_subclass"], "glycol")
+        self.assertEqual(by_name["Semi-Aqueous EG Clean"]["organic_solvent_type"], "EG")
+        self.assertAlmostEqual(by_name["Semi-Aqueous EG Clean"]["water_content_wt_pct"], 40.0)
+        self.assertEqual(by_name["Non-Aqueous DMSO Strip"]["solvent_regime"], "non_aqueous")
+        self.assertEqual(by_name["Non-Aqueous DMSO Strip"]["solvent_subclass"], "polar_aprotic")
+        self.assertTrue(
+            any("aqueous Pourbaix" in w for w in by_name["Non-Aqueous DMSO Strip"]["warnings"])
+        )
+
 
 class TestMultiFormatReportExport(unittest.TestCase):
     @classmethod
@@ -226,6 +288,225 @@ class TestMultiFormatReportExport(unittest.TestCase):
         svg_str = exports["svg"].decode("utf-8")
         self.assertIn("<svg", svg_str)
         self.assertIn("</svg>", svg_str)
+
+    def test_exported_reports_include_solvent_regime_and_water_metadata(self) -> None:
+        import re
+        import zlib
+
+        semi_req = SimulationRequest(
+            primary_metal="Cu",
+            secondary_metal="Co",
+            cathode_to_anode_area_ratio=1.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            pH=4.5,
+            temperature_C=30.0,
+            solvent_regime="semi_aqueous",
+            organic_solvent_type="EG",
+            water_content_wt_pct=45.0,
+            immersion_time_s=180.0,
+            parameter_source="ml",
+            mc_draws=80,
+        )
+        single_payload = self.controller.run_single_metal_analysis(semi_req)
+        galvanic_payload = self.controller.run_galvanic_analysis(semi_req)
+        comparison_payload = compare_cleaning_recipes(
+            self.controller,
+            semi_req,
+            [
+                CleaningRecipeSpec(
+                    name="Semi-Aqueous EG",
+                    solvent_regime="semi_aqueous",
+                    organic_solvent_type="EG",
+                    water_content_wt_pct=45.0,
+                    pH=4.5,
+                    temperature_C=30.0,
+                    immersion_time_s=180.0,
+                ),
+                CleaningRecipeSpec(
+                    name="Non-Aqueous DMSO",
+                    solvent_regime="non_aqueous",
+                    organic_solvent_type="DMSO",
+                    water_content_wt_pct=0.5,
+                    pH=7.0,
+                    temperature_C=30.0,
+                    immersion_time_s=180.0,
+                ),
+            ],
+        )
+
+        exports = generate_all_report_exports(
+            single_payload,
+            galvanic_payload=galvanic_payload,
+            comparison_payload=comparison_payload,
+        )
+
+        # JSON checks
+        json_obj = json.loads(exports["json"].decode("utf-8"))
+        for section in (json_obj["inputs"], json_obj["single_metal"], json_obj["galvanic"]):
+            self.assertEqual(section["solvent_regime"], "semi_aqueous")
+            self.assertEqual(section["solvent_subclass"], "glycol")
+            self.assertEqual(section["organic_solvent_type"], "EG")
+            self.assertAlmostEqual(section["water_content_wt_pct"], 45.0)
+
+        # HTML checks
+        html_str = exports["html"].decode("utf-8")
+        for token in (
+            "solvent_regime=semi_aqueous",
+            "solvent_subclass=glycol",
+            "organic_solvent_type=EG",
+            "water_content_wt_pct=45.00 wt%",
+        ):
+            self.assertIn(token, html_str)
+
+        # CSV checks
+        rows = list(csv.DictReader(io.StringIO(exports["csv"].decode("utf-8"))))
+        input_metrics = {
+            r["metric"]: r["value"] for r in rows if r["section"] == "Inputs"
+        }
+        self.assertEqual(input_metrics["solvent_regime"], "semi_aqueous")
+        self.assertEqual(input_metrics["solvent_subclass"], "glycol")
+        self.assertEqual(input_metrics["organic_solvent_type"], "EG")
+        self.assertEqual(float(input_metrics["water_content_wt_pct"]), 45.0)
+
+        # PDF checks: inspect both PDF metadata dictionary and decompressed page streams
+        pdf_bytes = exports["pdf"]
+        decompressed_parts: list[str] = [pdf_bytes.decode("latin-1", errors="ignore")]
+        for match in re.finditer(rb"stream[\r\n]+(.*?)[\r\n]+endstream", pdf_bytes, re.DOTALL):
+            try:
+                decompressed_parts.append(
+                    zlib.decompress(match.group(1)).decode("latin-1", errors="ignore")
+                )
+            except zlib.error:
+                pass
+        pdf_text = "\n".join(decompressed_parts)
+        for token in ("semi_aqueous", "glycol", "EG", "45.00"):
+            self.assertIn(token, pdf_text)
+
+    def test_reports_record_calibration_mode_lab_project_and_residual_breakdown(self) -> None:
+        from pathlib import Path
+        import re
+        import tempfile
+        import zlib
+        import pandas as pd
+
+        from corrosion_simulator.build_artifacts import build_processed_artifacts
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "data"
+            raw_dir = data_dir / "raw"
+            proc_dir = data_dir / "processed"
+            lab_dir = data_dir / "lab" / "pilot_eg"
+            raw_dir.mkdir(parents=True)
+            lab_dir.mkdir(parents=True)
+
+            pd.DataFrame(
+                [
+                    {
+                        "record_id": f"R_{i}",
+                        "metal": "Cu" if i % 2 == 0 else "Co",
+                        "solution_id": f"SOL_{i % 2}",
+                        "pH": 3.0 + (i % 4),
+                        "temperature_C": 25.0 + (i % 2) * 10.0,
+                        "oxidizer_type": "H2O2",
+                        "oxidizer_concentration": 1.0,
+                        "Ecorr_V_SHE": 0.25 if i % 2 == 0 else -0.10,
+                        "icorr_uA_cm2": 2.5 + 0.3 * i,
+                        "beta_a_mV_dec": 60.0,
+                        "beta_c_mV_dec": 120.0,
+                    }
+                    for i in range(12)
+                ]
+            ).to_csv(raw_dir / "lit.csv", index=False)
+            build_processed_artifacts(
+                raw_dir=raw_dir,
+                output_dir=proc_dir,
+                models=["random_forest"],
+                export_csv=False,
+            )
+            lab_rows = []
+            for idx in range(5):
+                for metal, ecorr, icorr in (("Cu", 0.38, 12.0), ("Co", -0.18, 22.0)):
+                    lab_rows.append(
+                        {
+                            "record_id": f"L_{metal}_{idx}",
+                            "metal": metal,
+                            "solution_id": f"EG_{idx}",
+                            "pH": 4.0 + idx * 0.5,
+                            "temperature_C": 25.0 + idx * 5.0,
+                            "oxidizer_type": "H2O2",
+                            "oxidizer_concentration": 1.0,
+                            "organic_solvent_type": "EG",
+                            "water_content_wt_pct": 50.0,
+                            "Ecorr_V_SHE": ecorr + 0.01 * idx,
+                            "icorr_uA_cm2": icorr + idx,
+                            "beta_a_mV_dec": 75.0,
+                            "beta_c_mV_dec": 135.0,
+                        }
+                    )
+            pd.DataFrame(lab_rows).to_csv(lab_dir / "pilot.csv", index=False)
+
+            ctrl = CorrosionPlatformController.from_default_data(
+                data_dir=data_dir,
+                model_family="random_forest",
+                auto_rebuild=False,
+            )
+            req = SimulationRequest(
+                primary_metal="Cu",
+                secondary_metal="Co",
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                pH=5.0,
+                temperature_C=30.0,
+                solvent_regime="semi_aqueous",
+                organic_solvent_type="EG",
+                water_content_wt_pct=50.0,
+                parameter_source="ml",
+                calibration_mode="delta_learning",
+                lab_project="pilot_eg",
+                mc_draws=80,
+            )
+            single_p = ctrl.run_single_metal_analysis(req)
+            galv_p = ctrl.run_galvanic_analysis(req)
+            exports = generate_all_report_exports(single_p, galvanic_payload=galv_p)
+
+            json_obj = json.loads(exports["json"].decode("utf-8"))
+            self.assertEqual(json_obj["inputs"]["calibration_mode"], "delta_learning")
+            self.assertEqual(json_obj["inputs"]["lab_project"], "pilot_eg")
+            self.assertIn("lab_calibration", json_obj)
+            self.assertEqual(json_obj["lab_calibration"]["lab_project"], "pilot_eg")
+            self.assertIn("single_metal_residual_breakdown", json_obj["lab_calibration"])
+            self.assertIn("galvanic_residual_breakdown", json_obj["lab_calibration"])
+            self.assertIn("applicability_domain", json_obj["single_metal"])
+            self.assertEqual(
+                json_obj["single_metal"]["applicability_domain"]["lab_anchoring_status"],
+                "Lab-Anchored",
+            )
+
+            html_str = exports["html"].decode("utf-8")
+            self.assertIn("calibration_mode=delta_learning", html_str)
+            self.assertIn("pilot_eg", html_str)
+            self.assertIn("Lab Calibration — Residual Breakdown", html_str)
+            self.assertIn("GP Residual", html_str)
+
+            csv_rows = list(csv.DictReader(io.StringIO(exports["csv"].decode("utf-8"))))
+            input_map = {r["metric"]: r["value"] for r in csv_rows if r["section"] == "Inputs"}
+            self.assertEqual(input_map["calibration_mode"], "delta_learning")
+            self.assertEqual(input_map["lab_project"], "pilot_eg")
+            rb_rows = [r for r in csv_rows if r["section"] == "Residual Breakdown"]
+            self.assertGreaterEqual(len(rb_rows), 8)
+            self.assertTrue(any("GP Residual" in r["metric"] for r in rb_rows))
+
+            pdf_bytes = exports["pdf"]
+            pdf_parts = [pdf_bytes.decode("latin-1", errors="ignore")]
+            for match in re.finditer(rb"stream[\r\n]+(.*?)[\r\n]+endstream", pdf_bytes, re.DOTALL):
+                try:
+                    pdf_parts.append(zlib.decompress(match.group(1)).decode("latin-1", errors="ignore"))
+                except zlib.error:
+                    pass
+            pdf_text = "\n".join(pdf_parts)
+            for token in ("delta_learning", "pilot_eg", "RESIDUAL BREAKDOWN", "GP Residual"):
+                self.assertIn(token, pdf_text)
 
 
 if __name__ == "__main__":

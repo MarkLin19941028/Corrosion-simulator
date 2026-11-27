@@ -444,6 +444,11 @@ class ApplicabilityDomainResult:
     n_metal_training_samples: int
     warnings: tuple[str, ...]
     experimental_recommendations: tuple[str, ...]
+    ad_mode: str = "literature_only"
+    lab_in_bounding_box: bool | None = None
+    lab_knn_distance: float | None = None
+    n_lab_samples: int = 0
+    lab_anchoring_status: str | None = None
 
 
 class ApplicabilityDomainChecker:
@@ -693,6 +698,9 @@ class MLParameterPrediction:
     beta_c_mV_dec: ParameterEstimate
     model_family: ModelFamily
     applicability: ApplicabilityDomainResult
+    calibration_mode: str = "literature_only"
+    lab_project: str | None = None
+    residual_breakdown: Any | None = None
 
     def to_polarization_parameters(self) -> PolarizationParameters:
         """Convert point estimates into physically clipped PolarizationParameters."""

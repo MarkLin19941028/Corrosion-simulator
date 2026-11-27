@@ -18,6 +18,11 @@ import numpy as np
 import pandas as pd
 
 from corrosion_simulator.database import ExposureCondition, HarmonizedDatabase
+from corrosion_simulator.lab_calibration import (
+    InsufficientLabSamplesError,
+    LabCalibratedPredictor,
+    ResidualBreakdown,
+)
 from corrosion_simulator.ml_predictor import (
     ApplicabilityDomainChecker,
     ApplicabilityDomainResult,
@@ -636,6 +641,503 @@ class TestSolventDescriptorsAndWaterWeightedFeatures(unittest.TestCase):
                 loaded = HybridMLPredictor.load(bundle_path)
                 pred_loaded = loaded.predict(semi_query)
                 self.assertAlmostEqual(pred.Ecorr_V_SHE.mean, pred_loaded.Ecorr_V_SHE.mean, places=10)
+
+
+class TestLabDeltaLearningAndLocalGP(unittest.TestCase):
+    """Issue 05: parameter-level Delta-Learning GP, n<4 bias fallback, Lab-Only GP, and clipping."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.seed_db = HarmonizedDatabase.from_seed()
+        cls.base_predictor = HybridMLPredictor(
+            model_family="random_forest",
+            random_state=42,
+            n_estimators=25,
+        ).fit(cls.seed_db)
+
+    def _build_lab_db(self, rows: list[dict[str, object]]) -> HarmonizedDatabase:
+        return HarmonizedDatabase.from_raw_tables(
+            pd.DataFrame(rows),
+            material_df=self.seed_db.material_properties,
+            filter_to_core_metals=False,
+            supplement_missing_core_metals=False,
+            fallback_to_seed=False,
+        )
+
+    def test_delta_learning_gp_residual_near_vs_far_uncertainty_and_tafel_imputation(self) -> None:
+        lab_rows: list[dict[str, object]] = []
+        for idx, ph_val in enumerate([3.0, 4.0, 5.0, 6.0, 7.0, 8.0]):
+            q = MLFeatureQuery(
+                metal="Cu",
+                pH=ph_val,
+                temperature_C=25.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                organic_solvent_type="EG",
+                water_content_wt_pct=50.0,
+                base_solvent="DI water",
+            )
+            prior = self.base_predictor.predict(q)
+            row: dict[str, object] = {
+                "record_id": f"LAB_CU_{idx}",
+                "metal": "Cu",
+                "solution_id": f"LAB_EG_PH{int(ph_val)}",
+                "pH": ph_val,
+                "temperature_C": 25.0,
+                "oxidizer_type": "H2O2",
+                "oxidizer_concentration": 1.0,
+                "acid_type": "None",
+                "acid_concentration": 0.0,
+                "inhibitor_type": "None",
+                "inhibitor_concentration": 0.0,
+                "organic_solvent_type": "EG",
+                "water_content_wt_pct": 50.0,
+                "base_solvent": "DI water",
+                "Ecorr_V_SHE": prior.Ecorr_V_SHE.mean + 0.25,
+                "icorr_uA_cm2": 10.0 ** (prior.log10_icorr_uA_cm2.mean + 0.90),
+            }
+            # Only 2 rows have measured beta_a; remaining 4 omit beta_a (imputed by harmonizer).
+            # Zero rows measure beta_c (all imputed by harmonizer).
+            if idx in (1, 3):
+                row["beta_a_mV_dec"] = prior.beta_a_mV_dec.mean + 25.0
+            lab_rows.append(row)
+
+        lab_db = self._build_lab_db(lab_rows)
+        cal = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="delta_learning",
+            lab_project="cu_eg_study",
+        ).fit(lab_db)
+
+        near_q = MLFeatureQuery(
+            metal="Cu",
+            pH=5.0,
+            temperature_C=25.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            organic_solvent_type="EG",
+            water_content_wt_pct=50.0,
+            base_solvent="DI water",
+        )
+        near_prior = self.base_predictor.predict(near_q)
+        near_pred = cal.predict(near_q)
+        self.assertIsInstance(near_pred.residual_breakdown, ResidualBreakdown)
+        rb = near_pred.residual_breakdown
+        assert rb is not None
+
+        self.assertEqual(rb.Ecorr_V_SHE.method, "gp_residual")
+        self.assertEqual(rb.Ecorr_V_SHE.n_lab, 6)
+        self.assertEqual(rb.log10_icorr_uA_cm2.method, "gp_residual")
+        self.assertEqual(rb.log10_icorr_uA_cm2.n_lab, 6)
+        # Measured-only Tafel exclusion: 2 measured beta_a rows -> constant_bias; 0 measured beta_c -> prior_only
+        self.assertEqual(rb.beta_a_mV_dec.method, "constant_bias")
+        self.assertEqual(rb.beta_a_mV_dec.n_lab, 2)
+        self.assertEqual(rb.beta_c_mV_dec.method, "prior_only")
+        self.assertEqual(rb.beta_c_mV_dec.n_lab, 0)
+        self.assertAlmostEqual(rb.beta_c_mV_dec.delta.mean, 0.0, places=9)
+        self.assertAlmostEqual(rb.beta_c_mV_dec.delta.std, 0.0, places=9)
+
+        # Near lab points, calibrated values closely track lab measurements (+0.25 V, +0.90 log10)
+        self.assertAlmostEqual(
+            near_pred.Ecorr_V_SHE.mean, near_prior.Ecorr_V_SHE.mean + 0.25, delta=0.04
+        )
+        self.assertAlmostEqual(
+            near_pred.log10_icorr_uA_cm2.mean,
+            near_prior.log10_icorr_uA_cm2.mean + 0.90,
+            delta=0.10,
+        )
+        # Combined uncertainty obeys sqrt(sigma_prior^2 + sigma_delta^2)
+        self.assertAlmostEqual(
+            near_pred.Ecorr_V_SHE.std,
+            math.hypot(rb.Ecorr_V_SHE.prior.std, rb.Ecorr_V_SHE.delta.std),
+            places=9,
+        )
+
+        # Far from lab points (pure aqueous, alkaline pH 13.5, 90 °C): residual smoothly reverts toward 0 and std expands
+        far_q = MLFeatureQuery(
+            metal="Cu",
+            pH=13.5,
+            temperature_C=90.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            organic_solvent_type="None",
+            water_content_wt_pct=100.0,
+            base_solvent="DI water",
+        )
+        far_pred = cal.predict(far_q)
+        far_rb = far_pred.residual_breakdown
+        assert far_rb is not None
+        self.assertLess(abs(far_rb.Ecorr_V_SHE.delta.mean), 0.05)
+        self.assertLess(abs(far_rb.log10_icorr_uA_cm2.delta.mean), 0.15)
+        self.assertGreater(far_rb.Ecorr_V_SHE.delta.std, rb.Ecorr_V_SHE.delta.std)
+        self.assertGreater(far_rb.log10_icorr_uA_cm2.delta.std, rb.log10_icorr_uA_cm2.delta.std)
+        self.assertAlmostEqual(
+            far_pred.log10_icorr_uA_cm2.std,
+            math.hypot(far_rb.log10_icorr_uA_cm2.prior.std, far_rb.log10_icorr_uA_cm2.delta.std),
+            places=9,
+        )
+
+    def test_delta_learning_constant_bias_quality_weighting_and_zero_record_passthrough(self) -> None:
+        q = MLFeatureQuery(
+            metal="Cu",
+            pH=4.0,
+            temperature_C=25.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+        )
+        prior = self.base_predictor.predict(q)
+
+        # Build 2 lab rows with different quality_score values (1.0 vs 0.2)
+        raw_df = pd.DataFrame(
+            [
+                {
+                    "record_id": "LOW_N_1",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "acid_type": "None",
+                    "acid_concentration": 0.0,
+                    "inhibitor_type": "None",
+                    "inhibitor_concentration": 0.0,
+                    "Ecorr_V_SHE": prior.Ecorr_V_SHE.mean + 0.40,
+                    "icorr_uA_cm2": 10.0 ** (prior.log10_icorr_uA_cm2.mean + 0.50),
+                    "beta_a_mV_dec": prior.beta_a_mV_dec.mean + 20.0,
+                    "beta_c_mV_dec": prior.beta_c_mV_dec.mean - 10.0,
+                    "quality_score": 1.0,
+                },
+                {
+                    "record_id": "LOW_N_2",
+                    "metal": "Cu",
+                    "solution_id": "SOL_1",
+                    "pH": 4.0,
+                    "temperature_C": 25.0,
+                    "oxidizer_type": "H2O2",
+                    "oxidizer_concentration": 1.0,
+                    "acid_type": "None",
+                    "acid_concentration": 0.0,
+                    "inhibitor_type": "None",
+                    "inhibitor_concentration": 0.0,
+                    "Ecorr_V_SHE": prior.Ecorr_V_SHE.mean + 0.10,
+                    "icorr_uA_cm2": 10.0 ** (prior.log10_icorr_uA_cm2.mean + 0.20),
+                    "beta_a_mV_dec": prior.beta_a_mV_dec.mean + 5.0,
+                    "beta_c_mV_dec": prior.beta_c_mV_dec.mean - 40.0,
+                    "quality_score": 0.2,
+                },
+            ]
+        )
+        lab_db = HarmonizedDatabase.from_raw_tables(
+            raw_df,
+            material_df=self.seed_db.material_properties,
+            supplement_missing_core_metals=False,
+            fallback_to_seed=False,
+        )
+        cal = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="delta_learning",
+            lab_project="small_n2",
+        ).fit(lab_db)
+
+        pred_cu = cal.predict(q)
+        rb_cu = pred_cu.residual_breakdown
+        assert rb_cu is not None
+        self.assertEqual(rb_cu.Ecorr_V_SHE.method, "constant_bias")
+        self.assertEqual(rb_cu.Ecorr_V_SHE.n_lab, 2)
+        expected_weighted_de = (1.0 * 0.40 + 0.2 * 0.10) / 1.2
+        self.assertAlmostEqual(rb_cu.Ecorr_V_SHE.delta.mean, expected_weighted_de, places=5)
+        self.assertGreater(pred_cu.Ecorr_V_SHE.std, prior.Ecorr_V_SHE.std)
+
+        # Unmeasured metal (Co has n=0 lab rows) passes through prior unchanged
+        q_co = MLFeatureQuery(metal="Co", pH=4.0, temperature_C=25.0, oxidizer_type="H2O2", oxidizer_concentration=1.0)
+        prior_co = self.base_predictor.predict(q_co)
+        cal_co = cal.predict(q_co)
+        assert cal_co.residual_breakdown is not None
+        self.assertEqual(cal_co.residual_breakdown.Ecorr_V_SHE.method, "prior_only")
+        self.assertEqual(cal_co.residual_breakdown.Ecorr_V_SHE.n_lab, 0)
+        self.assertAlmostEqual(cal_co.Ecorr_V_SHE.mean, prior_co.Ecorr_V_SHE.mean, places=10)
+        self.assertAlmostEqual(cal_co.log10_icorr_uA_cm2.mean, prior_co.log10_icorr_uA_cm2.mean, places=10)
+
+    def test_lab_only_gp_trains_exclusively_on_lab_data_and_guards_min_samples(self) -> None:
+        too_few_rows = [
+            {
+                "record_id": f"FEW_{i}",
+                "metal": "Cu",
+                "solution_id": "SOL_X",
+                "pH": 4.0 + i,
+                "temperature_C": 25.0,
+                "Ecorr_V_SHE": -0.30,
+                "icorr_uA_cm2": 25.0,
+                "beta_a_mV_dec": 70.0,
+                "beta_c_mV_dec": 140.0,
+            }
+            for i in range(2)
+        ]
+        too_few_db = self._build_lab_db(too_few_rows)
+        with self.assertRaises(InsufficientLabSamplesError):
+            LabCalibratedPredictor(
+                base_predictor=self.base_predictor,
+                calibration_mode="lab_only_gp",
+                lab_project="too_few",
+                allow_fallback=False,
+            ).fit(too_few_db)
+
+        fallback_pred = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="lab_only_gp",
+            lab_project="too_few",
+            allow_fallback=True,
+        ).fit(too_few_db).predict(MLFeatureQuery(metal="Cu", pH=4.5, temperature_C=25.0))
+        self.assertEqual(fallback_pred.applicability.confidence_tier, "Low")
+        self.assertTrue(
+            any("at least 3" in w for w in fallback_pred.applicability.warnings)
+        )
+
+        # With n=5 lab records diverging sharply from literature, lab_only_gp fits without base_predictor
+        lab_only_rows = [
+            {
+                "record_id": f"ONLY_{i}",
+                "metal": "Cu",
+                "solution_id": "SOL_SOLVENT",
+                "pH": 3.0 + i * 1.0,
+                "temperature_C": 30.0,
+                "oxidizer_type": "None",
+                "oxidizer_concentration": 0.0,
+                "organic_solvent_type": "DMSO",
+                "water_content_wt_pct": 25.0,
+                "base_solvent": "DI water",
+                "Ecorr_V_SHE": -0.45 - 0.02 * i,
+                "icorr_uA_cm2": 100.0 + 10.0 * i,
+                "beta_a_mV_dec": 90.0,
+                "beta_c_mV_dec": 150.0,
+            }
+            for i in range(5)
+        ]
+        lab_only_db = self._build_lab_db(lab_only_rows)
+        local_gp = LabCalibratedPredictor(
+            base_predictor=None,
+            calibration_mode="lab_only_gp",
+            lab_project="dmso_local",
+            allow_fallback=False,
+        ).fit(lab_only_db)
+
+        q_in = MLFeatureQuery(
+            metal="Cu",
+            pH=5.0,
+            temperature_C=30.0,
+            oxidizer_type="None",
+            oxidizer_concentration=0.0,
+            organic_solvent_type="DMSO",
+            water_content_wt_pct=25.0,
+            base_solvent="DI water",
+        )
+        pred_in = local_gp.predict(q_in)
+        self.assertEqual(pred_in.calibration_mode, "lab_only_gp")
+        self.assertEqual(pred_in.applicability.n_metal_training_samples, 5)
+        self.assertTrue(pred_in.applicability.in_bounding_box)
+        self.assertAlmostEqual(pred_in.Ecorr_V_SHE.mean, -0.49, delta=0.08)
+        self.assertAlmostEqual(pred_in.log10_icorr_uA_cm2.mean, math.log10(120.0), delta=0.15)
+
+    def test_calibrated_predictions_enforce_physical_bounds_clipping(self) -> None:
+        # Extreme valid lab measurements near bounds push delta-learning past limits unless clipped
+        extreme_rows = [
+            {
+                "record_id": f"EXT_{i}",
+                "metal": "Cu",
+                "solution_id": "SOL_EXT",
+                "pH": 3.0 + i * 0.5,
+                "temperature_C": 25.0,
+                "oxidizer_type": "H2O2",
+                "oxidizer_concentration": 1.0,
+                "Ecorr_V_SHE": 2.45,
+                "icorr_uA_cm2": 9e4,
+                "beta_a_mV_dec": 495.0,
+                "beta_c_mV_dec": 21.0,
+            }
+            for i in range(4)
+        ]
+        ext_db = self._build_lab_db(extreme_rows)
+        cal = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="delta_learning",
+            lab_project="extreme_clip",
+        ).fit(ext_db)
+
+        pred = cal.predict(
+            MLFeatureQuery(
+                metal="Cu",
+                pH=3.5,
+                temperature_C=25.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+            )
+        )
+        self.assertGreaterEqual(pred.Ecorr_V_SHE.mean, -2.5)
+        self.assertLessEqual(pred.Ecorr_V_SHE.mean, 2.5)
+        self.assertGreaterEqual(pred.log10_icorr_uA_cm2.mean, -6.0)
+        self.assertLessEqual(pred.log10_icorr_uA_cm2.mean, 6.0)
+        self.assertGreaterEqual(pred.beta_a_mV_dec.mean, 20.0)
+        self.assertLessEqual(pred.beta_a_mV_dec.mean, 500.0)
+        self.assertGreaterEqual(pred.beta_c_mV_dec.mean, 20.0)
+        self.assertLessEqual(pred.beta_c_mV_dec.mean, 500.0)
+
+        mc = propagate_uncertainty_monte_carlo(pred, n_draws=200, seed=42)
+        self.assertTrue(np.all((mc.Ecorr_samples_V_SHE >= -2.5) & (mc.Ecorr_samples_V_SHE <= 2.5)))
+        self.assertTrue(np.all((mc.beta_a_samples_mV_dec >= 20.0) & (mc.beta_a_samples_mV_dec <= 500.0)))
+        self.assertTrue(np.all((mc.beta_c_samples_mV_dec >= 20.0) & (mc.beta_c_samples_mV_dec <= 500.0)))
+        self.assertTrue(np.all(mc.icorr_samples_uA_cm2 > 0.0))
+
+    def test_mode_aware_applicability_domain_and_formatted_residual_breakdown(self) -> None:
+        lab_rows: list[dict[str, object]] = []
+        for idx, ph_val in enumerate([3.0, 4.0, 5.0, 6.0, 7.0, 8.0]):
+            q = MLFeatureQuery(
+                metal="Cu",
+                pH=ph_val,
+                temperature_C=25.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                acid_type="None",
+                acid_concentration=0.0,
+                inhibitor_type="None",
+                inhibitor_concentration=0.0,
+                organic_solvent_type="EG",
+                water_content_wt_pct=50.0,
+                base_solvent="DI water",
+            )
+            prior = self.base_predictor.predict(q)
+            row: dict[str, object] = {
+                "record_id": f"AD_CU_{idx}",
+                "metal": "Cu",
+                "solution_id": f"AD_EG_PH{int(ph_val)}",
+                "pH": ph_val,
+                "temperature_C": 25.0,
+                "oxidizer_type": "H2O2",
+                "oxidizer_concentration": 1.0,
+                "acid_type": "None",
+                "acid_concentration": 0.0,
+                "inhibitor_type": "None",
+                "inhibitor_concentration": 0.0,
+                "organic_solvent_type": "EG",
+                "water_content_wt_pct": 50.0,
+                "base_solvent": "DI water",
+                "Ecorr_V_SHE": prior.Ecorr_V_SHE.mean + 0.15,
+                "icorr_uA_cm2": 10.0 ** (prior.log10_icorr_uA_cm2.mean + 0.40),
+            }
+            if idx in (1, 3):
+                row["beta_a_mV_dec"] = prior.beta_a_mV_dec.mean + 15.0
+            lab_rows.append(row)
+
+        lab_db = self._build_lab_db(lab_rows)
+
+        # 1. literature_only keeps literature AD untouched
+        lit_cal = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="literature_only",
+        ).fit(lab_db)
+        aq_query = MLFeatureQuery(
+            metal="Cu",
+            pH=4.0,
+            temperature_C=25.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            organic_solvent_type="None",
+            water_content_wt_pct=100.0,
+        )
+        lit_pred = lit_cal.predict(aq_query)
+        self.assertEqual(lit_pred.applicability.ad_mode, "literature_only")
+        self.assertEqual(lit_pred.applicability.n_lab_samples, 0)
+        self.assertIsNone(lit_pred.applicability.lab_anchoring_status)
+
+        # 2. delta_learning reports Lab-Anchored near lab points, Reverting far from lab, and No Lab Coverage for unseen metal
+        delta_cal = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="delta_learning",
+            lab_project="pilot_eg",
+        ).fit(lab_db)
+        near_q = MLFeatureQuery(
+            metal="Cu",
+            pH=5.0,
+            temperature_C=25.0,
+            oxidizer_type="H2O2",
+            oxidizer_concentration=1.0,
+            organic_solvent_type="EG",
+            water_content_wt_pct=50.0,
+            base_solvent="DI water",
+        )
+        near_pred = delta_cal.predict(near_q)
+        self.assertEqual(near_pred.applicability.ad_mode, "delta_learning")
+        self.assertEqual(near_pred.applicability.lab_anchoring_status, "Lab-Anchored")
+        self.assertTrue(near_pred.applicability.lab_in_bounding_box)
+        self.assertEqual(near_pred.applicability.n_lab_samples, 6)
+        self.assertEqual(near_pred.applicability.confidence_tier, "High")
+        self.assertIsNotNone(near_pred.applicability.lab_knn_distance)
+        self.assertLessEqual(float(near_pred.applicability.lab_knn_distance), 0.35)
+
+        assert near_pred.residual_breakdown is not None
+        df_bd = near_pred.residual_breakdown.to_dataframe()
+        self.assertEqual(
+            list(df_bd.columns),
+            [
+                "Parameter",
+                "Unit",
+                "Prior Estimate",
+                "Prior ±1σ",
+                "Lab Residual (Δ)",
+                "Residual ±1σ",
+                "Calibrated Final",
+                "Combined ±1σ",
+                "Method",
+                "Lab Samples (n)",
+            ],
+        )
+        self.assertEqual(
+            list(df_bd["Method"]),
+            ["GP Residual", "GP Residual", "Constant Bias", "Prior Only"],
+        )
+
+        far_pred = delta_cal.predict(
+            MLFeatureQuery(
+                metal="Cu",
+                pH=13.5,
+                temperature_C=90.0,
+                oxidizer_type="H2O2",
+                oxidizer_concentration=1.0,
+                organic_solvent_type="None",
+                water_content_wt_pct=100.0,
+            )
+        )
+        self.assertEqual(far_pred.applicability.lab_anchoring_status, "Reverting to Literature Prior")
+        self.assertFalse(far_pred.applicability.lab_in_bounding_box)
+        self.assertTrue(any("Reverting to Literature Prior" in w for w in far_pred.applicability.warnings))
+
+        co_pred = delta_cal.predict(MLFeatureQuery(metal="Co", pH=5.0, temperature_C=25.0))
+        self.assertEqual(co_pred.applicability.lab_anchoring_status, "No Lab Coverage")
+        self.assertEqual(co_pred.applicability.n_lab_samples, 0)
+        self.assertTrue(any("No Lab Coverage" in w for w in co_pred.applicability.warnings))
+
+        # 3. lab_only_gp evaluates AD strictly on lab records only (aqueous query well covered by literature is still OOD)
+        full_tafel_rows = [
+            {**row, "beta_a_mV_dec": 70.0 + idx, "beta_c_mV_dec": 130.0 + idx}
+            for idx, row in enumerate(lab_rows)
+        ]
+        lab_only = LabCalibratedPredictor(
+            base_predictor=self.base_predictor,
+            calibration_mode="lab_only_gp",
+            lab_project="pilot_eg",
+            allow_fallback=False,
+        ).fit(self._build_lab_db(full_tafel_rows))
+        lab_in_pred = lab_only.predict(near_q)
+        self.assertEqual(lab_in_pred.applicability.ad_mode, "lab_only_gp")
+        self.assertEqual(lab_in_pred.applicability.lab_anchoring_status, "Lab-Anchored")
+        self.assertTrue(lab_in_pred.applicability.in_bounding_box)
+        self.assertEqual(lab_in_pred.applicability.n_metal_training_samples, 6)
+
+        lab_out_pred = lab_only.predict(aq_query)
+        self.assertEqual(lab_out_pred.applicability.ad_mode, "lab_only_gp")
+        self.assertEqual(lab_out_pred.applicability.lab_anchoring_status, "Outside Lab Domain")
+        self.assertFalse(lab_out_pred.applicability.in_bounding_box)
+        self.assertEqual(lab_out_pred.applicability.confidence_tier, "Low")
 
 
 if __name__ == "__main__":

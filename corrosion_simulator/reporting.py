@@ -22,12 +22,15 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+from corrosion_simulator.database import SolventRegime, SolventSubclass, classify_solvent_subclass
+from corrosion_simulator.lab_calibration import CALIBRATION_MODE_LABELS, ResidualBreakdown
 from corrosion_simulator.physics import generate_polarization_curve
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     GalvanicViewPayload,
     SimulationRequest,
     SingleMetalViewPayload,
+    resolve_consistent_solvent_settings,
 )
 
 ComparisonMode = Literal["single_metal", "galvanic"]
@@ -47,12 +50,41 @@ class CleaningRecipeSpec:
     pH: float = 3.0
     temperature_C: float = 25.0
     immersion_time_s: float = 300.0
+    solvent_regime: SolventRegime | None = None
+    organic_solvent_type: str = "None"
+    water_content_wt_pct: float | None = None
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
             raise ValueError("CleaningRecipeSpec.name must be non-empty.")
         if self.immersion_time_s <= 0 or not np.isfinite(self.immersion_time_s):
             raise ValueError("immersion_time_s must be strictly positive.")
+        resolved_regime, resolved_org, resolved_water = resolve_consistent_solvent_settings(
+            self.solvent_regime,
+            self.organic_solvent_type,
+            self.water_content_wt_pct,
+        )
+        object.__setattr__(self, "solvent_regime", resolved_regime)
+        object.__setattr__(self, "organic_solvent_type", resolved_org)
+        object.__setattr__(self, "water_content_wt_pct", resolved_water)
+
+    @property
+    def base_solvent(self) -> str:
+        """Canonical base solvent label for this Cleaning Recipe."""
+        if self.solvent_regime in ("aqueous", "semi_aqueous"):
+            return "DI water"
+        return self.organic_solvent_type if self.organic_solvent_type != "None" else "non_aqueous"
+
+    @property
+    def solvent_subclass(self) -> SolventSubclass:
+        """Chemical-family solvent subclass derived from solvent regime, pH, and co-solvent."""
+        return classify_solvent_subclass(
+            self.solvent_regime or "aqueous",
+            pH=self.pH,
+            organic_solvent_type=self.organic_solvent_type,
+            base_solvent=self.base_solvent,
+            acid_type=self.acid_type,
+        )
 
 
 @dataclass
@@ -95,6 +127,10 @@ class RecipeEvaluationEntry:
             "pH": float(self.recipe.pH),
             "temperature_C": float(self.recipe.temperature_C),
             "immersion_time_s": float(self.recipe.immersion_time_s),
+            "solvent_regime": str(self.recipe.solvent_regime),
+            "solvent_subclass": str(self.recipe.solvent_subclass),
+            "organic_solvent_type": str(self.recipe.organic_solvent_type),
+            "water_content_wt_pct": float(self.recipe.water_content_wt_pct),
             "cr0_nm_min": float(self.cr0_nm_min),
             "corrosion_depth_nm": float(self.corrosion_depth_nm),
             "time_to_threshold_s": (
@@ -334,6 +370,9 @@ def compare_cleaning_recipes(
             pH=float(recipe.pH),
             temperature_C=float(recipe.temperature_C),
             immersion_time_s=float(recipe.immersion_time_s),
+            solvent_regime=recipe.solvent_regime,
+            organic_solvent_type=recipe.organic_solvent_type,
+            water_content_wt_pct=float(recipe.water_content_wt_pct),
         )
 
         if mode == "galvanic":
@@ -412,6 +451,10 @@ def compare_cleaning_recipes(
         row: dict[str, Any] = {
             "Rank": e.rank,
             "Cleaning Recipe": e.recipe.name,
+            "Solvent Regime": str(e.recipe.solvent_regime),
+            "Solvent Subclass": str(e.recipe.solvent_subclass),
+            "Co-Solvent": str(e.recipe.organic_solvent_type),
+            "Water (wt%)": round(float(e.recipe.water_content_wt_pct), 2),
             "pH": e.recipe.pH,
             "Temp (°C)": e.recipe.temperature_C,
             "Immersion Time (s)": e.recipe.immersion_time_s,
@@ -621,6 +664,54 @@ def _collect_warnings_and_recommendations(
     return warnings, recs
 
 
+def _collect_calibration_metadata(
+    single_payload: SingleMetalViewPayload,
+    galvanic_payload: GalvanicViewPayload | None = None,
+) -> dict[str, Any]:
+    """Collect active calibration mode, lab project name, and ResidualBreakdown summaries."""
+    req = single_payload.request
+    is_ml = req.parameter_source == "ml"
+    cal_mode = str(req.calibration_mode) if is_ml else None
+    lab_proj = single_payload.resolved_parameters.lab_project if is_ml else None
+    if lab_proj is None and is_ml and galvanic_payload is not None:
+        lab_proj = galvanic_payload.primary_resolved.lab_project
+
+    breakdowns: list[tuple[str, ResidualBreakdown]] = []
+    if single_payload.resolved_parameters.residual_breakdown is not None:
+        breakdowns.append(
+            (
+                f"Single Metal ({req.primary_metal})",
+                single_payload.resolved_parameters.residual_breakdown,
+            )
+        )
+    if galvanic_payload is not None:
+        if galvanic_payload.primary_resolved.residual_breakdown is not None:
+            breakdowns.append(
+                (
+                    f"Galvanic ({galvanic_payload.primary_resolved.metal})",
+                    galvanic_payload.primary_resolved.residual_breakdown,
+                )
+            )
+        if galvanic_payload.secondary_resolved.residual_breakdown is not None:
+            breakdowns.append(
+                (
+                    f"Galvanic ({galvanic_payload.secondary_resolved.metal})",
+                    galvanic_payload.secondary_resolved.residual_breakdown,
+                )
+            )
+    return {
+        "is_ml": is_ml,
+        "calibration_mode": cal_mode,
+        "calibration_mode_label": (
+            CALIBRATION_MODE_LABELS.get(req.calibration_mode, req.calibration_mode)
+            if is_ml
+            else None
+        ),
+        "lab_project": lab_proj,
+        "breakdowns": breakdowns,
+    }
+
+
 def _build_uncertainty_intervals(
     single_payload: SingleMetalViewPayload,
     galvanic_payload: GalvanicViewPayload | None = None,
@@ -704,6 +795,7 @@ def export_report_json(
     """Export complete structured JSON report with provenance, uncertainties, warnings, and rankings."""
     req = single_payload.request
     warnings, recs = _collect_warnings_and_recommendations(single_payload, galvanic_payload)
+    cal_meta = _collect_calibration_metadata(single_payload, galvanic_payload)
     payload: dict[str, Any] = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "inputs": {
@@ -718,10 +810,16 @@ def export_report_json(
             "inhibitor_concentration": float(req.inhibitor_concentration),
             "pH": float(req.pH),
             "temperature_C": float(req.temperature_C),
+            "solvent_regime": str(req.solvent_regime),
+            "solvent_subclass": str(req.solvent_subclass),
+            "organic_solvent_type": str(req.organic_solvent_type),
+            "water_content_wt_pct": float(req.water_content_wt_pct),
             "immersion_time_s": float(req.immersion_time_s),
             "d_crit_nm": float(req.d_crit_nm),
             "kinetics_model": req.kinetics_model,
             "parameter_source": req.parameter_source,
+            "calibration_mode": cal_meta["calibration_mode"],
+            "lab_project": cal_meta["lab_project"],
         },
         "single_metal": single_payload.to_summary_dict(),
         "single_metal_parameters": single_payload.parameter_table.to_dict(orient="records"),
@@ -729,6 +827,33 @@ def export_report_json(
         "warnings": warnings,
         "experimental_recommendations": recs,
     }
+    if cal_meta["is_ml"] and cal_meta["calibration_mode"] != "literature_only":
+        lab_cal_obj: dict[str, Any] = {
+            "calibration_mode": cal_meta["calibration_mode"],
+            "calibration_mode_label": cal_meta["calibration_mode_label"],
+            "lab_project": cal_meta["lab_project"],
+        }
+        if single_payload.resolved_parameters.residual_breakdown is not None:
+            lab_cal_obj["single_metal_residual_breakdown"] = (
+                single_payload.resolved_parameters.residual_breakdown.to_dict()
+            )
+        if galvanic_payload is not None and (
+            galvanic_payload.primary_resolved.residual_breakdown is not None
+            or galvanic_payload.secondary_resolved.residual_breakdown is not None
+        ):
+            lab_cal_obj["galvanic_residual_breakdown"] = {
+                galvanic_payload.primary_resolved.metal: (
+                    galvanic_payload.primary_resolved.residual_breakdown.to_dict()
+                    if galvanic_payload.primary_resolved.residual_breakdown is not None
+                    else None
+                ),
+                galvanic_payload.secondary_resolved.metal: (
+                    galvanic_payload.secondary_resolved.residual_breakdown.to_dict()
+                    if galvanic_payload.secondary_resolved.residual_breakdown is not None
+                    else None
+                ),
+            }
+        payload["lab_calibration"] = lab_cal_obj
     if galvanic_payload is not None:
         payload["galvanic"] = galvanic_payload.to_summary_dict()
     if comparison_payload is not None:
@@ -751,6 +876,7 @@ def export_report_csv(
     req = single_payload.request
     src = req.parameter_source.upper()
     params = single_payload.resolved_parameters.parameters
+    cal_meta = _collect_calibration_metadata(single_payload, galvanic_payload)
     s_rows = [
         ("Inputs", "Active Query", "Primary Metal", req.primary_metal, "", src),
         ("Inputs", "Active Query", "Secondary Metal", req.secondary_metal or "None", "", src),
@@ -760,19 +886,34 @@ def export_report_csv(
         ("Inputs", "Active Query", "Corrosion Inhibitor", f"{req.inhibitor_type} ({req.inhibitor_concentration:g})", "", src),
         ("Inputs", "Active Query", "pH", req.pH, "", src),
         ("Inputs", "Active Query", "Temperature", req.temperature_C, "°C", src),
+        ("Inputs", "Active Query", "solvent_regime", str(req.solvent_regime), "", src),
+        ("Inputs", "Active Query", "solvent_subclass", str(req.solvent_subclass), "", src),
+        ("Inputs", "Active Query", "organic_solvent_type", str(req.organic_solvent_type), "", src),
+        ("Inputs", "Active Query", "water_content_wt_pct", float(req.water_content_wt_pct), "wt%", src),
         ("Inputs", "Active Query", "Immersion Time", req.immersion_time_s, "s", src),
         ("Inputs", "Active Query", "Critical Thickness Threshold (d_crit)", req.d_crit_nm, "nm", src),
-        ("Single Metal", "Active Query", "E_corr", params.Ecorr_V_SHE, "V vs. SHE", src),
-        ("Single Metal", "Active Query", "i_corr", params.icorr_uA_cm2, "µA/cm²", src),
-        ("Single Metal", "Active Query", "beta_a", params.beta_a_mV_dec, "mV/dec", src),
-        ("Single Metal", "Active Query", "beta_c", params.beta_c_mV_dec, "mV/dec", src),
-        ("Single Metal", "Active Query", "Initial Corrosion Rate (CR_0)", single_payload.initial_corrosion_rate_nm_min, "nm/min", src),
-        ("Single Metal", "Active Query", "Corrosion Depth", single_payload.corrosion_depth_nm, "nm", src),
-        ("Single Metal", "Active Query", "Time to Threshold", _format_ttt_short(single_payload.time_to_threshold_s), "", src),
-        ("Single Metal", "Active Query", "Thickness Loss Risk Score", single_payload.thickness_loss_risk_score, "", src),
-        ("Single Metal", "Active Query", "Thickness Loss Risk Tier", single_payload.thickness_loss_risk_tier, "", src),
-        ("Single Metal", "Active Query", "Confidence Tier", single_payload.confidence_tier, "", src),
     ]
+    if cal_meta["is_ml"]:
+        s_rows.extend(
+            [
+                ("Inputs", "Active Query", "calibration_mode", cal_meta["calibration_mode"], "", src),
+                ("Inputs", "Active Query", "lab_project", cal_meta["lab_project"] or "None", "", src),
+            ]
+        )
+    s_rows.extend(
+        [
+            ("Single Metal", "Active Query", "E_corr", params.Ecorr_V_SHE, "V vs. SHE", src),
+            ("Single Metal", "Active Query", "i_corr", params.icorr_uA_cm2, "µA/cm²", src),
+            ("Single Metal", "Active Query", "beta_a", params.beta_a_mV_dec, "mV/dec", src),
+            ("Single Metal", "Active Query", "beta_c", params.beta_c_mV_dec, "mV/dec", src),
+            ("Single Metal", "Active Query", "Initial Corrosion Rate (CR_0)", single_payload.initial_corrosion_rate_nm_min, "nm/min", src),
+            ("Single Metal", "Active Query", "Corrosion Depth", single_payload.corrosion_depth_nm, "nm", src),
+            ("Single Metal", "Active Query", "Time to Threshold", _format_ttt_short(single_payload.time_to_threshold_s), "", src),
+            ("Single Metal", "Active Query", "Thickness Loss Risk Score", single_payload.thickness_loss_risk_score, "", src),
+            ("Single Metal", "Active Query", "Thickness Loss Risk Tier", single_payload.thickness_loss_risk_tier, "", src),
+            ("Single Metal", "Active Query", "Confidence Tier", single_payload.confidence_tier, "", src),
+        ]
+    )
     for sec, rec, met, val, unit, prov in s_rows:
         writer.writerow({"section": sec, "recipe": rec, "metric": met, "value": val, "unit": unit, "provenance": prov})
 
@@ -812,11 +953,33 @@ def export_report_csv(
     for idx, r in enumerate(recs, start=1):
         writer.writerow({"section": "Experimental Recommendations", "recipe": "Active Query", "metric": f"Recommendation {idx}", "value": r, "unit": "", "provenance": src})
 
+    if cal_meta["breakdowns"]:
+        for scope_label, bd in cal_meta["breakdowns"]:
+            for row in bd.to_dataframe().to_dict(orient="records"):
+                writer.writerow(
+                    {
+                        "section": "Residual Breakdown",
+                        "recipe": scope_label,
+                        "metric": f"{row['Parameter']} ({row['Method']}, n={row['Lab Samples (n)']})",
+                        "value": (
+                            f"prior={row['Prior Estimate']:.4g} ± {row['Prior ±1σ']:.3g}, "
+                            f"delta={row['Lab Residual (Δ)']:+.4g} ± {row['Residual ±1σ']:.3g}, "
+                            f"calibrated={row['Calibrated Final']:.4g} ± {row['Combined ±1σ']:.3g}"
+                        ),
+                        "unit": row["Unit"],
+                        "provenance": src,
+                    }
+                )
+
     if comparison_payload is not None:
         for e in comparison_payload.entries:
             prov = e.parameter_source.upper()
             cmp_rows = [
                 ("Recipe Comparison", e.recipe.name, "Rank", e.rank, "", prov),
+                ("Recipe Comparison", e.recipe.name, "solvent_regime", str(e.recipe.solvent_regime), "", prov),
+                ("Recipe Comparison", e.recipe.name, "solvent_subclass", str(e.recipe.solvent_subclass), "", prov),
+                ("Recipe Comparison", e.recipe.name, "organic_solvent_type", str(e.recipe.organic_solvent_type), "", prov),
+                ("Recipe Comparison", e.recipe.name, "water_content_wt_pct", float(e.recipe.water_content_wt_pct), "wt%", prov),
                 ("Recipe Comparison", e.recipe.name, "Initial Corrosion Rate (CR_0)", e.cr0_nm_min, "nm/min", prov),
                 ("Recipe Comparison", e.recipe.name, "Corrosion Depth", e.corrosion_depth_nm, "nm", prov),
                 ("Recipe Comparison", e.recipe.name, "Time to Threshold", _format_ttt_short(e.time_to_threshold_s), "", prov),
@@ -853,6 +1016,7 @@ def export_report_pdf(
         req = single_payload.request
         params = single_payload.resolved_parameters.parameters
         intervals = _build_uncertainty_intervals(single_payload, galvanic_payload)
+        cal_meta = _collect_calibration_metadata(single_payload, galvanic_payload)
 
         def _ci_str(key: str, unit: str = "") -> str:
             st_dict = intervals.get(key)
@@ -874,8 +1038,16 @@ def export_report_pdf(
             "1. INPUT CONDITIONS & PROVENANCE",
             f"  Primary Metal: {req.primary_metal}   |   Secondary Metal: {req.secondary_metal or 'None'} (Area Ratio: {req.cathode_to_anode_area_ratio:g})",
             f"  Solution: Oxidizer={req.oxidizer_type} ({req.oxidizer_concentration:g}), Acid={req.acid_type} ({req.acid_concentration:g}), Inhibitor={req.inhibitor_type} ({req.inhibitor_concentration:g})",
+            f"  Solvent System: solvent_regime={req.solvent_regime}, solvent_subclass={req.solvent_subclass}, organic_solvent_type={req.organic_solvent_type}, water_content_wt_pct={float(req.water_content_wt_pct):.2f} wt%",
             f"  pH: {req.pH:.2f}   |   Temperature: {req.temperature_C:.1f} °C   |   Immersion Time: {req.immersion_time_s:.1f} s   |   d_crit: {req.d_crit_nm:.2f} nm",
             f"  Parameter Source: {req.parameter_source.upper()}   |   Kinetics Model: {single_kin_model}",
+            *(
+                [
+                    f"  Lab Calibration: calibration_mode={cal_meta['calibration_mode']} ({cal_meta['calibration_mode_label']}), lab_project={cal_meta['lab_project'] or 'None'}"
+                ]
+                if cal_meta["is_ml"]
+                else []
+            ),
             "",
             "2. SINGLE METAL ANALYSIS",
             f"  E_corr: {params.Ecorr_V_SHE:.4f} V vs. SHE   |   i_corr: {params.icorr_uA_cm2:.3g} µA/cm²",
@@ -907,9 +1079,23 @@ def export_report_pdf(
             for e in comparison_payload.entries:
                 af_txt = f" | AF={e.acceleration_factor:.2f}×" if e.acceleration_factor is not None else ""
                 lines.append(
-                    f"  #{e.rank} {e.recipe.name}: Risk={e.risk_score:.3f} ({e.risk_tier}), "
+                    f"  #{e.rank} {e.recipe.name} [{e.recipe.solvent_regime}/{e.recipe.solvent_subclass}, "
+                    f"co-solvent={e.recipe.organic_solvent_type}, water={float(e.recipe.water_content_wt_pct):.1f}wt%]: "
+                    f"Risk={e.risk_score:.3f} ({e.risk_tier}), "
                     f"Depth={e.corrosion_depth_nm:.3f} nm, CR_0={e.cr0_nm_min:.3g} nm/min{af_txt}"
                 )
+
+        if cal_meta["breakdowns"]:
+            lines.extend(["", "LAB CALIBRATION — RESIDUAL BREAKDOWN"])
+            for scope_label, bd in cal_meta["breakdowns"]:
+                lines.append(f"  [{scope_label}]")
+                for row in bd.to_dataframe().to_dict(orient="records"):
+                    lines.append(
+                        f"    {row['Parameter']} ({row['Unit']}): prior={row['Prior Estimate']:.4g}±{row['Prior ±1σ']:.3g}, "
+                        f"delta={row['Lab Residual (Δ)']:+.4g}±{row['Residual ±1σ']:.3g}, "
+                        f"final={row['Calibrated Final']:.4g}±{row['Combined ±1σ']:.3g} "
+                        f"[{row['Method']}, n={row['Lab Samples (n)']}]"
+                    )
 
         all_warnings, all_recs = _collect_warnings_and_recommendations(single_payload, galvanic_payload)
         if all_warnings:
@@ -932,6 +1118,26 @@ def export_report_pdf(
             fontsize=7.8,
             linespacing=1.4,
             wrap=True,
+        )
+        cal_subject = (
+            f"; calibration_mode={cal_meta['calibration_mode']}; lab_project={cal_meta['lab_project'] or 'None'}"
+            if cal_meta["is_ml"] and cal_meta["calibration_mode"] != "literature_only"
+            else ""
+        )
+        pdf.infodict()["Subject"] = (
+            f"solvent_regime={req.solvent_regime}; solvent_subclass={req.solvent_subclass}; "
+            f"organic_solvent_type={req.organic_solvent_type}; "
+            f"water_content_wt_pct={float(req.water_content_wt_pct):.2f}{cal_subject}"
+        )
+        pdf.infodict()["Keywords"] = (
+            f"solvent_regime={req.solvent_regime}, solvent_subclass={req.solvent_subclass}, "
+            f"organic_solvent_type={req.organic_solvent_type}, "
+            f"water_content_wt_pct={float(req.water_content_wt_pct):.2f}"
+            + (
+                f", calibration_mode={cal_meta['calibration_mode']}, lab_project={cal_meta['lab_project'] or 'None'}"
+                if cal_meta["is_ml"] and cal_meta["calibration_mode"] != "literature_only"
+                else ""
+            )
         )
         pdf.savefig(summary_fig)
 
@@ -963,6 +1169,29 @@ def export_report_html(
 
     req = single_payload.request
     param_table_html = single_payload.parameter_table.to_html(index=False, classes="data-table", border=0)
+    cal_meta = _collect_calibration_metadata(single_payload, galvanic_payload)
+
+    cal_meta_html = ""
+    if cal_meta["is_ml"]:
+        cal_meta_html = (
+            f"<br/><strong>Lab Calibration:</strong> "
+            f"<code>calibration_mode={html.escape(str(cal_meta['calibration_mode']))}</code> "
+            f"({html.escape(str(cal_meta['calibration_mode_label']))}) | "
+            f"<strong>Lab Project:</strong> <code>{html.escape(str(cal_meta['lab_project'] or 'None'))}</code>"
+        )
+
+    residual_section = ""
+    if cal_meta["breakdowns"]:
+        blocks = []
+        for scope_label, bd in cal_meta["breakdowns"]:
+            bd_html = bd.to_dataframe().to_html(index=False, classes="data-table", border=0)
+            blocks.append(f"<h3>{html.escape(scope_label)}</h3>{bd_html}")
+        residual_section = f"""
+        <section>
+          <h2>Lab Calibration — Residual Breakdown</h2>
+          {''.join(blocks)}
+        </section>
+        """
 
     galv_section = ""
     if galvanic_payload is not None:
@@ -1061,7 +1290,8 @@ def export_report_html(
     <strong>Primary Metal:</strong> {html.escape(req.primary_metal)} |
     <strong>Secondary Metal:</strong> {html.escape(req.secondary_metal or 'None')} (Area Ratio: {req.cathode_to_anode_area_ratio:g}) |
     <strong>Solution:</strong> {html.escape(req.oxidizer_type)} ({req.oxidizer_concentration:g}), {html.escape(req.acid_type)} ({req.acid_concentration:g}), {html.escape(req.inhibitor_type)} ({req.inhibitor_concentration:g}) |
-    <strong>pH:</strong> {req.pH:.2f} | <strong>Temp:</strong> {req.temperature_C:.1f} °C | <strong>Immersion Time:</strong> {req.immersion_time_s:.1f} s | <strong>d_crit:</strong> {req.d_crit_nm:.2f} nm
+    <strong>Solvent System:</strong> <code>solvent_regime={html.escape(str(req.solvent_regime))}</code>, <code>solvent_subclass={html.escape(str(req.solvent_subclass))}</code>, <code>organic_solvent_type={html.escape(str(req.organic_solvent_type))}</code>, <code>water_content_wt_pct={float(req.water_content_wt_pct):.2f} wt%</code><br/>
+    <strong>pH:</strong> {req.pH:.2f} | <strong>Temp:</strong> {req.temperature_C:.1f} °C | <strong>Immersion Time:</strong> {req.immersion_time_s:.1f} s | <strong>d_crit:</strong> {req.d_crit_nm:.2f} nm{cal_meta_html}
   </div>
 
   <section>
@@ -1076,6 +1306,7 @@ def export_report_html(
     {param_table_html}
   </section>
 
+  {residual_section}
   {galv_section}
   {ci_section}
   {cmp_section}
