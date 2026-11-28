@@ -32,6 +32,13 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         cls.predictor.fit(cls.db)
         cls.controller = CorrosionPlatformController(cls.db, cls.predictor)
 
+    def test_sort_metals_by_count_orders_descending_with_alpha_tiebreak(self) -> None:
+        from app import _sort_metals_by_count
+
+        counts = {"Cu": 1034, "Co": 213, "W": 245, "Ti": 925, "Ru": 15, "Ta": 46, "Sn": 15}
+        ordered = _sort_metals_by_count(["Co", "Ru", "Cu", "Sn", "Ta", "Ti", "W"], counts)
+        self.assertEqual(ordered, ["Cu", "Ti", "W", "Co", "Ta", "Ru", "Sn"])
+
     def test_available_options_cover_all_core_metals(self) -> None:
         options = self.controller.available_options()
         self.assertEqual(tuple(options["metals"]), CORE_METALS)

@@ -230,6 +230,11 @@ def _render_residual_breakdown_section(
             st.dataframe(breakdown.to_dataframe(), width="stretch", hide_index=True)
 
 
+def _sort_metals_by_count(metals: list[str], counts: dict[str, int]) -> list[str]:
+    """Sort metals by complete-pair sample count descending, then alphabetically."""
+    return sorted(metals, key=lambda m: (-counts.get(m, 0), m))
+
+
 def _format_metal_label(metal: str, counts: dict[str, int], has_faraday: dict[str, bool]) -> str:
     n = counts.get(metal, 0)
     tags: list[str] = [f"n={n}"]
@@ -358,6 +363,7 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
 
     if not metals:
         metals = all_metals
+    metals = _sort_metals_by_count(metals, metal_counts)
 
     primary_metal = st.sidebar.selectbox(
         "Primary Material",
@@ -367,7 +373,9 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     )
 
     # Allow cross-category galvanic pairing (e.g., TiN barrier paired with Cu metal)
-    secondary_choices = ["None (Single Metal Only)"] + [m for m in all_metals if m != primary_metal]
+    secondary_choices = ["None (Single Metal Only)"] + _sort_metals_by_count(
+        [m for m in all_metals if m != primary_metal], metal_counts
+    )
     default_secondary_idx = secondary_choices.index("Co") if "Co" in secondary_choices else (1 if len(secondary_choices) > 1 else 0)
     secondary_selection = st.sidebar.selectbox(
         "Secondary Material (Optional Galvanic Partner)",
