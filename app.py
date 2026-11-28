@@ -19,13 +19,11 @@ from corrosion_simulator.ml_predictor import MODEL_FAMILY_LABELS, ApplicabilityD
 from corrosion_simulator.paths import resolve_data_dirs
 from corrosion_simulator.platform_controller import (
     CALIBRATION_MODE_DEFAULT_MODELS,
-    NON_AQUEOUS_WARNING_PREFIX,
     CorrosionPlatformController,
     GalvanicAnalysisResult,
     ManualElectrochemicalInput,
     SimulationRequest,
     SingleMetalAnalysisResult,
-    build_non_aqueous_physics_warning,
     format_active_model_label,
     resolve_active_model_family,
 )
@@ -35,10 +33,16 @@ from corrosion_simulator.plotly_charts import (
     build_single_metal_figures,
 )
 from corrosion_simulator.reporting import (
-    CleaningRecipeSpec,
+    RecipeCandidate,
     RecipeComparisonPayload,
     compare_cleaning_recipes,
     generate_all_report_exports,
+)
+from corrosion_simulator.solution import (
+    NON_AQUEOUS_WARNING_PREFIX,
+    CleaningRecipe,
+    Solution,
+    water_content_slider_bounds,
 )
 
 SOURCE_LABELS = {
@@ -61,25 +65,11 @@ SOLVENT_REGIME_LABELS = {
 }
 
 
-def _solvent_slider_bounds(regime: str, organic_solvent_type: str) -> tuple[float, float, float, float]:
-    """Return ``(min_wt_pct, max_wt_pct, default_wt_pct, step)`` consistent with ``regime``."""
-    if regime == "aqueous":
-        return (90.0, 100.0, 100.0 if organic_solvent_type == "None" else 95.0, 0.5)
-    if regime == "semi_aqueous":
-        return (1.0, 89.9, 50.0, 0.5)
-    return (0.0, 0.99, 0.0, 0.01)
-
-
 def _render_non_aqueous_warning_banner(request: SimulationRequest) -> None:
     """Render a prominent physics-limitation banner when simulating non-aqueous (<1% water) conditions."""
-    if request.solvent_regime == "non_aqueous" or float(request.water_content_wt_pct) < 1.0:
-        st.warning(
-            build_non_aqueous_physics_warning(
-                float(request.water_content_wt_pct),
-                request.organic_solvent_type,
-            ),
-            icon="⚠️",
-        )
+    warning = request.recipe.solution.non_aqueous_warning()
+    if warning is not None:
+        st.warning(warning, icon="⚠️")
 
 
 @st.cache_resource(show_spinner="Loading prebuilt electrochemical database and ML models...")
@@ -414,7 +404,7 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         index=0,
         key="sidebar_organic_solvent",
     )
-    w_min, w_max, w_default, w_step = _solvent_slider_bounds(
+    w_min, w_max, w_default, w_step = water_content_slider_bounds(
         solvent_regime, organic_solvent_type
     )
     prev_regime = st.session_state.get("_last_sidebar_solvent_regime")
@@ -436,42 +426,36 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
     oxidizer_options = options["oxidizer_types"]
     default_ox = oxidizer_options.index("H2O2") if "H2O2" in oxidizer_options else 0
     oxidizer_type = st.sidebar.selectbox("Oxidizer Type", options=oxidizer_options, index=default_ox)
-    oxidizer_disabled = oxidizer_type == "None"
-    oxidizer_conc_raw = st.sidebar.number_input(
+    oxidizer_conc = st.sidebar.number_input(
         "Oxidizer Concentration (wt% or M)",
         min_value=0.0,
         max_value=50.0,
         value=1.0,
         step=0.1,
-        disabled=oxidizer_disabled,
+        disabled=(oxidizer_type == "None"),
     )
-    oxidizer_conc = 0.0 if oxidizer_disabled else float(oxidizer_conc_raw)
 
     acid_options = options["acid_types"]
     acid_type = st.sidebar.selectbox("Acid / Complexing Agent", options=acid_options, index=0)
-    acid_disabled = acid_type == "None"
-    acid_conc_raw = st.sidebar.number_input(
+    acid_conc = st.sidebar.number_input(
         "Acid / Complexing Concentration (wt% or M)",
         min_value=0.0,
         max_value=50.0,
         value=0.0,
         step=0.1,
-        disabled=acid_disabled,
+        disabled=(acid_type == "None"),
     )
-    acid_conc = 0.0 if acid_disabled else float(acid_conc_raw)
 
     inhibitor_options = options["inhibitor_types"]
     inhibitor_type = st.sidebar.selectbox("Corrosion Inhibitor", options=inhibitor_options, index=0)
-    inhibitor_disabled = inhibitor_type == "None"
-    inhibitor_conc_raw = st.sidebar.number_input(
+    inhibitor_conc = st.sidebar.number_input(
         "Inhibitor Concentration (mM or wt%)",
         min_value=0.0,
         max_value=50.0,
         value=0.0,
         step=0.1,
-        disabled=inhibitor_disabled,
+        disabled=(inhibitor_type == "None"),
     )
-    inhibitor_conc = 0.0 if inhibitor_disabled else float(inhibitor_conc_raw)
 
     pH = st.sidebar.slider("Solution pH", min_value=0.0, max_value=14.0, value=3.0, step=0.1)
     temperature_C = st.sidebar.slider("Operating Temperature (°C)", min_value=5.0, max_value=95.0, value=25.0, step=1.0)
@@ -603,18 +587,22 @@ def _render_sidebar(controller: CorrosionPlatformController) -> SimulationReques
         primary_metal=primary_metal,
         secondary_metal=secondary_metal,
         cathode_to_anode_area_ratio=float(area_ratio),
-        oxidizer_type=oxidizer_type,
-        oxidizer_concentration=float(oxidizer_conc),
-        acid_type=acid_type,
-        acid_concentration=float(acid_conc),
-        inhibitor_type=inhibitor_type,
-        inhibitor_concentration=float(inhibitor_conc),
-        pH=float(pH),
-        temperature_C=float(temperature_C),
-        solvent_regime=solvent_regime,
-        organic_solvent_type=organic_solvent_type,
-        water_content_wt_pct=float(water_content_wt_pct),
-        immersion_time_s=float(immersion_time_s),
+        recipe=CleaningRecipe(
+            solution=Solution(
+                oxidizer_type=oxidizer_type,
+                oxidizer_concentration=float(oxidizer_conc),
+                acid_type=acid_type,
+                acid_concentration=float(acid_conc),
+                inhibitor_type=inhibitor_type,
+                inhibitor_concentration=float(inhibitor_conc),
+                pH=float(pH),
+                solvent_regime=solvent_regime,
+                organic_solvent_type=organic_solvent_type,
+                water_content_wt_pct=float(water_content_wt_pct),
+            ),
+            temperature_C=float(temperature_C),
+            immersion_time_s=float(immersion_time_s),
+        ),
         d_crit_nm=float(d_crit_nm),
         kinetics_model=kinetics_model,
         d_max_nm=float(d_max_nm),
@@ -669,8 +657,8 @@ def _render_single_metal_view(payload: SingleMetalAnalysisResult) -> None:
         )
         st.caption(
             f"Active ML Model: **{model_label}** | Calibration: **{cal_label}**{lab_clause} | "
-            f"Solvent Regime: **{payload.request.solvent_regime}** "
-            f"({payload.request.solvent_subclass}, {float(payload.request.water_content_wt_pct):.1f} wt% water)"
+            f"Solvent Regime: **{payload.request.recipe.solution.solvent_regime}** "
+            f"({payload.request.recipe.solution.solvent_subclass}, {float(payload.request.recipe.solution.water_content_wt_pct):.1f} wt% water)"
         )
     ad_items = (
         [(payload.request.primary_metal, payload.resolved_parameters.applicability)]
@@ -699,7 +687,7 @@ def _render_single_metal_view(payload: SingleMetalAnalysisResult) -> None:
         delta_color="off",
     )
     c2.metric(
-        f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s",
+        f"Corrosion Depth @ {payload.request.recipe.immersion_time_s:.0f} s",
         f"{payload.corrosion_depth_nm:.3f} nm" if math.isfinite(payload.corrosion_depth_nm) else "N/A",
         delta=f"Threshold: {payload.request.d_crit_nm:.2f} nm",
         delta_color="off",
@@ -768,8 +756,8 @@ def _render_galvanic_view(payload: GalvanicAnalysisResult | None) -> None:
         )
         st.caption(
             f"Active ML Model: **{model_label}** | Calibration: **{cal_label}**{lab_clause} | "
-            f"Solvent Regime: **{payload.request.solvent_regime}** "
-            f"({payload.request.solvent_subclass}, {float(payload.request.water_content_wt_pct):.1f} wt% water)"
+            f"Solvent Regime: **{payload.request.recipe.solution.solvent_regime}** "
+            f"({payload.request.recipe.solution.solvent_subclass}, {float(payload.request.recipe.solution.water_content_wt_pct):.1f} wt% water)"
         )
     galv_ad_items: list[tuple[str, ApplicabilityDomainResult]] = []
     if payload.primary_resolved.applicability is not None:
@@ -833,7 +821,7 @@ def _render_galvanic_view(payload: GalvanicAnalysisResult | None) -> None:
             {
                 "Condition": f"{payload.active_metal} Uncoupled",
                 "CR₀ (nm/min)": payload.uncoupled_cr0_nm_min if math.isfinite(payload.uncoupled_cr0_nm_min) else None,
-                f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s (nm)": (
+                f"Corrosion Depth @ {payload.request.recipe.immersion_time_s:.0f} s (nm)": (
                     payload.uncoupled_depth_nm if math.isfinite(payload.uncoupled_depth_nm) else None
                 ),
                 "Time to Threshold": (
@@ -847,7 +835,7 @@ def _render_galvanic_view(payload: GalvanicAnalysisResult | None) -> None:
             {
                 "Condition": f"{payload.active_metal} Coupled to {payload.noble_metal} (A_ratio={payload.request.cathode_to_anode_area_ratio:g})",
                 "CR₀ (nm/min)": payload.accelerated_cr0_nm_min if math.isfinite(payload.accelerated_cr0_nm_min) else None,
-                f"Corrosion Depth @ {payload.request.immersion_time_s:.0f} s (nm)": (
+                f"Corrosion Depth @ {payload.request.recipe.immersion_time_s:.0f} s (nm)": (
                     payload.coupled_depth_nm if math.isfinite(payload.coupled_depth_nm) else None
                 ),
                 "Time to Threshold": (
@@ -905,70 +893,74 @@ def _render_galvanic_series_explorer(controller: CorrosionPlatformController) ->
             st.dataframe(sub, width="stretch", hide_index=True)
 
 
-def _default_recipe_presets(base_request: SimulationRequest) -> list[CleaningRecipeSpec]:
+def _default_recipe_presets(base_request: SimulationRequest) -> list[RecipeCandidate]:
+    base_rec = base_request.recipe
+    base_sol = base_rec.solution
     return [
-        CleaningRecipeSpec(
-            name="Baseline Recipe",
-            oxidizer_type=base_request.oxidizer_type,
-            oxidizer_concentration=base_request.oxidizer_concentration,
-            acid_type=base_request.acid_type,
-            acid_concentration=base_request.acid_concentration,
-            inhibitor_type=base_request.inhibitor_type,
-            inhibitor_concentration=base_request.inhibitor_concentration,
-            pH=base_request.pH,
-            temperature_C=base_request.temperature_C,
-            immersion_time_s=base_request.immersion_time_s,
-            solvent_regime=base_request.solvent_regime,
-            organic_solvent_type=base_request.organic_solvent_type,
-            water_content_wt_pct=float(base_request.water_content_wt_pct),
-        ),
-        CleaningRecipeSpec(
+        RecipeCandidate(name="Baseline Recipe", recipe=base_rec),
+        RecipeCandidate(
             name="Low-Oxidizer Mild Rinse",
-            oxidizer_type=base_request.oxidizer_type,
-            oxidizer_concentration=max(0.1, round(base_request.oxidizer_concentration * 0.4, 2)),
-            acid_type=base_request.acid_type,
-            acid_concentration=base_request.acid_concentration,
-            inhibitor_type="BTA",
-            inhibitor_concentration=1.0,
-            pH=min(12.0, round(base_request.pH + 1.5, 1)),
-            temperature_C=max(15.0, base_request.temperature_C - 5.0),
-            immersion_time_s=max(30.0, round(base_request.immersion_time_s * 0.5, 0)),
+            recipe=CleaningRecipe(
+                solution=Solution(
+                    oxidizer_type=base_sol.oxidizer_type,
+                    oxidizer_concentration=max(0.1, round(base_sol.oxidizer_concentration * 0.4, 2)),
+                    acid_type=base_sol.acid_type,
+                    acid_concentration=base_sol.acid_concentration,
+                    inhibitor_type="BTA",
+                    inhibitor_concentration=1.0,
+                    pH=min(12.0, round(base_sol.pH + 1.5, 1)),
+                ),
+                temperature_C=max(15.0, base_rec.temperature_C - 5.0),
+                immersion_time_s=max(30.0, round(base_rec.immersion_time_s * 0.5, 0)),
+            ),
         ),
-        CleaningRecipeSpec(
+        RecipeCandidate(
             name="High-Temp Aggressive Clean",
-            oxidizer_type=base_request.oxidizer_type,
-            oxidizer_concentration=min(30.0, round(max(base_request.oxidizer_concentration, 0.5) * 2.0, 2)),
-            acid_type=base_request.acid_type,
-            acid_concentration=base_request.acid_concentration,
-            inhibitor_type="None",
-            inhibitor_concentration=0.0,
-            pH=max(1.0, round(base_request.pH - 0.5, 1)),
-            temperature_C=min(85.0, base_request.temperature_C + 20.0),
-            immersion_time_s=round(base_request.immersion_time_s * 1.5, 0),
+            recipe=CleaningRecipe(
+                solution=Solution(
+                    oxidizer_type=base_sol.oxidizer_type,
+                    oxidizer_concentration=min(30.0, round(max(base_sol.oxidizer_concentration, 0.5) * 2.0, 2)),
+                    acid_type=base_sol.acid_type,
+                    acid_concentration=base_sol.acid_concentration,
+                    inhibitor_type="None",
+                    inhibitor_concentration=0.0,
+                    pH=max(1.0, round(base_sol.pH - 0.5, 1)),
+                ),
+                temperature_C=min(85.0, base_rec.temperature_C + 20.0),
+                immersion_time_s=round(base_rec.immersion_time_s * 1.5, 0),
+            ),
         ),
-        CleaningRecipeSpec(
+        RecipeCandidate(
             name="Neutral Inhibited Clean",
-            oxidizer_type="None",
-            oxidizer_concentration=0.0,
-            acid_type="None",
-            acid_concentration=0.0,
-            inhibitor_type="BTA",
-            inhibitor_concentration=2.0,
-            pH=7.0,
-            temperature_C=25.0,
-            immersion_time_s=120.0,
+            recipe=CleaningRecipe(
+                solution=Solution(
+                    oxidizer_type="None",
+                    oxidizer_concentration=0.0,
+                    acid_type="None",
+                    acid_concentration=0.0,
+                    inhibitor_type="BTA",
+                    inhibitor_concentration=2.0,
+                    pH=7.0,
+                ),
+                temperature_C=25.0,
+                immersion_time_s=120.0,
+            ),
         ),
-        CleaningRecipeSpec(
+        RecipeCandidate(
             name="Short High-pH Rinse",
-            oxidizer_type=base_request.oxidizer_type,
-            oxidizer_concentration=0.5,
-            acid_type="None",
-            acid_concentration=0.0,
-            inhibitor_type="None",
-            inhibitor_concentration=0.0,
-            pH=9.0,
-            temperature_C=25.0,
-            immersion_time_s=60.0,
+            recipe=CleaningRecipe(
+                solution=Solution(
+                    oxidizer_type=base_sol.oxidizer_type,
+                    oxidizer_concentration=0.5,
+                    acid_type="None",
+                    acid_concentration=0.0,
+                    inhibitor_type="None",
+                    inhibitor_concentration=0.0,
+                    pH=9.0,
+                ),
+                temperature_C=25.0,
+                immersion_time_s=60.0,
+            ),
         ),
     ]
 
@@ -996,10 +988,12 @@ def _render_recipe_comparison_view(
     organic_options = options["organic_solvent_types"]
     regime_options = options["solvent_regimes"]
 
-    recipes: list[CleaningRecipeSpec] = []
+    recipes: list[RecipeCandidate] = []
     cols = st.columns(n_recipes)
     for idx in range(n_recipes):
         preset = presets[idx]
+        preset_rec = preset.recipe
+        preset_sol = preset_rec.solution
         with cols[idx]:
             st.markdown(f"**Recipe {idx + 1}**")
             name = st.text_input("Name", value=preset.name, key=f"cmp_name_{idx}")
@@ -1008,7 +1002,7 @@ def _render_recipe_comparison_view(
             r_water_key = f"cmp_water_{idx}"
             r_last_key = f"_last_cmp_regime_{idx}"
             if r_regime_key not in st.session_state:
-                st.session_state[r_regime_key] = preset.solvent_regime
+                st.session_state[r_regime_key] = preset_sol.solvent_regime
             cmp_regime = st.selectbox(
                 "Solvent Regime",
                 options=regime_options,
@@ -1017,8 +1011,8 @@ def _render_recipe_comparison_view(
             )
             if r_org_key not in st.session_state:
                 st.session_state[r_org_key] = (
-                    preset.organic_solvent_type
-                    if preset.organic_solvent_type in organic_options
+                    preset_sol.organic_solvent_type
+                    if preset_sol.organic_solvent_type in organic_options
                     else "None"
                 )
             cmp_org = st.selectbox(
@@ -1026,9 +1020,9 @@ def _render_recipe_comparison_view(
                 options=organic_options,
                 key=r_org_key,
             )
-            cw_min, cw_max, cw_default, cw_step = _solvent_slider_bounds(cmp_regime, cmp_org)
+            cw_min, cw_max, cw_default, cw_step = water_content_slider_bounds(cmp_regime, cmp_org)
             if r_water_key not in st.session_state:
-                st.session_state[r_water_key] = float(preset.water_content_wt_pct)
+                st.session_state[r_water_key] = float(preset_sol.water_content_wt_pct)
             elif st.session_state.get(r_last_key) != cmp_regime or not (
                 cw_min <= float(st.session_state[r_water_key]) <= cw_max
             ):
@@ -1041,64 +1035,68 @@ def _render_recipe_comparison_view(
                 step=cw_step,
                 key=r_water_key,
             )
-            ox_idx = options["oxidizer_types"].index(preset.oxidizer_type) if preset.oxidizer_type in options["oxidizer_types"] else 0
+            ox_idx = options["oxidizer_types"].index(preset_sol.oxidizer_type) if preset_sol.oxidizer_type in options["oxidizer_types"] else 0
             ox_type = st.selectbox("Oxidizer", options=options["oxidizer_types"], index=ox_idx, key=f"cmp_ox_{idx}")
             ox_conc = st.number_input(
                 "Oxidizer Conc.",
                 min_value=0.0,
                 max_value=50.0,
-                value=float(preset.oxidizer_concentration),
+                value=float(preset_sol.oxidizer_concentration),
                 step=0.2,
                 disabled=(ox_type == "None"),
                 key=f"cmp_oxc_{idx}",
             )
-            acid_idx = options["acid_types"].index(preset.acid_type) if preset.acid_type in options["acid_types"] else 0
+            acid_idx = options["acid_types"].index(preset_sol.acid_type) if preset_sol.acid_type in options["acid_types"] else 0
             acid_type = st.selectbox("Acid / Complexing", options=options["acid_types"], index=acid_idx, key=f"cmp_acid_{idx}")
             acid_conc = st.number_input(
                 "Acid Conc.",
                 min_value=0.0,
                 max_value=50.0,
-                value=float(preset.acid_concentration),
+                value=float(preset_sol.acid_concentration),
                 step=0.2,
                 disabled=(acid_type == "None"),
                 key=f"cmp_acidc_{idx}",
             )
-            inh_idx = options["inhibitor_types"].index(preset.inhibitor_type) if preset.inhibitor_type in options["inhibitor_types"] else 0
+            inh_idx = options["inhibitor_types"].index(preset_sol.inhibitor_type) if preset_sol.inhibitor_type in options["inhibitor_types"] else 0
             inh_type = st.selectbox("Inhibitor", options=options["inhibitor_types"], index=inh_idx, key=f"cmp_inh_{idx}")
             inh_conc = st.number_input(
                 "Inhibitor Conc.",
                 min_value=0.0,
                 max_value=50.0,
-                value=float(preset.inhibitor_concentration),
+                value=float(preset_sol.inhibitor_concentration),
                 step=0.2,
                 disabled=(inh_type == "None"),
                 key=f"cmp_inhc_{idx}",
             )
-            ph_val = st.number_input("pH", min_value=0.0, max_value=14.0, value=float(preset.pH), step=0.5, key=f"cmp_ph_{idx}")
-            temp_val = st.number_input("Temp (°C)", min_value=5.0, max_value=95.0, value=float(preset.temperature_C), step=5.0, key=f"cmp_t_{idx}")
-            time_val = st.number_input("Time (s)", min_value=1.0, max_value=86400.0, value=float(preset.immersion_time_s), step=30.0, key=f"cmp_s_{idx}")
+            ph_val = st.number_input("pH", min_value=0.0, max_value=14.0, value=float(preset_sol.pH), step=0.5, key=f"cmp_ph_{idx}")
+            temp_val = st.number_input("Temp (°C)", min_value=5.0, max_value=95.0, value=float(preset_rec.temperature_C), step=5.0, key=f"cmp_t_{idx}")
+            time_val = st.number_input("Time (s)", min_value=1.0, max_value=86400.0, value=float(preset_rec.immersion_time_s), step=30.0, key=f"cmp_s_{idx}")
 
             cleaned_name = name.strip() or f"Recipe {idx + 1}"
             recipes.append(
-                CleaningRecipeSpec(
+                RecipeCandidate(
                     name=cleaned_name,
-                    oxidizer_type=ox_type,
-                    oxidizer_concentration=0.0 if ox_type == "None" else float(ox_conc),
-                    acid_type=acid_type,
-                    acid_concentration=0.0 if acid_type == "None" else float(acid_conc),
-                    inhibitor_type=inh_type,
-                    inhibitor_concentration=0.0 if inh_type == "None" else float(inh_conc),
-                    pH=float(ph_val),
-                    temperature_C=float(temp_val),
-                    immersion_time_s=float(time_val),
-                    solvent_regime=cmp_regime,
-                    organic_solvent_type=cmp_org,
-                    water_content_wt_pct=float(cmp_water),
+                    recipe=CleaningRecipe(
+                        solution=Solution(
+                            oxidizer_type=ox_type,
+                            oxidizer_concentration=float(ox_conc),
+                            acid_type=acid_type,
+                            acid_concentration=float(acid_conc),
+                            inhibitor_type=inh_type,
+                            inhibitor_concentration=float(inh_conc),
+                            pH=float(ph_val),
+                            solvent_regime=cmp_regime,
+                            organic_solvent_type=cmp_org,
+                            water_content_wt_pct=float(cmp_water),
+                        ),
+                        temperature_C=float(temp_val),
+                        immersion_time_s=float(time_val),
+                    ),
                 )
             )
 
     # Ensure unique names if user typed duplicates
-    unique_recipes: list[CleaningRecipeSpec] = []
+    unique_recipes: list[RecipeCandidate] = []
     used: set[str] = set()
     for i, r in enumerate(recipes, start=1):
         unique_name = r.name if r.name not in used else f"{r.name} ({i})"

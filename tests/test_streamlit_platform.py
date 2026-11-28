@@ -8,7 +8,8 @@ import unittest
 import plotly.graph_objects as go
 
 from corrosion_simulator.database import CORE_METALS, HarmonizedDatabase
-from corrosion_simulator.ml_predictor import HybridMLPredictor
+from corrosion_simulator.ml_predictor import HybridMLPredictor, MLFeatureQuery
+from corrosion_simulator.solution import CleaningRecipe, Solution
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     GalvanicAnalysisResult,
@@ -45,62 +46,30 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
 
     def test_simulation_request_solvent_consistency_and_guardrails(self) -> None:
         default_req = SimulationRequest(primary_metal="Cu")
-        self.assertEqual(default_req.solvent_regime, "aqueous")
-        self.assertEqual(default_req.organic_solvent_type, "None")
-        self.assertAlmostEqual(float(default_req.water_content_wt_pct), 100.0)
-        self.assertEqual(default_req.solvent_subclass, "acidic")
+        self.assertEqual(default_req.recipe.solution.solvent_regime, "aqueous")
+        self.assertEqual(default_req.recipe.solution.organic_solvent_type, "None")
+        self.assertAlmostEqual(float(default_req.recipe.solution.water_content_wt_pct), 100.0)
+        self.assertEqual(default_req.recipe.solution.solvent_subclass, "acidic")
 
-        semi_req = SimulationRequest(
-            primary_metal="Cu",
-            solvent_regime="semi_aqueous",
-            organic_solvent_type="EG",
-        )
-        self.assertAlmostEqual(float(semi_req.water_content_wt_pct), 50.0)
-        self.assertEqual(semi_req.solvent_subclass, "glycol")
+        semi_req = SimulationRequest(primary_metal="Cu", recipe=CleaningRecipe(solution=Solution(solvent_regime="semi_aqueous", organic_solvent_type="EG")))
+        self.assertAlmostEqual(float(semi_req.recipe.solution.water_content_wt_pct), 50.0)
+        self.assertEqual(semi_req.recipe.solution.solvent_subclass, "glycol")
 
-        nonaq_req = SimulationRequest(
-            primary_metal="Cu",
-            secondary_metal="Co",
-            solvent_regime="non_aqueous",
-            organic_solvent_type="DMSO",
-            water_content_wt_pct=0.5,
-            parameter_source="ml",
-            mc_draws=80,
-        )
-        self.assertEqual(nonaq_req.solvent_regime, "non_aqueous")
-        self.assertEqual(nonaq_req.solvent_subclass, "polar_aprotic")
+        nonaq_req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", parameter_source="ml", mc_draws=80, recipe=CleaningRecipe(solution=Solution(solvent_regime="non_aqueous", organic_solvent_type="DMSO", water_content_wt_pct=0.5)))
+        self.assertEqual(nonaq_req.recipe.solution.solvent_regime, "non_aqueous")
+        self.assertEqual(nonaq_req.recipe.solution.solvent_subclass, "polar_aprotic")
 
         # Boundary derivation from water_content_wt_pct alone
-        self.assertEqual(
-            SimulationRequest(primary_metal="Cu", water_content_wt_pct=90.0).solvent_regime,
-            "aqueous",
-        )
-        self.assertEqual(
-            SimulationRequest(primary_metal="Cu", water_content_wt_pct=89.99).solvent_regime,
-            "semi_aqueous",
-        )
-        self.assertEqual(
-            SimulationRequest(primary_metal="Cu", water_content_wt_pct=1.0).solvent_regime,
-            "semi_aqueous",
-        )
-        self.assertEqual(
-            SimulationRequest(primary_metal="Cu", water_content_wt_pct=0.99).solvent_regime,
-            "non_aqueous",
-        )
+        self.assertEqual(Solution(water_content_wt_pct=90.0).solvent_regime, "aqueous")
+        self.assertEqual(Solution(water_content_wt_pct=89.99).solvent_regime, "semi_aqueous")
+        self.assertEqual(Solution(water_content_wt_pct=1.0).solvent_regime, "semi_aqueous")
+        self.assertEqual(Solution(water_content_wt_pct=0.99).solvent_regime, "non_aqueous")
 
         # Inconsistent regime and water content must fail fast
         with self.assertRaises(ValueError):
-            SimulationRequest(
-                primary_metal="Cu",
-                solvent_regime="non_aqueous",
-                water_content_wt_pct=50.0,
-            )
+            Solution(solvent_regime="non_aqueous", water_content_wt_pct=50.0)
         with self.assertRaises(ValueError):
-            SimulationRequest(
-                primary_metal="Cu",
-                solvent_regime="aqueous",
-                water_content_wt_pct=85.0,
-            )
+            Solution(solvent_regime="aqueous", water_content_wt_pct=85.0)
 
         # Non-aqueous simulations must surface physics-limitation warnings in both Single Metal and Galvanic payloads
         single_payload = self.controller.run_single_metal_analysis(nonaq_req)
@@ -117,42 +86,20 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
             self.assertAlmostEqual(summary["water_content_wt_pct"], 0.5)
 
         # ML query carries solvent descriptors cleanly
-        q = self.controller._build_ml_query(semi_req, "Cu")
+        q = MLFeatureQuery.for_solution("Cu", semi_req.recipe.solution, semi_req.recipe.temperature_C)
         self.assertEqual(q.organic_solvent_type, "EG")
         self.assertAlmostEqual(q.water_content_wt_pct, 50.0)
         self.assertEqual(q.base_solvent, "DI water")
 
         # Database lookup mismatching solvent regime adds warning and downgrades confidence
         db_nonaq_payload = self.controller.run_single_metal_analysis(
-            SimulationRequest(
-                primary_metal="Cu",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                pH=4.0,
-                solvent_regime="non_aqueous",
-                organic_solvent_type="DMSO",
-                water_content_wt_pct=0.2,
-                parameter_source="database",
-            )
+            SimulationRequest(primary_metal="Cu", parameter_source="database", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=4.0, solvent_regime="non_aqueous", organic_solvent_type="DMSO", water_content_wt_pct=0.2)))
         )
         self.assertEqual(db_nonaq_payload.confidence_tier, "Low")
         self.assertTrue(any("Solvent Regime" in w for w in db_nonaq_payload.warnings))
 
     def test_single_metal_ml_workflow_returns_complete_payload_and_figures(self) -> None:
-        req = SimulationRequest(
-            primary_metal="Cu",
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            acid_type="Citric acid",
-            acid_concentration=1.0,
-            pH=3.0,
-            temperature_C=25.0,
-            immersion_time_s=300.0,
-            d_crit_nm=1.0,
-            kinetics_model="auto",
-            parameter_source="ml",
-            mc_draws=200,
-        )
+        req = SimulationRequest(primary_metal="Cu", d_crit_nm=1.0, kinetics_model="auto", parameter_source="ml", mc_draws=200, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, acid_type="Citric acid", acid_concentration=1.0, pH=3.0), temperature_C=25.0, immersion_time_s=300.0))
         payload = self.controller.run_single_metal_analysis(req)
 
         self.assertIsInstance(payload, SingleMetalAnalysisResult)
@@ -231,17 +178,7 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertIn("experimental_recommendations", summary)
 
     def test_single_metal_database_and_manual_sources(self) -> None:
-        db_req = SimulationRequest(
-            primary_metal="Co",
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            pH=4.0,
-            temperature_C=25.0,
-            immersion_time_s=120.0,
-            d_crit_nm=1.0,
-            kinetics_model="linear",
-            parameter_source="database",
-        )
+        db_req = SimulationRequest(primary_metal="Co", d_crit_nm=1.0, kinetics_model="linear", parameter_source="database", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=4.0), temperature_C=25.0, immersion_time_s=120.0))
         db_payload = self.controller.run_single_metal_analysis(db_req)
         self.assertEqual(db_payload.resolved_parameters.source, "database")
         self.assertIsNone(db_payload.mc_propagation)
@@ -249,21 +186,12 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         self.assertIsInstance(db_figs.polarization_figure, go.Figure)
         self.assertIsInstance(db_figs.kinetics_risk_figure, go.Figure)
 
-        manual_req = SimulationRequest(
-            primary_metal="Cu",
-            pH=3.0,
-            temperature_C=25.0,
-            immersion_time_s=60.0,
-            d_crit_nm=1.0,
-            kinetics_model="linear",
-            parameter_source="manual",
-            manual_primary=ManualElectrochemicalInput(
+        manual_req = SimulationRequest(primary_metal="Cu", d_crit_nm=1.0, kinetics_model="linear", parameter_source="manual", manual_primary=ManualElectrochemicalInput(
                 Ecorr_V_SHE=0.25,
                 icorr_uA_cm2=2.3,
                 beta_a_mV_dec=60.0,
                 beta_c_mV_dec=120.0,
-            ),
-        )
+            ), recipe=CleaningRecipe(solution=Solution(pH=3.0), temperature_C=25.0, immersion_time_s=60.0))
         manual_payload = self.controller.run_single_metal_analysis(manual_req)
         self.assertEqual(manual_payload.resolved_parameters.source, "manual")
         # Cu at 2.3 uA/cm2, z=2 -> ~0.0508 nm/min? Wait: Faraday check from spec is ~0.051 or 0.45?
@@ -276,17 +204,7 @@ class TestCorrosionPlatformControllerSingleMetal(unittest.TestCase):
         )
 
     def test_single_metal_out_of_domain_triggers_low_confidence_and_recommendations(self) -> None:
-        ood_req = SimulationRequest(
-            primary_metal="Cu",
-            oxidizer_type="UnknownOxidizerX",
-            oxidizer_concentration=50.0,
-            pH=13.5,
-            temperature_C=95.0,
-            immersion_time_s=180.0,
-            d_crit_nm=1.0,
-            parameter_source="ml",
-            mc_draws=100,
-        )
+        ood_req = SimulationRequest(primary_metal="Cu", d_crit_nm=1.0, parameter_source="ml", mc_draws=100, recipe=CleaningRecipe(solution=Solution(oxidizer_type="UnknownOxidizerX", oxidizer_concentration=50.0, pH=13.5), temperature_C=95.0, immersion_time_s=180.0))
         payload = self.controller.run_single_metal_analysis(ood_req)
         self.assertEqual(payload.confidence_tier, "Low")
         self.assertGreater(len(payload.warnings), 0)
@@ -311,22 +229,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
             self.controller.run_galvanic_analysis(same_metal)
 
     def test_galvanic_ml_workflow_returns_complete_payload_and_figures(self) -> None:
-        req = SimulationRequest(
-            primary_metal="Cu",
-            secondary_metal="Co",
-            cathode_to_anode_area_ratio=2.0,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            acid_type="Citric acid",
-            acid_concentration=1.0,
-            pH=3.0,
-            temperature_C=25.0,
-            immersion_time_s=300.0,
-            d_crit_nm=1.0,
-            kinetics_model="linear",
-            parameter_source="ml",
-            mc_draws=200,
-        )
+        req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", cathode_to_anode_area_ratio=2.0, d_crit_nm=1.0, kinetics_model="linear", parameter_source="ml", mc_draws=200, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, acid_type="Citric acid", acid_concentration=1.0, pH=3.0), temperature_C=25.0, immersion_time_s=300.0))
         payload = self.controller.run_galvanic_analysis(req)
 
         self.assertIsInstance(payload, GalvanicAnalysisResult)
@@ -405,9 +308,11 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         base_kwargs = dict(
             primary_metal="Cu",
             secondary_metal="Co",
-            pH=3.0,
-            temperature_C=25.0,
-            immersion_time_s=180.0,
+            recipe=CleaningRecipe(
+                solution=Solution(pH=3.0),
+                temperature_C=25.0,
+                immersion_time_s=180.0,
+            ),
             d_crit_nm=1.0,
             kinetics_model="linear",
             parameter_source="manual",
@@ -432,19 +337,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         self.assertLess(high_area.coupled_time_to_threshold_s, low_area.coupled_time_to_threshold_s)
 
     def test_galvanic_database_source_workflow(self) -> None:
-        req = SimulationRequest(
-            primary_metal="Cu",
-            secondary_metal="Co",
-            cathode_to_anode_area_ratio=1.5,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            pH=4.0,
-            temperature_C=25.0,
-            immersion_time_s=180.0,
-            d_crit_nm=1.0,
-            kinetics_model="auto",
-            parameter_source="database",
-        )
+        req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", cathode_to_anode_area_ratio=1.5, d_crit_nm=1.0, kinetics_model="auto", parameter_source="database", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=4.0), temperature_C=25.0, immersion_time_s=180.0))
         payload = self.controller.run_galvanic_analysis(req)
         self.assertEqual(payload.primary_resolved.source, "database")
         self.assertEqual(payload.secondary_resolved.source, "database")
@@ -460,19 +353,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         # 1. Verify the active external dataset resolves Cu/Co and Cu/Ru cleanly without error
         raw_controller = CorrosionPlatformController.from_default_data()
         for pair in [("Cu", "Co"), ("Cu", "Ru")]:
-            req = SimulationRequest(
-                primary_metal=pair[0],
-                secondary_metal=pair[1],
-                cathode_to_anode_area_ratio=1.0,
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                pH=3.0,
-                temperature_C=25.0,
-                immersion_time_s=300.0,
-                d_crit_nm=1.0,
-                kinetics_model="auto",
-                parameter_source="database",
-            )
+            req = SimulationRequest(primary_metal=pair[0], secondary_metal=pair[1], cathode_to_anode_area_ratio=1.0, d_crit_nm=1.0, kinetics_model="auto", parameter_source="database", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=3.0), temperature_C=25.0, immersion_time_s=300.0))
             payload = raw_controller.run_galvanic_analysis(req)
             self.assertEqual({payload.active_metal, payload.noble_metal}, set(pair))
             self.assertGreaterEqual(payload.acceleration_factor, 1.0)
@@ -513,19 +394,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         )
         disjoint_ctrl = CorrosionPlatformController(disjoint_db)
         disjoint_payload = disjoint_ctrl.run_galvanic_analysis(
-            SimulationRequest(
-                primary_metal="Cu",
-                secondary_metal="Ru",
-                cathode_to_anode_area_ratio=1.0,
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                pH=3.0,
-                temperature_C=25.0,
-                immersion_time_s=300.0,
-                d_crit_nm=1.0,
-                kinetics_model="auto",
-                parameter_source="database",
-            )
+            SimulationRequest(primary_metal="Cu", secondary_metal="Ru", cathode_to_anode_area_ratio=1.0, d_crit_nm=1.0, kinetics_model="auto", parameter_source="database", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=3.0), temperature_C=25.0, immersion_time_s=300.0))
         )
         self.assertEqual(disjoint_payload.confidence_tier, "Low")
         self.assertTrue(
@@ -540,16 +409,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
         )
 
         for family in ("random_forest", "hist_gradient_boosting", "rf_gp_ensemble"):
-            req = SimulationRequest(
-                primary_metal="Cu",
-                pH=4.0,
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                temperature_C=25.0,
-                parameter_source="ml",
-                ml_model_family=family,
-                mc_draws=80,
-            )
+            req = SimulationRequest(primary_metal="Cu", parameter_source="ml", ml_model_family=family, mc_draws=80, recipe=CleaningRecipe(solution=Solution(pH=4.0, oxidizer_type="H2O2", oxidizer_concentration=1.0), temperature_C=25.0))
             payload = self.controller.run_single_metal_analysis(req)
             self.assertIsNotNone(payload.resolved_parameters.ml_prediction)
             self.assertEqual(payload.resolved_parameters.ml_prediction.model_family, family)
@@ -654,26 +514,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
             )
 
             for mode in ("literature_only", "delta_learning", "lab_only_gp"):
-                req = SimulationRequest(
-                    primary_metal="Cu",
-                    secondary_metal="Co",
-                    cathode_to_anode_area_ratio=2.0,
-                    oxidizer_type="H2O2",
-                    oxidizer_concentration=1.0,
-                    pH=5.0,
-                    temperature_C=30.0,
-                    solvent_regime="semi_aqueous",
-                    organic_solvent_type="EG",
-                    water_content_wt_pct=50.0,
-                    immersion_time_s=180.0,
-                    d_crit_nm=1.0,
-                    kinetics_model="linear",
-                    parameter_source="ml",
-                    ml_model_family="random_forest",
-                    calibration_mode=mode,
-                    lab_project="cu_co_eg",
-                    mc_draws=100,
-                )
+                req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", cathode_to_anode_area_ratio=2.0, d_crit_nm=1.0, kinetics_model="linear", parameter_source="ml", ml_model_family="random_forest", calibration_mode=mode, lab_project="cu_co_eg", mc_draws=100, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=5.0, solvent_regime="semi_aqueous", organic_solvent_type="EG", water_content_wt_pct=50.0), temperature_C=30.0, immersion_time_s=180.0))
                 single = ctrl.run_single_metal_analysis(req)
                 galv = ctrl.run_galvanic_analysis(req)
 
@@ -715,20 +556,7 @@ class TestCorrosionPlatformControllerGalvanic(unittest.TestCase):
             self.assertFalse(reload_summary.raw_rebuilt)
             self.assertTrue(reload_summary.lab_cache_invalidated)
             refreshed = ctrl.run_single_metal_analysis(
-                SimulationRequest(
-                    primary_metal="Cu",
-                    oxidizer_type="H2O2",
-                    oxidizer_concentration=1.0,
-                    pH=5.0,
-                    temperature_C=30.0,
-                    solvent_regime="semi_aqueous",
-                    organic_solvent_type="EG",
-                    water_content_wt_pct=50.0,
-                    parameter_source="ml",
-                    calibration_mode="delta_learning",
-                    lab_project="cu_co_eg",
-                    mc_draws=80,
-                )
+                SimulationRequest(primary_metal="Cu", parameter_source="ml", calibration_mode="delta_learning", lab_project="cu_co_eg", mc_draws=80, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=5.0, solvent_regime="semi_aqueous", organic_solvent_type="EG", water_content_wt_pct=50.0), temperature_C=30.0))
             )
             assert refreshed.resolved_parameters.residual_breakdown is not None
             self.assertEqual(
@@ -1075,13 +903,7 @@ class TestStreamlitAppSmoke(unittest.TestCase):
             side_effect=AssertionError("Must not train missing peer model during prediction"),
         ):
             payload_no_peer = ctrl.run_single_metal_analysis(
-                SimulationRequest(
-                    primary_metal="Cu",
-                    pH=4.0,
-                    temperature_C=25.0,
-                    calibration_mode="literature_only",
-                    mc_draws=60,
-                )
+                SimulationRequest(primary_metal="Cu", calibration_mode="literature_only", mc_draws=60, recipe=CleaningRecipe(solution=Solution(pH=4.0), temperature_C=25.0))
             )
         ad_no_peer = payload_no_peer.resolved_parameters.applicability
         assert ad_no_peer is not None
@@ -1192,10 +1014,11 @@ class TestStreamlitAppSmoke(unittest.TestCase):
             n_lab_samples=3,
         )
         unanchored_pred = _make_stub_pred("hist_gradient_boosting", 0.21, 1.75, unanchored_ad)
+        default_cu_query = MLFeatureQuery.for_solution("Cu", Solution(), 25.0)
         downgraded_delta = ctrl._evaluate_cross_model_disagreement(
             SimulationRequest(primary_metal="Cu", calibration_mode="delta_learning"),
             "Cu",
-            ctrl._build_ml_query(SimulationRequest(primary_metal="Cu"), "Cu"),
+            default_cu_query,
             unanchored_pred,
         )
         self.assertEqual(downgraded_delta.applicability.confidence_tier, "Low")
@@ -1212,7 +1035,7 @@ class TestStreamlitAppSmoke(unittest.TestCase):
         exempt_delta = ctrl._evaluate_cross_model_disagreement(
             SimulationRequest(primary_metal="Cu", calibration_mode="delta_learning"),
             "Cu",
-            ctrl._build_ml_query(SimulationRequest(primary_metal="Cu"), "Cu"),
+            default_cu_query,
             anchored_pred,
         )
         self.assertEqual(exempt_delta.applicability.confidence_tier, "High")
@@ -1223,7 +1046,7 @@ class TestStreamlitAppSmoke(unittest.TestCase):
         exempt_lab_only = ctrl._evaluate_cross_model_disagreement(
             SimulationRequest(primary_metal="Cu", calibration_mode="lab_only_gp"),
             "Cu",
-            ctrl._build_ml_query(SimulationRequest(primary_metal="Cu"), "Cu"),
+            default_cu_query,
             _make_stub_pred("lab_local_gp", 0.21, 1.75, lab_only_ad),
         )
         self.assertEqual(exempt_lab_only.applicability.confidence_tier, "High")

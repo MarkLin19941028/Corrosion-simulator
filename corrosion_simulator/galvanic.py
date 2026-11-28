@@ -15,7 +15,7 @@ from corrosion_simulator.database import (
     ExposureLookupResult,
     HarmonizedDatabase,
 )
-from corrosion_simulator.ml_predictor import (
+from corrosion_simulator.uncertainty import (
     DEFAULT_ECORR_CORRELATION,
     DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
     ECORR_THERMO_MAX_V_SHE,

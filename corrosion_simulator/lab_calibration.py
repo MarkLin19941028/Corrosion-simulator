@@ -18,23 +18,23 @@ from corrosion_simulator.database import (
     HarmonizedDatabase,
 )
 from corrosion_simulator.ml_predictor import (
-    ECORR_THERMO_MAX_V_SHE,
-    ECORR_THERMO_MIN_V_SHE,
     ML_TARGET_NAMES,
-    TAFEL_SLOPE_MAX_MV_DEC,
-    TAFEL_SLOPE_MIN_MV_DEC,
     ApplicabilityDomainChecker,
     ApplicabilityDomainResult,
     ConfidenceTier,
     HybridMLPredictor,
     MLFeatureQuery,
-    MLParameterPrediction,
-    ParameterEstimate,
     PredictedModelFamily,
     ResidualConditionTransformer,
-    _extract_sample_weights,
-    _extract_target_vectors,
+    extract_sample_weights,
+    extract_target_valid_mask,
+    extract_target_vectors,
     fit_zero_mean_residual_gp,
+)
+from corrosion_simulator.uncertainty import (
+    MLParameterPrediction,
+    ParameterEstimate,
+    clip_target_mean,
 )
 
 if TYPE_CHECKING:
@@ -167,41 +167,6 @@ class ResidualBreakdown:
         }
 
 
-def _clip_target_mean(target_name: str, value: float) -> float:
-    """Enforce physical and thermodynamic bounds on predicted parameter means."""
-    if target_name == "Ecorr_V_SHE":
-        return float(np.clip(value, ECORR_THERMO_MIN_V_SHE, ECORR_THERMO_MAX_V_SHE))
-    if target_name in ("beta_a_mV_dec", "beta_c_mV_dec"):
-        return float(np.clip(value, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
-    if target_name == "log10_icorr_uA_cm2":
-        return float(np.clip(value, -6.0, 6.0))
-    raise ValueError(f"Unknown target_name: {target_name!r}")
-
-
-def _lab_target_valid_mask(
-    df: pd.DataFrame,
-    target_name: str,
-    y_vec: np.ndarray,
-    *,
-    exclude_imputed_tafel: bool = True,
-) -> np.ndarray:
-    """Return mask of valid measured lab observations (excluding imputed Tafel defaults when present)."""
-    finite_mask = np.isfinite(y_vec)
-    if not exclude_imputed_tafel:
-        return finite_mask
-
-    imputed_col: str | None = None
-    if target_name == "beta_a_mV_dec" and "beta_a_imputed" in df.columns:
-        imputed_col = "beta_a_imputed"
-    elif target_name == "beta_c_mV_dec" and "beta_c_imputed" in df.columns:
-        imputed_col = "beta_c_imputed"
-
-    if imputed_col is None:
-        return finite_mask
-
-    return finite_mask & ~df[imputed_col].fillna(False).astype(bool).to_numpy()
-
-
 def _extract_gp_kernel_variances(kernel: Any) -> tuple[float, float]:
     """Extract ``(prior_signal_var, noise_var)`` from a fitted ``Constant * Matern + WhiteKernel``."""
     signal_var = 0.0
@@ -300,7 +265,7 @@ class LabCalibratedPredictor:
             )
 
         if self.calibration_mode == "literature_only":
-            if self.base_predictor is None or not self.base_predictor._is_fitted:
+            if self.base_predictor is None or not self.base_predictor.is_fitted:
                 raise RuntimeError(
                     "literature_only mode requires a fitted base HybridMLPredictor."
                 )
@@ -317,9 +282,8 @@ class LabCalibratedPredictor:
         return self
 
     def _fit_delta_learning(self, lab_db: HarmonizedDatabase | None) -> None:
-        if self.base_predictor is None or not self.base_predictor._is_fitted:
+        if self.base_predictor is None or not self.base_predictor.is_fitted:
             raise RuntimeError("delta_learning mode requires a fitted base HybridMLPredictor.")
-        assert self.base_predictor.feature_extractor is not None
 
         self._residual_models = {}
         self._delta_lab_ad = None
@@ -335,20 +299,9 @@ class LabCalibratedPredictor:
             min_low_confidence_samples=1,
         ).fit(df)
 
-        X_prior = self.base_predictor.feature_extractor.transform(df)
-        prior_means: dict[str, np.ndarray] = {}
-        for target_name in ML_TARGET_NAMES:
-            raw_mean, _ = self.base_predictor.models[target_name].predict_mean_std(
-                X_prior,
-                condition_df=df,
-            )
-            prior_means[target_name] = np.array(
-                [_clip_target_mean(target_name, float(v)) for v in raw_mean],
-                dtype=float,
-            )
-
-        targets = _extract_target_vectors(df)
-        weights_all = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
+        prior_means = self.base_predictor.predict_prior_means_dataframe(df)
+        targets = extract_target_vectors(df)
+        weights_all = extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
         metals_col = df["metal"].astype(str).str.strip()
 
         for metal_idx, metal in enumerate(sorted(set(metals_col))):
@@ -362,11 +315,12 @@ class LabCalibratedPredictor:
 
             for t_idx, target_name in enumerate(ML_TARGET_NAMES):
                 y_metal = targets[target_name][metal_mask]
-                valid_mask = _lab_target_valid_mask(
+                valid_mask = extract_target_valid_mask(
                     df_metal,
                     target_name,
                     y_metal,
                     exclude_imputed_tafel=self.exclude_imputed_tafel,
+                    fallback_min_measured=None,
                 )
                 n_valid = int(np.sum(valid_mask))
                 key = (metal, target_name)
@@ -478,7 +432,7 @@ class LabCalibratedPredictor:
                 f"Lab-Only Local GP requires at least {MIN_LAB_ONLY_GP_SAMPLES} laboratory records "
                 f"in project {project_label!r}, but found 0 records."
             )
-            if not self.allow_fallback or self.base_predictor is None or not self.base_predictor._is_fitted:
+            if not self.allow_fallback or self.base_predictor is None or not self.base_predictor.is_fitted:
                 raise InsufficientLabSamplesError(
                     f"{msg} Add >= {MIN_LAB_ONLY_GP_SAMPLES} records to data/lab/ or switch to 'delta_learning'."
                 )
@@ -493,17 +447,18 @@ class LabCalibratedPredictor:
             min_low_confidence_samples=MIN_LAB_ONLY_GP_SAMPLES,
         ).fit(df)
 
-        targets = _extract_target_vectors(df)
-        weights_all = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
+        targets = extract_target_vectors(df)
+        weights_all = extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
         metals_col = df["metal"].astype(str).str.strip()
 
         for t_idx, target_name in enumerate(ML_TARGET_NAMES):
             y_all = targets[target_name]
-            valid_mask = _lab_target_valid_mask(
+            valid_mask = extract_target_valid_mask(
                 df,
                 target_name,
                 y_all,
                 exclude_imputed_tafel=self.exclude_imputed_tafel,
+                fallback_min_measured=None,
             )
             n_valid = int(np.sum(valid_mask))
 
@@ -543,7 +498,7 @@ class LabCalibratedPredictor:
                 self._lab_only_targets[target_name] = _FittedLabOnlyTarget(
                     n_lab=n_valid,
                     is_fallback=True,
-                    fallback_mean=_clip_target_mean(target_name, fb_mean),
+                    fallback_mean=clip_target_mean(target_name, fb_mean),
                     fallback_std=float(fb_std),
                     warning=msg,
                 )
@@ -650,7 +605,7 @@ class LabCalibratedPredictor:
             if fitted is None or fitted.method == "prior_only":
                 delta_est = ParameterEstimate(mean=0.0, std=0.0)
                 cal_est = ParameterEstimate(
-                    mean=_clip_target_mean(target_name, prior_est.mean),
+                    mean=clip_target_mean(target_name, prior_est.mean),
                     std=float(max(prior_est.std, 0.0)),
                 )
                 breakdowns[target_name] = TargetResidualBreakdown(
@@ -693,7 +648,7 @@ class LabCalibratedPredictor:
                 prior_std_val = max(float(prior_est.std), 0.0)
                 cal_std = math.sqrt((1.0 - coverage) * (prior_std_val**2) + d_std_val**2)
 
-            cal_mean = _clip_target_mean(target_name, prior_est.mean + delta_est.mean)
+            cal_mean = clip_target_mean(target_name, prior_est.mean + delta_est.mean)
             cal_est = ParameterEstimate(mean=cal_mean, std=float(cal_std))
             breakdowns[target_name] = TargetResidualBreakdown(
                 target=target_name,
@@ -872,7 +827,7 @@ class LabCalibratedPredictor:
                     fitted.gp_model.predict(X_q, return_std=True),
                 )
                 estimates[target_name] = ParameterEstimate(
-                    mean=_clip_target_mean(target_name, float(mean_arr[0])),
+                    mean=clip_target_mean(target_name, float(mean_arr[0])),
                     std=max(float(std_arr[0]), 0.0),
                 )
 

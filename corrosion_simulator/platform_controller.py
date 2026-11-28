@@ -18,17 +18,18 @@ from corrosion_simulator.artifact_repository import (
 )
 from corrosion_simulator.database import (
     CORE_METALS,
-    DEFAULT_NON_AQUEOUS_WATER_WT_PCT,
-    DEFAULT_SEMI_AQUEOUS_WATER_WT_PCT,
     SOLVENT_REGIMES,
     ExposureCondition,
     ExposureLookupResult,
     HarmonizedDatabase,
-    SolventRegime,
-    SolventSubclass,
-    classify_solvent_regime,
-    classify_solvent_subclass,
     normalize_category_label,
+)
+from corrosion_simulator.solution import (
+    NON_AQUEOUS_WARNING_PREFIX,
+    CleaningRecipe,
+    Solution,
+    build_non_aqueous_physics_warning,
+    resolve_consistent_solvent_settings,
 )
 from corrosion_simulator.solvent_constants import SOLVENT_PHYSICAL_PROPERTIES
 from corrosion_simulator.galvanic import (
@@ -59,10 +60,12 @@ from corrosion_simulator.ml_predictor import (
     ConfidenceTier,
     HybridMLPredictor,
     MLFeatureQuery,
-    MLParameterPrediction,
     ModelFamily,
-    MonteCarloPropagationResult,
     PredictedModelFamily,
+)
+from corrosion_simulator.uncertainty import (
+    MLParameterPrediction,
+    MonteCarloPropagationResult,
     propagate_uncertainty_monte_carlo,
 )
 from corrosion_simulator.physics import (
@@ -81,7 +84,6 @@ KineticsSelection = Literal["auto", "linear", "passivation", "power_law"]
 
 _CONFIDENCE_RANK = {"Low": 0, "Medium": 1, "High": 2}
 _CONFIDENCE_BY_RANK = {0: "Low", 1: "Medium", 2: "High"}
-NON_AQUEOUS_WARNING_PREFIX = "Non-aqueous Exposure Condition"
 
 CALIBRATION_MODE_DEFAULT_MODELS: Final[dict[CalibrationMode, PredictedModelFamily]] = {
     "literature_only": "rf_gp_ensemble",
@@ -137,80 +139,6 @@ def format_active_model_label(model_family: PredictedModelFamily | str) -> str:
     return MODEL_FAMILY_LABELS.get(model_family, str(model_family))  # type: ignore[arg-type]
 
 
-def resolve_consistent_solvent_settings(
-    solvent_regime: str | None,
-    organic_solvent_type: Any,
-    water_content_wt_pct: float | None,
-) -> tuple[SolventRegime, str, float]:
-    """Resolve and validate mutually consistent ``(solvent_regime, organic_solvent_type, water_content_wt_pct)``."""
-    org_type = normalize_category_label(organic_solvent_type)
-
-    regime_val: SolventRegime | None = None
-    if solvent_regime is not None:
-        regime_str = str(solvent_regime).strip()
-        if regime_str not in SOLVENT_REGIMES:
-            raise ValueError(
-                f"Unsupported solvent_regime '{solvent_regime}'. Supported: {SOLVENT_REGIMES}"
-            )
-        regime_val = regime_str  # type: ignore[assignment]
-
-    water_num: float | None = None
-    if water_content_wt_pct is not None:
-        if isinstance(water_content_wt_pct, bool):
-            raise ValueError("water_content_wt_pct must be a finite numeric percentage in [0, 100].")
-        try:
-            water_num = float(water_content_wt_pct)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"water_content_wt_pct must be numeric, got {water_content_wt_pct!r}."
-            ) from exc
-        if not math.isfinite(water_num) or not (0.0 <= water_num <= 100.0):
-            raise ValueError(
-                f"water_content_wt_pct must be finite and within [0.0, 100.0], got {water_content_wt_pct!r}."
-            )
-
-    if regime_val is None and water_num is None:
-        if org_type != "None":
-            return ("semi_aqueous", org_type, float(DEFAULT_SEMI_AQUEOUS_WATER_WT_PCT))
-        return ("aqueous", "None", 100.0)
-
-    if regime_val is not None and water_num is None:
-        if regime_val == "aqueous":
-            default_water = 100.0 if org_type == "None" else 95.0
-        elif regime_val == "semi_aqueous":
-            default_water = float(DEFAULT_SEMI_AQUEOUS_WATER_WT_PCT)
-        else:
-            default_water = float(DEFAULT_NON_AQUEOUS_WATER_WT_PCT)
-        return (regime_val, org_type, default_water)
-
-    if regime_val is None and water_num is not None:
-        return (classify_solvent_regime(water_num), org_type, float(water_num))
-
-    assert regime_val is not None and water_num is not None
-    derived_regime = classify_solvent_regime(water_num)
-    if derived_regime != regime_val:
-        raise ValueError(
-            f"Inconsistent solvent_regime='{regime_val}' and water_content_wt_pct={water_num:g}. "
-            "Regime boundaries require aqueous >= 90.0 wt%, 1.0 <= semi_aqueous < 90.0 wt%, "
-            "and non_aqueous < 1.0 wt% water."
-        )
-    return (regime_val, org_type, float(water_num))
-
-
-def build_non_aqueous_physics_warning(
-    water_content_wt_pct: float,
-    organic_solvent_type: str = "None",
-) -> str:
-    """Build the standardized physics-limitation banner warning for non-aqueous (<1 wt% water) conditions."""
-    org_label = normalize_category_label(organic_solvent_type)
-    co_solvent = f" ({org_label})" if org_label != "None" else ""
-    return (
-        f"{NON_AQUEOUS_WARNING_PREFIX}{co_solvent} with {water_content_wt_pct:.2f} wt% water (< 1%): "
-        "aqueous pH, V vs. SHE reference potential scale, and aqueous Pourbaix passivation assumptions "
-        "are not strictly valid in this phase. Interpret simulated kinetics as exploratory screening only."
-    )
-
-
 @dataclass(frozen=True)
 class ManualElectrochemicalInput:
     """User-supplied electrochemical parameters for manual override mode."""
@@ -234,24 +162,12 @@ class ManualElectrochemicalInput:
 
 @dataclass(frozen=True)
 class SimulationRequest:
-    """Unified sidebar configuration for Single Metal and Galvanic Analysis."""
+    """Unified simulation configuration composed from Metal selection and a CleaningRecipe."""
 
     primary_metal: str
     secondary_metal: str | None = None
     cathode_to_anode_area_ratio: float = 1.0
-    oxidizer_type: str = "H2O2"
-    oxidizer_concentration: float = 1.0
-    acid_type: str = "None"
-    acid_concentration: float = 0.0
-    inhibitor_type: str = "None"
-    inhibitor_concentration: float = 0.0
-    pH: float = 3.0
-    temperature_C: float = 25.0
-    ORP_mV: float | None = None
-    solvent_regime: SolventRegime | None = None
-    organic_solvent_type: str = "None"
-    water_content_wt_pct: float | None = None
-    immersion_time_s: float = 300.0
+    recipe: CleaningRecipe = field(default_factory=CleaningRecipe)
     d_crit_nm: float = DEFAULT_CRITICAL_THICKNESS_NM
     kinetics_model: KineticsSelection = "auto"
     d_max_nm: float = DEFAULT_PASSIVATION_LIMIT_NM
@@ -274,10 +190,12 @@ class SimulationRequest:
             not isinstance(self.secondary_metal, str) or not self.secondary_metal.strip()
         ):
             raise ValueError("secondary_metal must be None or a non-empty material identifier.")
+        if not isinstance(self.recipe, CleaningRecipe):
+            raise TypeError(
+                f"SimulationRequest.recipe must be a CleaningRecipe, got {type(self.recipe).__name__}."
+            )
         if self.cathode_to_anode_area_ratio <= 0 or not np.isfinite(self.cathode_to_anode_area_ratio):
             raise ValueError("cathode_to_anode_area_ratio must be strictly positive.")
-        if self.immersion_time_s <= 0 or not np.isfinite(self.immersion_time_s):
-            raise ValueError("immersion_time_s must be strictly positive.")
         if self.d_crit_nm <= 0 or not np.isfinite(self.d_crit_nm):
             raise ValueError("d_crit_nm must be strictly positive.")
         if self.parameter_source not in ("database", "ml", "manual"):
@@ -303,33 +221,6 @@ class SimulationRequest:
             raise ValueError(f"Unsupported kinetics_model '{self.kinetics_model}'.")
         if self.mc_draws < 50:
             raise ValueError("mc_draws must be at least 50.")
-
-        resolved_regime, resolved_org, resolved_water = resolve_consistent_solvent_settings(
-            self.solvent_regime,
-            self.organic_solvent_type,
-            self.water_content_wt_pct,
-        )
-        object.__setattr__(self, "solvent_regime", resolved_regime)
-        object.__setattr__(self, "organic_solvent_type", resolved_org)
-        object.__setattr__(self, "water_content_wt_pct", resolved_water)
-
-    @property
-    def base_solvent(self) -> str:
-        """Canonical base solvent label passed to the ML feature extractor."""
-        if self.solvent_regime in ("aqueous", "semi_aqueous"):
-            return "DI water"
-        return self.organic_solvent_type if self.organic_solvent_type != "None" else "non_aqueous"
-
-    @property
-    def solvent_subclass(self) -> SolventSubclass:
-        """Chemical-family solvent subclass derived from solvent regime, pH, and co-solvent."""
-        return classify_solvent_subclass(
-            self.solvent_regime or "aqueous",
-            pH=self.pH,
-            organic_solvent_type=self.organic_solvent_type,
-            base_solvent=self.base_solvent,
-            acid_type=self.acid_type,
-        )
 
 
 @dataclass
@@ -468,13 +359,13 @@ class SingleMetalAnalysisResult:
                 else None
             ),
             "kinetics_model": self.kinetics_result.model if self.kinetics_result is not None else "unavailable",
-            "pH": float(self.request.pH),
-            "temperature_C": float(self.request.temperature_C),
-            "solvent_regime": str(self.request.solvent_regime),
-            "solvent_subclass": str(self.request.solvent_subclass),
-            "organic_solvent_type": str(self.request.organic_solvent_type),
-            "water_content_wt_pct": float(self.request.water_content_wt_pct),
-            "immersion_time_s": float(self.request.immersion_time_s),
+            "pH": float(self.request.recipe.solution.pH),
+            "temperature_C": float(self.request.recipe.temperature_C),
+            "solvent_regime": str(self.request.recipe.solution.solvent_regime),
+            "solvent_subclass": str(self.request.recipe.solution.solvent_subclass),
+            "organic_solvent_type": str(self.request.recipe.solution.organic_solvent_type),
+            "water_content_wt_pct": float(self.request.recipe.solution.water_content_wt_pct),
+            "immersion_time_s": float(self.request.recipe.immersion_time_s),
             "d_crit_nm": float(self.request.d_crit_nm),
             "Ecorr_V_SHE": float(self.resolved_parameters.parameters.Ecorr_V_SHE),
             "icorr_uA_cm2": float(self.resolved_parameters.parameters.icorr_uA_cm2),
@@ -586,10 +477,10 @@ class GalvanicAnalysisResult:
             "active_metal": self.active_metal,
             "noble_metal": self.noble_metal,
             "cathode_to_anode_area_ratio": float(self.request.cathode_to_anode_area_ratio),
-            "solvent_regime": str(self.request.solvent_regime),
-            "solvent_subclass": str(self.request.solvent_subclass),
-            "organic_solvent_type": str(self.request.organic_solvent_type),
-            "water_content_wt_pct": float(self.request.water_content_wt_pct),
+            "solvent_regime": str(self.request.recipe.solution.solvent_regime),
+            "solvent_subclass": str(self.request.recipe.solution.solvent_subclass),
+            "organic_solvent_type": str(self.request.recipe.solution.organic_solvent_type),
+            "water_content_wt_pct": float(self.request.recipe.solution.water_content_wt_pct),
             "parameter_source": self.request.parameter_source,
             "ml_model_family": (
                 resolve_active_model_family(self.request, self.primary_resolved)
@@ -812,23 +703,6 @@ class CorrosionPlatformController:
             "lab_projects": sorted(self.repository.lab_projects.keys()),
         }
 
-    def _build_ml_query(self, request: SimulationRequest, metal: str) -> MLFeatureQuery:
-        return MLFeatureQuery(
-            metal=metal,
-            pH=request.pH,
-            temperature_C=request.temperature_C,
-            oxidizer_type=request.oxidizer_type,
-            oxidizer_concentration=request.oxidizer_concentration,
-            acid_type=request.acid_type,
-            acid_concentration=request.acid_concentration,
-            inhibitor_type=request.inhibitor_type,
-            inhibitor_concentration=request.inhibitor_concentration,
-            ORP_mV=request.ORP_mV,
-            organic_solvent_type=request.organic_solvent_type,
-            water_content_wt_pct=float(request.water_content_wt_pct),
-            base_solvent=request.base_solvent,
-        )
-
     def _resolve_database_lookup(
         self,
         request: SimulationRequest,
@@ -836,15 +710,17 @@ class CorrosionPlatformController:
         *,
         solution_id: str | None = None,
     ) -> ResolvedMetalParameters:
+        sol = request.recipe.solution
+        temp_c = request.recipe.temperature_C
         warnings: list[str] = []
         recommendations: list[str] = []
         lookup = self.database.lookup_exposure_condition(
             ExposureCondition(
                 metal=metal,
-                pH=request.pH,
-                oxidizer_type=request.oxidizer_type,
-                oxidizer_concentration=request.oxidizer_concentration,
-                temperature_C=request.temperature_C,
+                pH=sol.pH,
+                oxidizer_type=sol.oxidizer_type,
+                oxidizer_concentration=sol.oxidizer_concentration,
+                temperature_C=temp_c,
                 solution_id=solution_id,
             )
         )
@@ -856,18 +732,18 @@ class CorrosionPlatformController:
             )
             confidence_tier = "Medium" if lookup.normalized_distance < 0.75 else "Low"
             recommendations.append(
-                f"Measure polarization curve for {metal} at pH {request.pH:.1f}, {request.temperature_C:.1f}°C, "
-                f"{request.oxidizer_type} ({request.oxidizer_concentration:g}) to replace nearest-neighbor database lookup."
+                f"Measure polarization curve for {metal} at pH {sol.pH:.1f}, {temp_c:.1f}°C, "
+                f"{sol.oxidizer_type} ({sol.oxidizer_concentration:g}) to replace nearest-neighbor database lookup."
             )
         if (
             not lookup.candidates.empty
             and "solvent_regime" in lookup.candidates.columns
         ):
             matched_regime = normalize_category_label(lookup.candidates.iloc[0]["solvent_regime"])
-            if matched_regime != "None" and matched_regime != request.solvent_regime:
+            if matched_regime != "None" and matched_regime != sol.solvent_regime:
                 warnings.append(
                     f"{metal} Database lookup matched a '{matched_regime}' record ({lookup.record_id}), "
-                    f"whereas the requested Solvent Regime is '{request.solvent_regime}'."
+                    f"whereas the requested Solvent Regime is '{sol.solvent_regime}'."
                 )
                 confidence_tier = "Low"
         if lookup.is_imputed:
@@ -893,6 +769,8 @@ class CorrosionPlatformController:
         metal_b: str,
     ) -> str | None:
         """Find the closest shared solution_id for two metals matching the requested oxidizer."""
+        sol = request.recipe.solution
+        temp_c = request.recipe.temperature_C
         df = self.database.electrochemical_database
         df_a = df[df["metal"] == metal_a]
         df_b = df[df["metal"] == metal_b]
@@ -903,7 +781,7 @@ class CorrosionPlatformController:
         if not shared_ids:
             return None
 
-        req_ox = normalize_category_label(request.oxidizer_type)
+        req_ox = normalize_category_label(sol.oxidizer_type)
         best_sid: str | None = None
         best_score = float("inf")
         for sid in shared_ids:
@@ -916,9 +794,9 @@ class CorrosionPlatformController:
             ph_vals = pd.to_numeric(sub["pH"], errors="coerce").dropna()
             temp_vals = pd.to_numeric(sub["temperature_C"], errors="coerce").dropna()
             conc_vals = pd.to_numeric(sub["oxidizer_concentration"], errors="coerce").dropna()
-            ph_diff = abs(float(ph_vals.median()) - request.pH) / 14.0 if len(ph_vals) else 0.5
-            temp_diff = abs(float(temp_vals.median()) - request.temperature_C) / 100.0 if len(temp_vals) else 0.5
-            conc_diff = abs(float(conc_vals.median()) - request.oxidizer_concentration) / max(request.oxidizer_concentration, 1.0) if len(conc_vals) else 0.5
+            ph_diff = abs(float(ph_vals.median()) - sol.pH) / 14.0 if len(ph_vals) else 0.5
+            temp_diff = abs(float(temp_vals.median()) - temp_c) / 100.0 if len(temp_vals) else 0.5
+            conc_diff = abs(float(conc_vals.median()) - sol.oxidizer_concentration) / max(sol.oxidizer_concentration, 1.0) if len(conc_vals) else 0.5
             score = ph_diff + temp_diff + 0.5 * conc_diff
             if score < best_score:
                 best_score = score
@@ -1009,15 +887,17 @@ class CorrosionPlatformController:
         warnings: list[str] = []
         recommendations: list[str] = []
 
+        sol = request.recipe.solution
+        temp_c = request.recipe.temperature_C
         if request.parameter_source == "manual":
             if manual_override is None:
                 # Fall back gracefully to database lookup values if caller omitted manual override
                 lookup = self.database.lookup_exposure_condition(
                     metal=metal,
-                    pH=request.pH,
-                    oxidizer_type=request.oxidizer_type,
-                    oxidizer_concentration=request.oxidizer_concentration,
-                    temperature_C=request.temperature_C,
+                    pH=sol.pH,
+                    oxidizer_type=sol.oxidizer_type,
+                    oxidizer_concentration=sol.oxidizer_concentration,
+                    temperature_C=temp_c,
                 )
                 params = PolarizationParameters.from_lookup_result(lookup)
                 warnings.append(
@@ -1030,7 +910,7 @@ class CorrosionPlatformController:
                     beta_a_mV_dec=manual_override.beta_a_mV_dec,
                     beta_c_mV_dec=manual_override.beta_c_mV_dec,
                     metal=metal,
-                    temperature_C=request.temperature_C,
+                    temperature_C=temp_c,
                 )
             return ResolvedMetalParameters(
                 metal=metal,
@@ -1045,7 +925,7 @@ class CorrosionPlatformController:
             return self._resolve_database_lookup(request, metal)
 
         # ML prediction mode (with optional Delta-Learning or Lab-Only GP calibration)
-        query = self._build_ml_query(request, metal)
+        query = MLFeatureQuery.for_solution(metal, sol, temp_c)
         predictor = self.repository.get_calibrated_predictor(
             calibration_mode=request.calibration_mode,
             lab_project=request.lab_project,
@@ -1092,16 +972,13 @@ class CorrosionPlatformController:
             if request.parameter_source == "manual" and request.manual_primary is not None and request.manual_primary.valence is not None
             else request.primary_valence
         )
+        sol = request.recipe.solution
+        immersion_time_s = request.recipe.immersion_time_s
         curve = generate_polarization_curve(resolved.parameters)
         warnings_list = list(resolved.warnings)
-        if request.solvent_regime == "non_aqueous":
-            warnings_list.insert(
-                0,
-                build_non_aqueous_physics_warning(
-                    float(request.water_content_wt_pct),
-                    request.organic_solvent_type,
-                ),
-            )
+        non_aq_warning = sol.non_aqueous_warning()
+        if non_aq_warning is not None:
+            warnings_list.insert(0, non_aq_warning)
         recs_list = list(resolved.experimental_recommendations)
 
         if not has_faraday_properties(request.primary_metal, self.database.material_properties):
@@ -1134,7 +1011,7 @@ class CorrosionPlatformController:
             metal=request.primary_metal,
             icorr_uA_cm2=resolved.parameters.icorr_uA_cm2,
             valence=valence,
-            immersion_time_s=request.immersion_time_s,
+            immersion_time_s=immersion_time_s,
             material_properties=self.database.material_properties,
         )
 
@@ -1148,18 +1025,15 @@ class CorrosionPlatformController:
                 material_properties=self.database.material_properties,
             )
 
-        times_s = _build_time_grid(request.immersion_time_s)
-        inhibitor_present = (
-            request.inhibitor_type.strip().lower() not in {"", "none"}
-            and request.inhibitor_concentration > 0.0
-        )
+        times_s = _build_time_grid(immersion_time_s)
+        inhibitor_present = sol.has_inhibitor
         model_arg = None if request.kinetics_model == "auto" else request.kinetics_model
         kinetics = simulate_time_resolved_kinetics(
             faraday,
             times_s,
             model=model_arg,
             metal=request.primary_metal,
-            pH=request.pH,
+            pH=sol.pH,
             inhibitor_present=inhibitor_present,
             material_properties=self.database.material_properties,
             d_crit_nm=request.d_crit_nm,
@@ -1174,7 +1048,7 @@ class CorrosionPlatformController:
                 times_s,
                 model=kinetics.model,
                 metal=request.primary_metal,
-                pH=request.pH,
+                pH=sol.pH,
                 inhibitor_present=inhibitor_present,
                 material_properties=self.database.material_properties,
                 d_crit_nm=request.d_crit_nm,
@@ -1224,16 +1098,16 @@ class CorrosionPlatformController:
             manual_override=request.manual_secondary,
         )
 
+        sol = request.recipe.solution
+        temp_c = request.recipe.temperature_C
+        immersion_time_s = request.recipe.immersion_time_s
+
         # In Database mode, try to pair both metals on a shared Solution if their independent
         # nearest-neighbor lookups landed on different solution_ids or temperatures.
         extra_warnings: list[str] = []
-        if request.solvent_regime == "non_aqueous":
-            extra_warnings.append(
-                build_non_aqueous_physics_warning(
-                    float(request.water_content_wt_pct),
-                    request.organic_solvent_type,
-                )
-            )
+        non_aq_warning = sol.non_aqueous_warning()
+        if non_aq_warning is not None:
+            extra_warnings.append(non_aq_warning)
         extra_recs: list[str] = []
         force_low_confidence = False
         solve_params_a = primary_resolved.parameters
@@ -1278,19 +1152,19 @@ class CorrosionPlatformController:
                     f"Database lookup matched different experimental conditions for {request.primary_metal} "
                     f"({solve_params_a.solution_id}, {solve_params_a.temperature_C}°C) and {request.secondary_metal} "
                     f"({solve_params_b.solution_id}, {solve_params_b.temperature_C}°C); galvanic coupling was "
-                    f"approximated at the requested Exposure Condition ({request.temperature_C:.1f}°C). "
+                    f"approximated at the requested Exposure Condition ({temp_c:.1f}°C). "
                     f"Consider switching to ML Prediction mode for matched-condition estimation."
                 )
                 extra_recs.append(
                     f"Measure polarization curves for both {request.primary_metal} and {request.secondary_metal} "
-                    f"in the same Solution (pH {request.pH:.1f}, {request.oxidizer_type} "
-                    f"{request.oxidizer_concentration:g}, {request.temperature_C:.1f}°C) to validate galvanic coupling."
+                    f"in the same Solution (pH {sol.pH:.1f}, {sol.oxidizer_type} "
+                    f"{sol.oxidizer_concentration:g}, {temp_c:.1f}°C) to validate galvanic coupling."
                 )
                 solve_params_a = replace(
-                    solve_params_a, solution_id=None, temperature_C=request.temperature_C
+                    solve_params_a, solution_id=None, temperature_C=temp_c
                 )
                 solve_params_b = replace(
-                    solve_params_b, solution_id=None, temperature_C=request.temperature_C
+                    solve_params_b, solution_id=None, temperature_C=temp_c
                 )
 
         driving_force = screen_galvanic_driving_force(
@@ -1298,7 +1172,7 @@ class CorrosionPlatformController:
             Ecorr_a_V_SHE=solve_params_a.Ecorr_V_SHE,
             metal_b=request.secondary_metal,
             Ecorr_b_V_SHE=solve_params_b.Ecorr_V_SHE,
-            temperature_C=request.temperature_C,
+            temperature_C=temp_c,
         )
 
         # Determine active metal valence override if specified
@@ -1325,7 +1199,7 @@ class CorrosionPlatformController:
             solve_params_b,
             cathode_to_anode_area_ratio=request.cathode_to_anode_area_ratio,
             active_valence=active_valence,
-            immersion_time_s=request.immersion_time_s,
+            immersion_time_s=immersion_time_s,
             material_properties=self.database.material_properties,
             allow_missing_faraday=True,
         )
@@ -1394,11 +1268,8 @@ class CorrosionPlatformController:
                 material_properties=self.database.material_properties,
             )
 
-        times_s = _build_time_grid(request.immersion_time_s)
-        inhibitor_present = (
-            request.inhibitor_type.strip().lower() not in {"", "none"}
-            and request.inhibitor_concentration > 0.0
-        )
+        times_s = _build_time_grid(immersion_time_s)
+        inhibitor_present = sol.has_inhibitor
         model_arg = None if request.kinetics_model == "auto" else request.kinetics_model
 
         uncoupled_kinetics = simulate_time_resolved_kinetics(
@@ -1406,7 +1277,7 @@ class CorrosionPlatformController:
             times_s,
             model=model_arg,
             metal=coupling.active_metal,
-            pH=request.pH,
+            pH=sol.pH,
             inhibitor_present=inhibitor_present,
             material_properties=self.database.material_properties,
             d_crit_nm=request.d_crit_nm,
@@ -1418,7 +1289,7 @@ class CorrosionPlatformController:
             times_s,
             model=uncoupled_kinetics.model,
             metal=coupling.active_metal,
-            pH=request.pH,
+            pH=sol.pH,
             inhibitor_present=inhibitor_present,
             material_properties=self.database.material_properties,
             d_crit_nm=request.d_crit_nm,
@@ -1433,7 +1304,7 @@ class CorrosionPlatformController:
                 times_s,
                 model=coupled_kinetics.model,
                 metal=coupling.active_metal,
-                pH=request.pH,
+                pH=sol.pH,
                 inhibitor_present=inhibitor_present,
                 material_properties=self.database.material_properties,
                 d_crit_nm=request.d_crit_nm,

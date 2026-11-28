@@ -41,6 +41,9 @@ class TestUnitAndReferenceElectrodeNormalization(unittest.TestCase):
         self.assertAlmostEqual(convert_potential_to_she(-0.500, "Hg/Hg2SO4"), 0.140, places=6)
         # Hg/HgO: +0.098 V offset -> -0.100 + 0.098 = -0.002 V vs. SHE
         self.assertAlmostEqual(convert_potential_to_she(-0.100, "Hg/HgO"), -0.002, places=6)
+        self.assertAlmostEqual(convert_potential_to_she(0.000, "Cu/CuSO4"), 0.314, places=6)
+        self.assertAlmostEqual(convert_potential_to_she(0.000, "CSE"), 0.314, places=6)
+        self.assertAlmostEqual(convert_potential_to_she(0.000, "Hg/Hg2Cl2"), 0.241, places=6)
         # RHE at pH 10.0: E_SHE = E_RHE - 0.05916 * pH -> 0.800 - 0.5916 = 0.2084 V vs. SHE
         self.assertAlmostEqual(
             convert_potential_to_she(0.800, "RHE", pH=10.0), 0.2084, places=6

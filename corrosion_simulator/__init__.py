@@ -79,11 +79,13 @@ from corrosion_simulator.ml_predictor import (
     ElectrochemicalFeatureExtractor,
     HybridMLPredictor,
     MLFeatureQuery,
+    plot_tafel_uncertainty_band,
+)
+from corrosion_simulator.uncertainty import (
     MLParameterPrediction,
     MonteCarloPolarizationBand,
     MonteCarloPropagationResult,
     ParameterEstimate,
-    plot_tafel_uncertainty_band,
     propagate_uncertainty_monte_carlo,
 )
 from corrosion_simulator.physics import (
@@ -121,8 +123,6 @@ from corrosion_simulator.platform_controller import (
     ResolvedMetalParameters,
     SimulationRequest,
     SingleMetalAnalysisResult,
-    build_non_aqueous_physics_warning,
-    resolve_consistent_solvent_settings,
 )
 from corrosion_simulator.plotly_charts import (
     GalvanicFigures,
@@ -140,7 +140,7 @@ from corrosion_simulator.plotly_charts import (
     build_single_metal_risk_figure,
 )
 from corrosion_simulator.reporting import (
-    CleaningRecipeSpec,
+    RecipeCandidate,
     RecipeComparisonPayload,
     RecipeEvaluationEntry,
     build_recipe_comparison_bar_figure,
@@ -153,6 +153,13 @@ from corrosion_simulator.reporting import (
     export_report_png,
     export_report_svg,
     generate_all_report_exports,
+)
+from corrosion_simulator.solution import (
+    CleaningRecipe,
+    Solution,
+    build_non_aqueous_physics_warning,
+    resolve_consistent_solvent_settings,
+    water_content_slider_bounds,
 )
 from corrosion_simulator.solvent_constants import (
     SOLVENT_PHYSICAL_PROPERTIES,
@@ -187,7 +194,7 @@ __all__ = [
     "ApplicabilityDomainChecker",
     "ApplicabilityDomainResult",
     "ArtifactRepository",
-    "CleaningRecipeSpec",
+    "CleaningRecipe",
     "CorrosionPlatformController",
     "CrossValidationMetrics",
     "ElectrochemicalFeatureExtractor",
@@ -215,6 +222,7 @@ __all__ = [
     "PolarizationCurve",
     "PolarizationParameters",
     "PourbaixRegimeSelection",
+    "RecipeCandidate",
     "RecipeComparisonPayload",
     "RecipeEvaluationEntry",
     "ResidualBreakdown",
@@ -222,6 +230,7 @@ __all__ = [
     "SimulationRequest",
     "SingleMetalAnalysisResult",
     "SingleMetalFigures",
+    "Solution",
     "SolventPhysicalProperties",
     "TargetResidualBreakdown",
     "TimeResolvedKineticsResult",
@@ -294,4 +303,5 @@ __all__ = [
     "wagner_traud_anodic_current",
     "wagner_traud_cathodic_current",
     "wagner_traud_net_current",
+    "water_content_slider_bounds",
 ]

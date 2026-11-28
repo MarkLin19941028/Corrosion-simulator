@@ -30,12 +30,24 @@ from corrosion_simulator.element_constants import (
     PURE_ELEMENT_PROPERTIES,
     infer_base_element,
 )
-from corrosion_simulator.physics import (
-    PolarizationParameters,
-    calculate_faraday_corrosion_rate,
-)
 from corrosion_simulator.seed_data import SEED_MATERIAL_PROPERTIES
 from corrosion_simulator.solvent_constants import compute_mixture_solvent_descriptors
+from corrosion_simulator.uncertainty import (
+    DEFAULT_ECORR_CORRELATION,
+    DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
+    ECORR_THERMO_MAX_V_SHE,
+    ECORR_THERMO_MIN_V_SHE,
+    TAFEL_SLOPE_MAX_MV_DEC,
+    TAFEL_SLOPE_MIN_MV_DEC,
+    MLParameterPrediction,
+    MonteCarloPolarizationBand,
+    MonteCarloPropagationResult,
+    ParameterEstimate,
+    clip_target_mean,
+    propagate_uncertainty_monte_carlo,
+    sample_clipped_icorr,
+    sample_lognormal_tafel_slope,
+)
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -74,10 +86,6 @@ ML_TARGET_NAMES: Final[tuple[str, ...]] = (
     "beta_c_mV_dec",
 )
 
-TAFEL_SLOPE_MIN_MV_DEC: Final[float] = 20.0
-TAFEL_SLOPE_MAX_MV_DEC: Final[float] = 500.0
-ECORR_THERMO_MIN_V_SHE: Final[float] = -2.5
-ECORR_THERMO_MAX_V_SHE: Final[float] = 2.5
 GP_MAX_TRAINING_SAMPLES: Final[int] = 2000
 MIN_RESIDUAL_GP_SAMPLES: Final[int] = 4
 DEFAULT_LOW_SAMPLE_THRESHOLD: Final[int] = 10
@@ -171,6 +179,30 @@ class MLFeatureQuery:
     organic_solvent_type: str = "None"
     water_content_wt_pct: float = 100.0
     base_solvent: str = "DI water"
+
+    @classmethod
+    def for_solution(
+        cls,
+        metal: str,
+        solution: Any,
+        temperature_C: float = 25.0,
+    ) -> MLFeatureQuery:
+        """Build an MLFeatureQuery from a Metal, Solution value object, and operating temperature."""
+        return cls(
+            metal=metal,
+            pH=float(solution.pH),
+            temperature_C=float(temperature_C),
+            oxidizer_type=solution.oxidizer_type,
+            oxidizer_concentration=float(solution.oxidizer_concentration),
+            acid_type=solution.acid_type,
+            acid_concentration=float(solution.acid_concentration),
+            inhibitor_type=solution.inhibitor_type,
+            inhibitor_concentration=float(solution.inhibitor_concentration),
+            ORP_mV=solution.ORP_mV,
+            organic_solvent_type=solution.organic_solvent_type,
+            water_content_wt_pct=float(solution.water_content_wt_pct),
+            base_solvent=solution.base_solvent,
+        )
 
     @classmethod
     def from_exposure_condition(cls, condition: ExposureCondition | MLFeatureQuery) -> MLFeatureQuery:
@@ -879,45 +911,6 @@ class ApplicabilityDomainChecker:
 
 
 @dataclass(frozen=True)
-class ParameterEstimate:
-    """Predicted mean and ±1σ uncertainty for a single electrochemical parameter."""
-
-    mean: float
-    std: float
-
-
-@dataclass(frozen=True)
-class MLParameterPrediction:
-    """Predicted four-parameter electrochemical kinetics with ±1σ uncertainties and Applicability Domain."""
-
-    metal: str
-    Ecorr_V_SHE: ParameterEstimate
-    log10_icorr_uA_cm2: ParameterEstimate
-    icorr_uA_cm2_median: float
-    beta_a_mV_dec: ParameterEstimate
-    beta_c_mV_dec: ParameterEstimate
-    model_family: PredictedModelFamily
-    applicability: ApplicabilityDomainResult
-    calibration_mode: str = "literature_only"
-    lab_project: str | None = None
-    residual_breakdown: Any | None = None
-
-    def to_polarization_parameters(self) -> PolarizationParameters:
-        """Convert point estimates into physically clipped PolarizationParameters."""
-        ecorr = float(np.clip(self.Ecorr_V_SHE.mean, ECORR_THERMO_MIN_V_SHE, ECORR_THERMO_MAX_V_SHE))
-        icorr = float(10.0 ** float(np.clip(self.log10_icorr_uA_cm2.mean, -6.0, 6.0)))
-        beta_a = float(np.clip(self.beta_a_mV_dec.mean, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
-        beta_c = float(np.clip(self.beta_c_mV_dec.mean, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
-        return PolarizationParameters(
-            Ecorr_V_SHE=ecorr,
-            icorr_uA_cm2=icorr,
-            beta_a_mV_dec=beta_a,
-            beta_c_mV_dec=beta_c,
-            metal=self.metal,
-        )
-
-
-@dataclass(frozen=True)
 class CrossValidationMetrics:
     """Cross-validated regression metrics for one electrochemical target."""
 
@@ -1152,7 +1145,7 @@ class _UncertainTargetModel:
         )
 
 
-def _extract_target_vectors(df: pd.DataFrame) -> dict[str, np.ndarray]:
+def extract_target_vectors(df: pd.DataFrame) -> dict[str, np.ndarray]:
     ecorr = pd.to_numeric(df["Ecorr_V_SHE"], errors="coerce").to_numpy(dtype=float)
     icorr = pd.to_numeric(df["icorr_uA_cm2"], errors="coerce").to_numpy(dtype=float)
     valid_icorr = np.isfinite(icorr) & (icorr > 0.0)
@@ -1176,12 +1169,13 @@ def _compute_mape(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(np.mean(np.abs((y_true - y_pred) / denom)) * 100.0)
 
 
-def _target_valid_mask(
+def extract_target_valid_mask(
     df: pd.DataFrame,
     target_name: str,
     y_vec: np.ndarray,
     *,
     exclude_imputed_tafel: bool = True,
+    fallback_min_measured: int | None = 3,
 ) -> np.ndarray:
     """Return boolean mask of valid (and non-imputed, when enabled) rows for a target."""
     finite_mask = np.isfinite(y_vec)
@@ -1198,13 +1192,12 @@ def _target_valid_mask(
         return finite_mask
 
     measured_mask = finite_mask & ~df[imputed_col].fillna(False).astype(bool).to_numpy()
-    # Fall back to all finite rows only if fewer than 3 measured records exist
-    if int(np.sum(measured_mask)) >= 3:
+    if fallback_min_measured is None or int(np.sum(measured_mask)) >= fallback_min_measured:
         return measured_mask
     return finite_mask
 
 
-def _extract_sample_weights(
+def extract_sample_weights(
     df: pd.DataFrame,
     *,
     use_quality_weights: bool = True,
@@ -1343,14 +1336,14 @@ class HybridMLPredictor:
             material_properties=self._material_properties
         )
         X = self.feature_extractor.fit_transform(df)
-        targets = _extract_target_vectors(df)
-        sample_weights = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
+        targets = extract_target_vectors(df)
+        sample_weights = extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
 
         self.models = {}
         self.target_training_counts = {}
         for idx, target_name in enumerate(ML_TARGET_NAMES):
             y_all = targets[target_name]
-            mask = _target_valid_mask(
+            mask = extract_target_valid_mask(
                 df,
                 target_name,
                 y_all,
@@ -1374,6 +1367,25 @@ class HybridMLPredictor:
         self._is_fitted = True
         return self
 
+    @property
+    def is_fitted(self) -> bool:
+        """Return True once all four electrochemical target models have been fitted."""
+        return bool(self._is_fitted)
+
+    def predict_prior_means_dataframe(self, df: pd.DataFrame) -> dict[str, np.ndarray]:
+        """Predict physically clipped prior target means for a batch DataFrame of Exposure Conditions."""
+        if not self._is_fitted or self.feature_extractor is None:
+            raise RuntimeError("HybridMLPredictor must be fitted before predict_prior_means_dataframe().")
+        X = self.feature_extractor.transform(df)
+        prior_means: dict[str, np.ndarray] = {}
+        for target_name in ML_TARGET_NAMES:
+            raw_mean, _ = self.models[target_name].predict_mean_std(X, condition_df=df)
+            prior_means[target_name] = np.array(
+                [clip_target_mean(target_name, float(v)) for v in raw_mean],
+                dtype=float,
+            )
+        return prior_means
+
     def predict(self, query: ExposureCondition | MLFeatureQuery) -> MLParameterPrediction:
         if not self._is_fitted or self.feature_extractor is None or self.applicability_checker is None:
             raise RuntimeError("HybridMLPredictor must be fitted before predict().")
@@ -1386,13 +1398,7 @@ class HybridMLPredictor:
         estimates: dict[str, ParameterEstimate] = {}
         for target_name in ML_TARGET_NAMES:
             mean_arr, std_arr = self.models[target_name].predict_mean_std(X_q, condition_df=q_df)
-            raw_mean = float(mean_arr[0])
-            if target_name == "Ecorr_V_SHE":
-                clipped_mean = float(np.clip(raw_mean, ECORR_THERMO_MIN_V_SHE, ECORR_THERMO_MAX_V_SHE))
-            elif target_name in ("beta_a_mV_dec", "beta_c_mV_dec"):
-                clipped_mean = float(np.clip(raw_mean, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
-            else:
-                clipped_mean = float(np.clip(raw_mean, -6.0, 6.0))
+            clipped_mean = clip_target_mean(target_name, float(mean_arr[0]))
             estimates[target_name] = ParameterEstimate(
                 mean=clipped_mean,
                 std=float(std_arr[0]),
@@ -1427,13 +1433,13 @@ class HybridMLPredictor:
         if len(df) < 3:
             raise ValueError("At least 3 samples are required for cross-validation.")
 
-        all_targets = _extract_target_vectors(df)
-        all_weights = _extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
+        all_targets = extract_target_vectors(df)
+        all_weights = extract_sample_weights(df, use_quality_weights=self.use_quality_weights)
 
         results: list[CrossValidationMetrics] = []
         for t_idx, target_name in enumerate(ML_TARGET_NAMES):
             y_all = all_targets[target_name]
-            mask = _target_valid_mask(
+            mask = extract_target_valid_mask(
                 df,
                 target_name,
                 y_all,
@@ -1532,240 +1538,6 @@ class HybridMLPredictor:
         if not isinstance(obj, cls):
             raise TypeError(f"Expected HybridMLPredictor in {path}, got {type(obj).__name__}")
         return obj
-
-
-@dataclass(frozen=True)
-class MonteCarloPolarizationBand:
-    """Percentile uncertainty bands for activation-controlled Polarization Curves."""
-
-    potential_V_SHE: np.ndarray
-    log10_abs_net_mean: np.ndarray
-    log10_abs_net_p05: np.ndarray
-    log10_abs_net_p50: np.ndarray
-    log10_abs_net_p95: np.ndarray
-    anodic_p05_uA_cm2: np.ndarray
-    anodic_p50_uA_cm2: np.ndarray
-    anodic_p95_uA_cm2: np.ndarray
-    cathodic_p05_uA_cm2: np.ndarray
-    cathodic_p50_uA_cm2: np.ndarray
-    cathodic_p95_uA_cm2: np.ndarray
-    overpotential_V: np.ndarray
-    eta_log10_abs_net_p05: np.ndarray
-    eta_log10_abs_net_p25: np.ndarray
-    eta_log10_abs_net_p50: np.ndarray
-    eta_log10_abs_net_p75: np.ndarray
-    eta_log10_abs_net_p95: np.ndarray
-    ecorr_p05_V_SHE: float
-    ecorr_p25_V_SHE: float
-    ecorr_p50_V_SHE: float
-    ecorr_p75_V_SHE: float
-    ecorr_p95_V_SHE: float
-    log10_icorr_p05: float
-    log10_icorr_p25: float
-    log10_icorr_p50: float
-    log10_icorr_p75: float
-    log10_icorr_p95: float
-
-
-@dataclass(frozen=True)
-class MonteCarloPropagationResult:
-    """Physics-clipped Monte Carlo uncertainty propagation results for single-metal kinetics."""
-
-    metal: str
-    n_draws: int
-    Ecorr_samples_V_SHE: np.ndarray
-    icorr_samples_uA_cm2: np.ndarray
-    beta_a_samples_mV_dec: np.ndarray
-    beta_c_samples_mV_dec: np.ndarray
-    cr_nm_min_samples: np.ndarray
-    cr_mm_yr_samples: np.ndarray
-    cr_nm_min_summary: dict[str, float]
-    cr_mm_yr_summary: dict[str, float]
-    polarization_band: MonteCarloPolarizationBand
-
-
-def _summarize_samples(samples: np.ndarray) -> dict[str, float]:
-    return {
-        "mean": float(np.mean(samples)),
-        "std": float(np.std(samples)),
-        "p05": float(np.percentile(samples, 5.0)),
-        "p50": float(np.percentile(samples, 50.0)),
-        "p95": float(np.percentile(samples, 95.0)),
-    }
-
-
-DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2: Final[float] = 1e5
-DEFAULT_ECORR_CORRELATION: Final[float] = 0.6
-
-
-def sample_lognormal_tafel_slope(
-    mean_mV_dec: float,
-    std_mV_dec: float,
-    size: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """Sample strictly positive Tafel slopes (mV/dec) via log-normal distribution with physical bounds."""
-    center = float(np.clip(mean_mV_dec, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC))
-    sigma = max(float(std_mV_dec), 0.0)
-    if sigma == 0.0:
-        return np.full(size, center, dtype=float)
-    sigma_ln = math.sqrt(math.log1p((sigma / center) ** 2))
-    draws = rng.lognormal(mean=math.log(center), sigma=sigma_ln, size=size)
-    return np.clip(draws, TAFEL_SLOPE_MIN_MV_DEC, TAFEL_SLOPE_MAX_MV_DEC)
-
-
-def sample_clipped_icorr(
-    mean_log10: float,
-    std_log10: float,
-    size: int,
-    rng: np.random.Generator,
-    *,
-    limiting_current_uA_cm2: float = DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Sample (log10_icorr, icorr_uA_cm2) with log-space clipping and mass-transport limit i_lim."""
-    i_lim = float(limiting_current_uA_cm2)
-    if not math.isfinite(i_lim) or i_lim <= 0.0:
-        raise ValueError(
-            f"limiting_current_uA_cm2 must be strictly positive and finite, got {limiting_current_uA_cm2!r}"
-        )
-    log_i = np.clip(
-        rng.normal(mean_log10, max(float(std_log10), 0.0), size=size),
-        -6.0,
-        math.log10(i_lim),
-    )
-    return log_i, np.minimum(np.power(10.0, log_i), i_lim)
-
-
-def propagate_uncertainty_monte_carlo(
-    prediction: MLParameterPrediction,
-    *,
-    n_draws: int = 500,
-    seed: int | None = 42,
-    valence: int | None = None,
-    material_properties: pd.DataFrame | None = None,
-    overpotential_min_V: float = -0.25,
-    overpotential_max_V: float = 0.25,
-    num_potential_points: int = 201,
-    potentials_V_SHE: np.ndarray | None = None,
-    limiting_current_uA_cm2: float = DEFAULT_MASS_TRANSPORT_LIMIT_UA_CM2,
-) -> MonteCarloPropagationResult:
-    """Propagate ML parameter uncertainties via log-space i_corr and physics-clipped Monte Carlo (ADR-0003)."""
-    if n_draws < 1:
-        raise ValueError(f"n_draws must be positive, got {n_draws!r}")
-
-    rng = np.random.default_rng(seed)
-
-    # Sample E_corr in linear space and Tafel slopes via log-normal distribution with physical bounds
-    ecorr_draws = np.clip(
-        rng.normal(prediction.Ecorr_V_SHE.mean, max(prediction.Ecorr_V_SHE.std, 0.0), size=n_draws),
-        ECORR_THERMO_MIN_V_SHE,
-        ECORR_THERMO_MAX_V_SHE,
-    )
-    beta_a_draws = sample_lognormal_tafel_slope(
-        prediction.beta_a_mV_dec.mean, prediction.beta_a_mV_dec.std, n_draws, rng
-    )
-    beta_c_draws = sample_lognormal_tafel_slope(
-        prediction.beta_c_mV_dec.mean, prediction.beta_c_mV_dec.std, n_draws, rng
-    )
-    # Sample log10(i_corr) in log-space before exponentiating, capped at mass-transport limit i_lim
-    log_i_draws, icorr_draws = sample_clipped_icorr(
-        prediction.log10_icorr_uA_cm2.mean,
-        prediction.log10_icorr_uA_cm2.std,
-        n_draws,
-        rng,
-        limiting_current_uA_cm2=limiting_current_uA_cm2,
-    )
-
-    # Faraday's law conversion using exact Phase 1 unit-current scaling factor
-    unit_faraday = calculate_faraday_corrosion_rate(
-        prediction.metal,
-        1.0,
-        valence=valence,
-        material_properties=material_properties,
-    )
-    cr_nm_min_draws = icorr_draws * unit_faraday.corrosion_rate_nm_min
-    cr_mm_yr_draws = icorr_draws * unit_faraday.corrosion_rate_mm_yr
-
-    # Vectorized Wagner-Traud polarization across (n_draws, num_potential_points)
-    center_e = float(
-        np.clip(prediction.Ecorr_V_SHE.mean, ECORR_THERMO_MIN_V_SHE, ECORR_THERMO_MAX_V_SHE)
-    )
-    if potentials_V_SHE is not None:
-        potentials = np.asarray(potentials_V_SHE, dtype=float)
-    else:
-        potentials = np.linspace(
-            center_e + overpotential_min_V,
-            center_e + overpotential_max_V,
-            num_potential_points,
-        )
-
-    eta = potentials[None, :] - ecorr_draws[:, None]
-    ba_v = (beta_a_draws / 1000.0)[:, None]
-    bc_v = (beta_c_draws / 1000.0)[:, None]
-    icorr = icorr_draws[:, None]
-
-    # Cap exponents to prevent floating-point overflow under wide E_corr variance
-    i_anodic = icorr * np.power(10.0, np.clip(eta / ba_v, -30.0, 30.0))
-    i_cathodic = icorr * np.power(10.0, np.clip(-eta / bc_v, -30.0, 30.0))
-    abs_net = np.maximum(np.abs(i_anodic - i_cathodic), 1e-12)
-    log_abs_net = np.log10(abs_net)
-
-    # Overpotential-anchored evaluation (eta = E - E_corr) preserves the sharp V-cusp at eta = 0
-    ecorr_p50 = float(np.percentile(ecorr_draws, 50.0))
-    if potentials_V_SHE is not None:
-        eta_grid = potentials - ecorr_p50
-    else:
-        eta_grid = np.linspace(overpotential_min_V, overpotential_max_V, num_potential_points)
-
-    eta_mat = eta_grid[None, :]
-    i_anodic_eta = icorr * np.power(10.0, np.clip(eta_mat / ba_v, -30.0, 30.0))
-    i_cathodic_eta = icorr * np.power(10.0, np.clip(-eta_mat / bc_v, -30.0, 30.0))
-    abs_net_eta = np.maximum(np.abs(i_anodic_eta - i_cathodic_eta), 1e-12)
-    log_abs_net_eta = np.log10(abs_net_eta)
-
-    band = MonteCarloPolarizationBand(
-        potential_V_SHE=potentials,
-        log10_abs_net_mean=np.mean(log_abs_net, axis=0),
-        log10_abs_net_p05=np.percentile(log_abs_net, 5.0, axis=0),
-        log10_abs_net_p50=np.percentile(log_abs_net, 50.0, axis=0),
-        log10_abs_net_p95=np.percentile(log_abs_net, 95.0, axis=0),
-        anodic_p05_uA_cm2=np.percentile(i_anodic, 5.0, axis=0),
-        anodic_p50_uA_cm2=np.percentile(i_anodic, 50.0, axis=0),
-        anodic_p95_uA_cm2=np.percentile(i_anodic, 95.0, axis=0),
-        cathodic_p05_uA_cm2=np.percentile(i_cathodic, 5.0, axis=0),
-        cathodic_p50_uA_cm2=np.percentile(i_cathodic, 50.0, axis=0),
-        cathodic_p95_uA_cm2=np.percentile(i_cathodic, 95.0, axis=0),
-        overpotential_V=eta_grid,
-        eta_log10_abs_net_p05=np.percentile(log_abs_net_eta, 5.0, axis=0),
-        eta_log10_abs_net_p25=np.percentile(log_abs_net_eta, 25.0, axis=0),
-        eta_log10_abs_net_p50=np.percentile(log_abs_net_eta, 50.0, axis=0),
-        eta_log10_abs_net_p75=np.percentile(log_abs_net_eta, 75.0, axis=0),
-        eta_log10_abs_net_p95=np.percentile(log_abs_net_eta, 95.0, axis=0),
-        ecorr_p05_V_SHE=float(np.percentile(ecorr_draws, 5.0)),
-        ecorr_p25_V_SHE=float(np.percentile(ecorr_draws, 25.0)),
-        ecorr_p50_V_SHE=ecorr_p50,
-        ecorr_p75_V_SHE=float(np.percentile(ecorr_draws, 75.0)),
-        ecorr_p95_V_SHE=float(np.percentile(ecorr_draws, 95.0)),
-        log10_icorr_p05=float(np.percentile(log_i_draws, 5.0)),
-        log10_icorr_p25=float(np.percentile(log_i_draws, 25.0)),
-        log10_icorr_p50=float(np.percentile(log_i_draws, 50.0)),
-        log10_icorr_p75=float(np.percentile(log_i_draws, 75.0)),
-        log10_icorr_p95=float(np.percentile(log_i_draws, 95.0)),
-    )
-
-    return MonteCarloPropagationResult(
-        metal=prediction.metal,
-        n_draws=int(n_draws),
-        Ecorr_samples_V_SHE=ecorr_draws,
-        icorr_samples_uA_cm2=icorr_draws,
-        beta_a_samples_mV_dec=beta_a_draws,
-        beta_c_samples_mV_dec=beta_c_draws,
-        cr_nm_min_samples=cr_nm_min_draws,
-        cr_mm_yr_samples=cr_mm_yr_draws,
-        cr_nm_min_summary=_summarize_samples(cr_nm_min_draws),
-        cr_mm_yr_summary=_summarize_samples(cr_mm_yr_draws),
-        polarization_band=band,
-    )
 
 
 def plot_tafel_uncertainty_band(

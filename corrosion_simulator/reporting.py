@@ -23,7 +23,6 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from corrosion_simulator.database import SolventRegime, SolventSubclass, classify_solvent_subclass
 from corrosion_simulator.lab_calibration import CALIBRATION_MODE_LABELS, ResidualBreakdown
 from corrosion_simulator.physics import generate_polarization_curve
 from corrosion_simulator.platform_controller import (
@@ -31,61 +30,26 @@ from corrosion_simulator.platform_controller import (
     GalvanicAnalysisResult,
     SimulationRequest,
     SingleMetalAnalysisResult,
-    resolve_consistent_solvent_settings,
 )
+from corrosion_simulator.solution import CleaningRecipe
 
 ComparisonMode = Literal["single_metal", "galvanic"]
 
 
 @dataclass(frozen=True)
-class CleaningRecipeSpec:
-    """Candidate Cleaning Recipe definition for side-by-side comparison."""
+class RecipeCandidate:
+    """Named Cleaning Recipe candidate for side-by-side comparison."""
 
     name: str
-    oxidizer_type: str = "H2O2"
-    oxidizer_concentration: float = 1.0
-    acid_type: str = "None"
-    acid_concentration: float = 0.0
-    inhibitor_type: str = "None"
-    inhibitor_concentration: float = 0.0
-    pH: float = 3.0
-    temperature_C: float = 25.0
-    immersion_time_s: float = 300.0
-    solvent_regime: SolventRegime | None = None
-    organic_solvent_type: str = "None"
-    water_content_wt_pct: float | None = None
+    recipe: CleaningRecipe = field(default_factory=CleaningRecipe)
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.strip():
-            raise ValueError("CleaningRecipeSpec.name must be non-empty.")
-        if self.immersion_time_s <= 0 or not np.isfinite(self.immersion_time_s):
-            raise ValueError("immersion_time_s must be strictly positive.")
-        resolved_regime, resolved_org, resolved_water = resolve_consistent_solvent_settings(
-            self.solvent_regime,
-            self.organic_solvent_type,
-            self.water_content_wt_pct,
-        )
-        object.__setattr__(self, "solvent_regime", resolved_regime)
-        object.__setattr__(self, "organic_solvent_type", resolved_org)
-        object.__setattr__(self, "water_content_wt_pct", resolved_water)
-
-    @property
-    def base_solvent(self) -> str:
-        """Canonical base solvent label for this Cleaning Recipe."""
-        if self.solvent_regime in ("aqueous", "semi_aqueous"):
-            return "DI water"
-        return self.organic_solvent_type if self.organic_solvent_type != "None" else "non_aqueous"
-
-    @property
-    def solvent_subclass(self) -> SolventSubclass:
-        """Chemical-family solvent subclass derived from solvent regime, pH, and co-solvent."""
-        return classify_solvent_subclass(
-            self.solvent_regime or "aqueous",
-            pH=self.pH,
-            organic_solvent_type=self.organic_solvent_type,
-            base_solvent=self.base_solvent,
-            acid_type=self.acid_type,
-        )
+            raise ValueError("RecipeCandidate.name must be non-empty.")
+        if not isinstance(self.recipe, CleaningRecipe):
+            raise TypeError(
+                f"RecipeCandidate.recipe must be a CleaningRecipe, got {type(self.recipe).__name__}."
+            )
 
 
 @dataclass
@@ -93,7 +57,7 @@ class RecipeEvaluationEntry:
     """Evaluated performance and risk metrics for a single candidate Cleaning Recipe."""
 
     rank: int
-    recipe: CleaningRecipeSpec
+    candidate: RecipeCandidate
     mode: ComparisonMode
     metal: str
     active_metal: str | None
@@ -112,26 +76,28 @@ class RecipeEvaluationEntry:
     galvanic_payload: GalvanicAnalysisResult | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        rec = self.candidate.recipe
+        sol = rec.solution
         return {
             "rank": int(self.rank),
-            "recipe_name": self.recipe.name,
+            "recipe_name": self.candidate.name,
             "mode": self.mode,
             "metal": self.metal,
             "active_metal": self.active_metal,
             "noble_metal": self.noble_metal,
-            "oxidizer_type": self.recipe.oxidizer_type,
-            "oxidizer_concentration": float(self.recipe.oxidizer_concentration),
-            "acid_type": self.recipe.acid_type,
-            "acid_concentration": float(self.recipe.acid_concentration),
-            "inhibitor_type": self.recipe.inhibitor_type,
-            "inhibitor_concentration": float(self.recipe.inhibitor_concentration),
-            "pH": float(self.recipe.pH),
-            "temperature_C": float(self.recipe.temperature_C),
-            "immersion_time_s": float(self.recipe.immersion_time_s),
-            "solvent_regime": str(self.recipe.solvent_regime),
-            "solvent_subclass": str(self.recipe.solvent_subclass),
-            "organic_solvent_type": str(self.recipe.organic_solvent_type),
-            "water_content_wt_pct": float(self.recipe.water_content_wt_pct),
+            "oxidizer_type": sol.oxidizer_type,
+            "oxidizer_concentration": float(sol.oxidizer_concentration),
+            "acid_type": sol.acid_type,
+            "acid_concentration": float(sol.acid_concentration),
+            "inhibitor_type": sol.inhibitor_type,
+            "inhibitor_concentration": float(sol.inhibitor_concentration),
+            "pH": float(sol.pH),
+            "temperature_C": float(rec.temperature_C),
+            "immersion_time_s": float(rec.immersion_time_s),
+            "solvent_regime": str(sol.solvent_regime),
+            "solvent_subclass": str(sol.solvent_subclass),
+            "organic_solvent_type": str(sol.organic_solvent_type),
+            "water_content_wt_pct": float(sol.water_content_wt_pct),
             "cr0_nm_min": float(self.cr0_nm_min),
             "corrosion_depth_nm": float(self.corrosion_depth_nm),
             "time_to_threshold_s": (
@@ -194,7 +160,7 @@ def build_recipe_comparison_bar_figure(
     mode: ComparisonMode,
 ) -> go.Figure:
     """Build grouped interactive Plotly bar chart comparing key metrics across Cleaning Recipes."""
-    names = [e.recipe.name for e in entries]
+    names = [e.candidate.name for e in entries]
     cr0_vals = [e.cr0_nm_min for e in entries]
     depth_vals = [e.corrosion_depth_nm for e in entries]
     risk_vals = [e.risk_score for e in entries]
@@ -322,7 +288,7 @@ def build_recipe_comparison_radar_figure(
                 r=closed_vals,
                 theta=closed_axes,
                 fill="toself",
-                name=f"#{entry.rank} {entry.recipe.name}",
+                name=f"#{entry.rank} {entry.candidate.name}",
             )
         )
 
@@ -340,48 +306,30 @@ def build_recipe_comparison_radar_figure(
 def compare_cleaning_recipes(
     controller: CorrosionPlatformController,
     base_request: SimulationRequest,
-    recipes: Sequence[CleaningRecipeSpec],
+    recipes: Sequence[RecipeCandidate],
 ) -> RecipeComparisonPayload:
     """Evaluate 2 to 5 candidate Cleaning Recipes, rank lowest-risk first, and build comparison charts."""
     if not (2 <= len(recipes) <= 5):
         raise ValueError(f"Recipe comparison requires between 2 and 5 Cleaning Recipes, got {len(recipes)}.")
 
     seen_names: set[str] = set()
-    for recipe in recipes:
-        if recipe.name in seen_names:
-            raise ValueError(f"Duplicate Cleaning Recipe name '{recipe.name}'. Recipe names must be unique.")
-        seen_names.add(recipe.name)
+    for candidate in recipes:
+        if candidate.name in seen_names:
+            raise ValueError(f"Duplicate Cleaning Recipe name '{candidate.name}'. Recipe names must be unique.")
+        seen_names.add(candidate.name)
 
     mode: ComparisonMode = "galvanic" if base_request.secondary_metal is not None else "single_metal"
     raw_entries: list[RecipeEvaluationEntry] = []
 
-    for recipe in recipes:
-        ox_conc = 0.0 if recipe.oxidizer_type == "None" else float(recipe.oxidizer_concentration)
-        acid_conc = 0.0 if recipe.acid_type == "None" else float(recipe.acid_concentration)
-        inh_conc = 0.0 if recipe.inhibitor_type == "None" else float(recipe.inhibitor_concentration)
-
-        req = replace(
-            base_request,
-            oxidizer_type=recipe.oxidizer_type,
-            oxidizer_concentration=ox_conc,
-            acid_type=recipe.acid_type,
-            acid_concentration=acid_conc,
-            inhibitor_type=recipe.inhibitor_type,
-            inhibitor_concentration=inh_conc,
-            pH=float(recipe.pH),
-            temperature_C=float(recipe.temperature_C),
-            immersion_time_s=float(recipe.immersion_time_s),
-            solvent_regime=recipe.solvent_regime,
-            organic_solvent_type=recipe.organic_solvent_type,
-            water_content_wt_pct=float(recipe.water_content_wt_pct),
-        )
+    for candidate in recipes:
+        req = replace(base_request, recipe=candidate.recipe)
 
         if mode == "galvanic":
             galv = controller.run_galvanic_analysis(req)
             raw_entries.append(
                 RecipeEvaluationEntry(
                     rank=0,
-                    recipe=recipe,
+                    candidate=candidate,
                     mode=mode,
                     metal=galv.active_metal,
                     active_metal=galv.active_metal,
@@ -404,7 +352,7 @@ def compare_cleaning_recipes(
             raw_entries.append(
                 RecipeEvaluationEntry(
                     rank=0,
-                    recipe=recipe,
+                    candidate=candidate,
                     mode=mode,
                     metal=req.primary_metal,
                     active_metal=None,
@@ -439,7 +387,7 @@ def compare_cleaning_recipes(
         else ""
     )
     rationale = (
-        f"Recommended Cleaning Recipe: '{best.recipe.name}' — lowest Thickness Loss Risk score "
+        f"Recommended Cleaning Recipe: '{best.candidate.name}' — lowest Thickness Loss Risk score "
         f"({_fmt_metric(best.risk_score, '.3f')}, {best.risk_tier}), "
         f"final Corrosion Depth {_fmt_metric(best.corrosion_depth_nm, '.3f', ' nm')}, "
         f"CR₀ {_fmt_metric(best.cr0_nm_min, '.3g', ' nm/min')}, "
@@ -449,16 +397,18 @@ def compare_cleaning_recipes(
 
     rows: list[dict[str, Any]] = []
     for e in ranked_entries:
+        rec = e.candidate.recipe
+        sol = rec.solution
         row: dict[str, Any] = {
             "Rank": e.rank,
-            "Cleaning Recipe": e.recipe.name,
-            "Solvent Regime": str(e.recipe.solvent_regime),
-            "Solvent Subclass": str(e.recipe.solvent_subclass),
-            "Co-Solvent": str(e.recipe.organic_solvent_type),
-            "Water (wt%)": round(float(e.recipe.water_content_wt_pct), 2),
-            "pH": e.recipe.pH,
-            "Temp (°C)": e.recipe.temperature_C,
-            "Immersion Time (s)": e.recipe.immersion_time_s,
+            "Cleaning Recipe": e.candidate.name,
+            "Solvent Regime": str(sol.solvent_regime),
+            "Solvent Subclass": str(sol.solvent_subclass),
+            "Co-Solvent": str(sol.organic_solvent_type),
+            "Water (wt%)": round(float(sol.water_content_wt_pct), 2),
+            "pH": sol.pH,
+            "Temp (°C)": rec.temperature_C,
+            "Immersion Time (s)": rec.immersion_time_s,
             "CR₀ (nm/min)": round(e.cr0_nm_min, 4) if math.isfinite(e.cr0_nm_min) else None,
             "Corrosion Depth (nm)": round(e.corrosion_depth_nm, 4) if math.isfinite(e.corrosion_depth_nm) else None,
             "Time to Threshold": _format_ttt_short(e.time_to_threshold_s),
@@ -478,7 +428,7 @@ def compare_cleaning_recipes(
     return RecipeComparisonPayload(
         mode=mode,
         entries=ranked_entries,
-        recommended_recipe=best.recipe.name,
+        recommended_recipe=best.candidate.name,
         recommended_rationale=rationale,
         comparison_table=comparison_df,
         bar_figure=bar_fig,
@@ -670,7 +620,7 @@ def _render_composite_figure(
         next_row += 1
 
     if comparison_payload is not None:
-        names = [e.recipe.name for e in comparison_payload.entries]
+        names = [e.candidate.name for e in comparison_payload.entries]
         risks = [e.risk_score if math.isfinite(e.risk_score) else 0.0 for e in comparison_payload.entries]
         depths = [e.corrosion_depth_nm if math.isfinite(e.corrosion_depth_nm) else 0.0 for e in comparison_payload.entries]
         bar_colors = ["#2ca02c" if e.rank == 1 else "#1f77b4" for e in comparison_payload.entries]
@@ -1020,6 +970,8 @@ def export_report_json(
 ) -> bytes:
     """Export complete structured JSON report with provenance, uncertainties, warnings, and rankings."""
     req = single_payload.request
+    rec = req.recipe
+    sol = rec.solution
     warnings, recs = _collect_warnings_and_recommendations(single_payload, galvanic_payload)
     cal_meta = _collect_calibration_metadata(single_payload, galvanic_payload)
     payload: dict[str, Any] = {
@@ -1028,19 +980,19 @@ def export_report_json(
             "primary_metal": req.primary_metal,
             "secondary_metal": req.secondary_metal,
             "cathode_to_anode_area_ratio": float(req.cathode_to_anode_area_ratio),
-            "oxidizer_type": req.oxidizer_type,
-            "oxidizer_concentration": float(req.oxidizer_concentration),
-            "acid_type": req.acid_type,
-            "acid_concentration": float(req.acid_concentration),
-            "inhibitor_type": req.inhibitor_type,
-            "inhibitor_concentration": float(req.inhibitor_concentration),
-            "pH": float(req.pH),
-            "temperature_C": float(req.temperature_C),
-            "solvent_regime": str(req.solvent_regime),
-            "solvent_subclass": str(req.solvent_subclass),
-            "organic_solvent_type": str(req.organic_solvent_type),
-            "water_content_wt_pct": float(req.water_content_wt_pct),
-            "immersion_time_s": float(req.immersion_time_s),
+            "oxidizer_type": sol.oxidizer_type,
+            "oxidizer_concentration": float(sol.oxidizer_concentration),
+            "acid_type": sol.acid_type,
+            "acid_concentration": float(sol.acid_concentration),
+            "inhibitor_type": sol.inhibitor_type,
+            "inhibitor_concentration": float(sol.inhibitor_concentration),
+            "pH": float(sol.pH),
+            "temperature_C": float(rec.temperature_C),
+            "solvent_regime": str(sol.solvent_regime),
+            "solvent_subclass": str(sol.solvent_subclass),
+            "organic_solvent_type": str(sol.organic_solvent_type),
+            "water_content_wt_pct": float(sol.water_content_wt_pct),
+            "immersion_time_s": float(rec.immersion_time_s),
             "d_crit_nm": float(req.d_crit_nm),
             "kinetics_model": req.kinetics_model,
             "parameter_source": req.parameter_source,
@@ -1109,20 +1061,22 @@ def export_report_csv(
     src = req.parameter_source.upper()
     params = single_payload.resolved_parameters.parameters
     cal_meta = _collect_calibration_metadata(single_payload, galvanic_payload)
+    rec = req.recipe
+    sol = rec.solution
     s_rows = [
         ("Inputs", "Active Query", "Primary Metal", req.primary_metal, "", src),
         ("Inputs", "Active Query", "Secondary Metal", req.secondary_metal or "None", "", src),
         ("Inputs", "Active Query", "Cathode-to-Anode Area Ratio", req.cathode_to_anode_area_ratio, "", src),
-        ("Inputs", "Active Query", "Oxidizer", f"{req.oxidizer_type} ({req.oxidizer_concentration:g})", "", src),
-        ("Inputs", "Active Query", "Acid / Complexing Agent", f"{req.acid_type} ({req.acid_concentration:g})", "", src),
-        ("Inputs", "Active Query", "Corrosion Inhibitor", f"{req.inhibitor_type} ({req.inhibitor_concentration:g})", "", src),
-        ("Inputs", "Active Query", "pH", req.pH, "", src),
-        ("Inputs", "Active Query", "Temperature", req.temperature_C, "°C", src),
-        ("Inputs", "Active Query", "solvent_regime", str(req.solvent_regime), "", src),
-        ("Inputs", "Active Query", "solvent_subclass", str(req.solvent_subclass), "", src),
-        ("Inputs", "Active Query", "organic_solvent_type", str(req.organic_solvent_type), "", src),
-        ("Inputs", "Active Query", "water_content_wt_pct", float(req.water_content_wt_pct), "wt%", src),
-        ("Inputs", "Active Query", "Immersion Time", req.immersion_time_s, "s", src),
+        ("Inputs", "Active Query", "Oxidizer", f"{sol.oxidizer_type} ({sol.oxidizer_concentration:g})", "", src),
+        ("Inputs", "Active Query", "Acid / Complexing Agent", f"{sol.acid_type} ({sol.acid_concentration:g})", "", src),
+        ("Inputs", "Active Query", "Corrosion Inhibitor", f"{sol.inhibitor_type} ({sol.inhibitor_concentration:g})", "", src),
+        ("Inputs", "Active Query", "pH", sol.pH, "", src),
+        ("Inputs", "Active Query", "Temperature", rec.temperature_C, "°C", src),
+        ("Inputs", "Active Query", "solvent_regime", str(sol.solvent_regime), "", src),
+        ("Inputs", "Active Query", "solvent_subclass", str(sol.solvent_subclass), "", src),
+        ("Inputs", "Active Query", "organic_solvent_type", str(sol.organic_solvent_type), "", src),
+        ("Inputs", "Active Query", "water_content_wt_pct", float(sol.water_content_wt_pct), "wt%", src),
+        ("Inputs", "Active Query", "Immersion Time", rec.immersion_time_s, "s", src),
         ("Inputs", "Active Query", "Critical Thickness Threshold (d_crit)", req.d_crit_nm, "nm", src),
     ]
     if cal_meta["is_ml"]:
@@ -1216,22 +1170,23 @@ def export_report_csv(
     if comparison_payload is not None:
         for e in comparison_payload.entries:
             prov = e.parameter_source.upper()
+            e_sol = e.candidate.recipe.solution
             cmp_rows = [
-                ("Recipe Comparison", e.recipe.name, "Rank", e.rank, "", prov),
-                ("Recipe Comparison", e.recipe.name, "solvent_regime", str(e.recipe.solvent_regime), "", prov),
-                ("Recipe Comparison", e.recipe.name, "solvent_subclass", str(e.recipe.solvent_subclass), "", prov),
-                ("Recipe Comparison", e.recipe.name, "organic_solvent_type", str(e.recipe.organic_solvent_type), "", prov),
-                ("Recipe Comparison", e.recipe.name, "water_content_wt_pct", float(e.recipe.water_content_wt_pct), "wt%", prov),
-                ("Recipe Comparison", e.recipe.name, "Initial Corrosion Rate (CR_0)", e.cr0_nm_min, "nm/min", prov),
-                ("Recipe Comparison", e.recipe.name, "Corrosion Depth", e.corrosion_depth_nm, "nm", prov),
-                ("Recipe Comparison", e.recipe.name, "Time to Threshold", _format_ttt_short(e.time_to_threshold_s), "", prov),
-                ("Recipe Comparison", e.recipe.name, "Thickness Loss Risk Score", e.risk_score, "", prov),
-                ("Recipe Comparison", e.recipe.name, "Thickness Loss Risk Tier", e.risk_tier, "", prov),
-                ("Recipe Comparison", e.recipe.name, "Confidence Tier", e.confidence_tier, "", prov),
+                ("Recipe Comparison", e.candidate.name, "Rank", e.rank, "", prov),
+                ("Recipe Comparison", e.candidate.name, "solvent_regime", str(e_sol.solvent_regime), "", prov),
+                ("Recipe Comparison", e.candidate.name, "solvent_subclass", str(e_sol.solvent_subclass), "", prov),
+                ("Recipe Comparison", e.candidate.name, "organic_solvent_type", str(e_sol.organic_solvent_type), "", prov),
+                ("Recipe Comparison", e.candidate.name, "water_content_wt_pct", float(e_sol.water_content_wt_pct), "wt%", prov),
+                ("Recipe Comparison", e.candidate.name, "Initial Corrosion Rate (CR_0)", e.cr0_nm_min, "nm/min", prov),
+                ("Recipe Comparison", e.candidate.name, "Corrosion Depth", e.corrosion_depth_nm, "nm", prov),
+                ("Recipe Comparison", e.candidate.name, "Time to Threshold", _format_ttt_short(e.time_to_threshold_s), "", prov),
+                ("Recipe Comparison", e.candidate.name, "Thickness Loss Risk Score", e.risk_score, "", prov),
+                ("Recipe Comparison", e.candidate.name, "Thickness Loss Risk Tier", e.risk_tier, "", prov),
+                ("Recipe Comparison", e.candidate.name, "Confidence Tier", e.confidence_tier, "", prov),
             ]
             if e.acceleration_factor is not None:
                 cmp_rows.append(
-                    ("Recipe Comparison", e.recipe.name, "Acceleration Factor", e.acceleration_factor, "×", prov)
+                    ("Recipe Comparison", e.candidate.name, "Acceleration Factor", e.acceleration_factor, "×", prov)
                 )
             for sec, rec, met, val, unit, pr in cmp_rows:
                 writer.writerow({"section": sec, "recipe": rec, "metric": met, "value": val, "unit": unit, "provenance": pr})
@@ -1337,7 +1292,7 @@ def export_report_raw_data_csv(
     # 4. Recipe Comparison
     if comparison_payload is not None:
         cmp_chart = "Recipe Comparison"
-        r_names = [e.recipe.name for e in comparison_payload.entries]
+        r_names = [e.candidate.name for e in comparison_payload.entries]
         _emit_series(cmp_chart, "Initial Corrosion Rate CR_0", "Recipe", r_names, "", "CR_0", [e.cr0_nm_min for e in comparison_payload.entries], "nm/min")
         _emit_series(cmp_chart, "Final Corrosion Depth", "Recipe", r_names, "", "Corrosion Depth", [e.corrosion_depth_nm for e in comparison_payload.entries], "nm")
         _emit_series(cmp_chart, "Thickness Loss Risk Score R(t)", "Recipe", r_names, "", "Risk R(t)", [e.risk_score for e in comparison_payload.entries], "unitless")
@@ -1383,9 +1338,9 @@ def export_report_pdf(
             "",
             "1. INPUT CONDITIONS & PROVENANCE",
             f"  Primary Metal: {req.primary_metal}   |   Secondary Metal: {req.secondary_metal or 'None'} (Area Ratio: {req.cathode_to_anode_area_ratio:g})",
-            f"  Solution: Oxidizer={req.oxidizer_type} ({req.oxidizer_concentration:g}), Acid={req.acid_type} ({req.acid_concentration:g}), Inhibitor={req.inhibitor_type} ({req.inhibitor_concentration:g})",
-            f"  Solvent System: solvent_regime={req.solvent_regime}, solvent_subclass={req.solvent_subclass}, organic_solvent_type={req.organic_solvent_type}, water_content_wt_pct={float(req.water_content_wt_pct):.2f} wt%",
-            f"  pH: {req.pH:.2f}   |   Temperature: {req.temperature_C:.1f} °C   |   Immersion Time: {req.immersion_time_s:.1f} s   |   d_crit: {req.d_crit_nm:.2f} nm",
+            f"  Solution: Oxidizer={req.recipe.solution.oxidizer_type} ({req.recipe.solution.oxidizer_concentration:g}), Acid={req.recipe.solution.acid_type} ({req.recipe.solution.acid_concentration:g}), Inhibitor={req.recipe.solution.inhibitor_type} ({req.recipe.solution.inhibitor_concentration:g})",
+            f"  Solvent System: solvent_regime={req.recipe.solution.solvent_regime}, solvent_subclass={req.recipe.solution.solvent_subclass}, organic_solvent_type={req.recipe.solution.organic_solvent_type}, water_content_wt_pct={float(req.recipe.solution.water_content_wt_pct):.2f} wt%",
+            f"  pH: {req.recipe.solution.pH:.2f}   |   Temperature: {req.recipe.temperature_C:.1f} °C   |   Immersion Time: {req.recipe.immersion_time_s:.1f} s   |   d_crit: {req.d_crit_nm:.2f} nm",
             f"  Parameter Source: {req.parameter_source.upper()}   |   Kinetics Model: {single_kin_model}",
             *(
                 [
@@ -1399,7 +1354,7 @@ def export_report_pdf(
             f"  E_corr: {params.Ecorr_V_SHE:.4f} V vs. SHE   |   i_corr: {params.icorr_uA_cm2:.3g} µA/cm²",
             f"  beta_a: {params.beta_a_mV_dec:.1f} mV/dec   |   beta_c: {params.beta_c_mV_dec:.1f} mV/dec",
             f"  Initial Corrosion Rate (CR_0): {_fmt_metric(single_payload.initial_corrosion_rate_nm_min, '.4g', ' nm/min')}{_ci_str('single_cr0_nm_min', 'nm/min')}",
-            f"  Corrosion Depth @ {req.immersion_time_s:.0f} s: {_fmt_metric(single_payload.corrosion_depth_nm, '.4f', ' nm')}{_ci_str('single_corrosion_depth_nm', 'nm')}",
+            f"  Corrosion Depth @ {req.recipe.immersion_time_s:.0f} s: {_fmt_metric(single_payload.corrosion_depth_nm, '.4f', ' nm')}{_ci_str('single_corrosion_depth_nm', 'nm')}",
             f"  Time to Threshold: {_format_ttt_short(single_payload.time_to_threshold_s)}{_ci_str('single_time_to_threshold_s', 's')}",
             f"  Thickness Loss Risk: {single_payload.thickness_loss_risk_tier} (R = {_fmt_metric(single_payload.thickness_loss_risk_score, '.3f')})   |   Confidence Tier: {single_payload.confidence_tier}",
         ]
@@ -1424,10 +1379,11 @@ def export_report_pdf(
             lines.extend(["", "4. RECIPE COMPARISON RANKING (LOWEST RISK FIRST)"])
             lines.append(f"  {comparison_payload.recommended_rationale}")
             for e in comparison_payload.entries:
+                e_sol = e.candidate.recipe.solution
                 af_txt = f" | AF={e.acceleration_factor:.2f}×" if e.acceleration_factor is not None else ""
                 lines.append(
-                    f"  #{e.rank} {e.recipe.name} [{e.recipe.solvent_regime}/{e.recipe.solvent_subclass}, "
-                    f"co-solvent={e.recipe.organic_solvent_type}, water={float(e.recipe.water_content_wt_pct):.1f}wt%]: "
+                    f"  #{e.rank} {e.candidate.name} [{e_sol.solvent_regime}/{e_sol.solvent_subclass}, "
+                    f"co-solvent={e_sol.organic_solvent_type}, water={float(e_sol.water_content_wt_pct):.1f}wt%]: "
                     f"Risk={e.risk_score:.3f} ({e.risk_tier}), "
                     f"Depth={e.corrosion_depth_nm:.3f} nm, CR_0={e.cr0_nm_min:.3g} nm/min{af_txt}"
                 )
@@ -1460,15 +1416,16 @@ def export_report_pdf(
             if cal_meta["is_ml"] and cal_meta["calibration_mode"] != "literature_only"
             else ""
         )
+        pdf_sol = req.recipe.solution
         pdf.infodict()["Subject"] = (
-            f"solvent_regime={req.solvent_regime}; solvent_subclass={req.solvent_subclass}; "
-            f"organic_solvent_type={req.organic_solvent_type}; "
-            f"water_content_wt_pct={float(req.water_content_wt_pct):.2f}{cal_subject}"
+            f"solvent_regime={pdf_sol.solvent_regime}; solvent_subclass={pdf_sol.solvent_subclass}; "
+            f"organic_solvent_type={pdf_sol.organic_solvent_type}; "
+            f"water_content_wt_pct={float(pdf_sol.water_content_wt_pct):.2f}{cal_subject}"
         )
         pdf.infodict()["Keywords"] = (
-            f"solvent_regime={req.solvent_regime}, solvent_subclass={req.solvent_subclass}, "
-            f"organic_solvent_type={req.organic_solvent_type}, "
-            f"water_content_wt_pct={float(req.water_content_wt_pct):.2f}"
+            f"solvent_regime={pdf_sol.solvent_regime}, solvent_subclass={pdf_sol.solvent_subclass}, "
+            f"organic_solvent_type={pdf_sol.organic_solvent_type}, "
+            f"water_content_wt_pct={float(pdf_sol.water_content_wt_pct):.2f}"
             + (
                 f", calibration_mode={cal_meta['calibration_mode']}, lab_project={cal_meta['lab_project'] or 'None'}"
                 if cal_meta["is_ml"] and cal_meta["calibration_mode"] != "literature_only"
@@ -1649,9 +1606,9 @@ def export_report_html(
     <strong>Confidence Tier:</strong> {html.escape(single_payload.confidence_tier)}<br/>
     <strong>Primary Metal:</strong> {html.escape(req.primary_metal)} |
     <strong>Secondary Metal:</strong> {html.escape(req.secondary_metal or 'None')} (Area Ratio: {req.cathode_to_anode_area_ratio:g}) |
-    <strong>Solution:</strong> {html.escape(req.oxidizer_type)} ({req.oxidizer_concentration:g}), {html.escape(req.acid_type)} ({req.acid_concentration:g}), {html.escape(req.inhibitor_type)} ({req.inhibitor_concentration:g}) |
-    <strong>Solvent System:</strong> <code>solvent_regime={html.escape(str(req.solvent_regime))}</code>, <code>solvent_subclass={html.escape(str(req.solvent_subclass))}</code>, <code>organic_solvent_type={html.escape(str(req.organic_solvent_type))}</code>, <code>water_content_wt_pct={float(req.water_content_wt_pct):.2f} wt%</code><br/>
-    <strong>pH:</strong> {req.pH:.2f} | <strong>Temp:</strong> {req.temperature_C:.1f} °C | <strong>Immersion Time:</strong> {req.immersion_time_s:.1f} s | <strong>d_crit:</strong> {req.d_crit_nm:.2f} nm{cal_meta_html}
+    <strong>Solution:</strong> {html.escape(req.recipe.solution.oxidizer_type)} ({req.recipe.solution.oxidizer_concentration:g}), {html.escape(req.recipe.solution.acid_type)} ({req.recipe.solution.acid_concentration:g}), {html.escape(req.recipe.solution.inhibitor_type)} ({req.recipe.solution.inhibitor_concentration:g}) |
+    <strong>Solvent System:</strong> <code>solvent_regime={html.escape(str(req.recipe.solution.solvent_regime))}</code>, <code>solvent_subclass={html.escape(str(req.recipe.solution.solvent_subclass))}</code>, <code>organic_solvent_type={html.escape(str(req.recipe.solution.organic_solvent_type))}</code>, <code>water_content_wt_pct={float(req.recipe.solution.water_content_wt_pct):.2f} wt%</code><br/>
+    <strong>pH:</strong> {req.recipe.solution.pH:.2f} | <strong>Temp:</strong> {req.recipe.temperature_C:.1f} °C | <strong>Immersion Time:</strong> {req.recipe.immersion_time_s:.1f} s | <strong>d_crit:</strong> {req.d_crit_nm:.2f} nm{cal_meta_html}
   </div>
 
   <section>

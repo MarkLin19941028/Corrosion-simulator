@@ -219,7 +219,7 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
                     )
 
     def test_removed_model_families_raise_value_error(self) -> None:
-        from corrosion_simulator.ml_predictor import SUPPORTED_MODEL_FAMILIES, _UncertainTargetModel
+        from corrosion_simulator.ml_predictor import SUPPORTED_MODEL_FAMILIES
 
         self.assertEqual(
             SUPPORTED_MODEL_FAMILIES,
@@ -228,8 +228,6 @@ class TestHybridMLPredictorAndCrossValidation(unittest.TestCase):
         for legacy in ("extra_trees", "gradient_boosting", "gaussian_process"):
             with self.assertRaises(ValueError):
                 HybridMLPredictor(model_family=legacy)  # type: ignore[arg-type]
-            with self.assertRaises(ValueError):
-                _UncertainTargetModel(model_family=legacy)  # type: ignore[arg-type]
 
     def test_cross_validation_reports_mae_rmse_r2_and_mape_for_all_targets(self) -> None:
         predictor = HybridMLPredictor(

@@ -1,35 +1,35 @@
 {
   "schema_version": 3,
-  "built_at_utc": "2026-11-27T16:35:52.150875+00:00",
+  "built_at_utc": "2026-11-28T08:56:58.676534+00:00",
   "raw_fingerprint": {
     "raw_dir": "/Users/mark/Documents/python/Corrosion simulator/data/raw",
-    "combined_sha256": "86ae5e82fe580f8927ef4a548dbe274531b230c9ac19eda39b819cadd8b4eb66",
+    "combined_sha256": "dcafca0b4493c0d85f16806e6e64116c80527fa5277404b672d8b72741f39c03",
     "file_count": 3,
     "files": {
       "material_properties.csv": {
-        "sha256": "d36447c4a7a5320990fa60734b1aeeb201754491be1a33791c8b538c0602bdcd",
-        "size_bytes": 2401
+        "sha256": "42253384e2597ab238881ecdc2b669f38dbbd0ce04e10a602f999e16b78522d9",
+        "size_bytes": 2402
       },
       "ml_training_dataset.csv": {
-        "sha256": "c6ed41ef8f9444e979f7a77d1b27b33ad4ef64526633325af3f73f033205f9f3",
-        "size_bytes": 25510665
+        "sha256": "9896531d1077a3b7870af469f237907f84328fcfe88e8843bf1122f18bb92d92",
+        "size_bytes": 25803786
       },
       "solution_properties.csv": {
-        "sha256": "346d3d11a420ff2ff587fba8678d23b57fa68c9e3712fc24742b103c1d683960",
-        "size_bytes": 1027513
+        "sha256": "6ba08eed2e39cc18a2b76625f165e677b7cabe1c3e7f2ffefaf999543d290e76",
+        "size_bytes": 1048844
       }
     }
   },
   "filter_to_core_metals": false,
   "supplement_missing_core_metals": false,
-  "n_records": 4320,
-  "n_complete_pairs": 4320,
-  "n_partial_records": 3738,
-  "n_derived_icorr_cr": 184,
-  "n_derived_icorr_rp": 173,
-  "n_rejected": 507,
-  "n_solutions": 1757,
-  "n_materials": 21,
+  "n_records": 4519,
+  "n_complete_pairs": 4519,
+  "n_partial_records": 3681,
+  "n_derived_icorr_cr": 189,
+  "n_derived_icorr_rp": 172,
+  "n_rejected": 429,
+  "n_solutions": 1800,
+  "n_materials": 22,
   "available_metals": [
     "Cu",
     "Co",
@@ -51,6 +51,7 @@
     "Pt",
     "Au",
     "Pd",
+    "TaN",
     "WN"
   ],
   "core_metals_present": [
@@ -76,29 +77,31 @@
     "Pt",
     "Au",
     "Pd",
+    "TaN",
     "WN"
   ],
   "metal_sample_counts": {
-    "Cu": 958,
-    "Ti": 884,
-    "Fe": 671,
-    "Al": 588,
-    "W": 240,
-    "Co": 196,
-    "Ni": 142,
-    "Zn": 106,
-    "Mo": 101,
-    "Mg": 99,
-    "Cr": 86,
+    "Cu": 1034,
+    "Ti": 925,
+    "Fe": 672,
+    "Al": 605,
+    "W": 245,
+    "Co": 213,
+    "Ni": 144,
+    "Zn": 116,
+    "Mg": 107,
+    "Mo": 106,
+    "Cr": 87,
     "Mn": 84,
-    "TiN": 55,
-    "Ta": 39,
-    "Ag": 28,
+    "TiN": 58,
+    "Ta": 46,
+    "Ag": 31,
     "Sn": 15,
     "Ru": 15,
     "Pt": 5,
     "Pd": 3,
     "Au": 3,
+    "TaN": 3,
     "WN": 2
   },
   "missing_faraday_materials": [],
@@ -114,35 +117,35 @@
     "random_forest": {
       "path": "models/random_forest.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 6449,
-        "log10_icorr_uA_cm2": 5929,
-        "beta_a_mV_dec": 1946,
-        "beta_c_mV_dec": 1853
+        "Ecorr_V_SHE": 6807,
+        "log10_icorr_uA_cm2": 5912,
+        "beta_a_mV_dec": 1947,
+        "beta_c_mV_dec": 1843
       },
       "gp_subsampled": false
     },
     "hist_gradient_boosting": {
       "path": "models/hist_gradient_boosting.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 6449,
-        "log10_icorr_uA_cm2": 5929,
-        "beta_a_mV_dec": 1946,
-        "beta_c_mV_dec": 1853
+        "Ecorr_V_SHE": 6807,
+        "log10_icorr_uA_cm2": 5912,
+        "beta_a_mV_dec": 1947,
+        "beta_c_mV_dec": 1843
       },
       "gp_subsampled": false
     },
     "rf_gp_ensemble": {
       "path": "models/rf_gp_ensemble.joblib",
       "target_training_counts": {
-        "Ecorr_V_SHE": 6449,
-        "log10_icorr_uA_cm2": 5929,
-        "beta_a_mV_dec": 1946,
-        "beta_c_mV_dec": 1853
+        "Ecorr_V_SHE": 6807,
+        "log10_icorr_uA_cm2": 5912,
+        "beta_a_mV_dec": 1947,
+        "beta_c_mV_dec": 1843
       },
       "gp_subsampled": false
     }
   },
   "warnings": [
-    "Quarantined 507 invalid/incomplete raw record(s) to rejected_rows.csv."
+    "Quarantined 429 invalid/incomplete raw record(s) to rejected_rows.csv."
   ]
 }

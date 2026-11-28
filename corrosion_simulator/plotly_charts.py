@@ -18,7 +18,7 @@ from corrosion_simulator.kinetics import (
     MonteCarloKineticsResult,
     TimeResolvedKineticsResult,
 )
-from corrosion_simulator.ml_predictor import MonteCarloPropagationResult
+from corrosion_simulator.uncertainty import MonteCarloPropagationResult
 from corrosion_simulator.physics import (
     PolarizationCurve,
     generate_polarization_curve,

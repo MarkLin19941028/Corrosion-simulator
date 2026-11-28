@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from corrosion_simulator.galvanic import GalvanicCouplingResult, MonteCarloGalvanicResult
-from corrosion_simulator.ml_predictor import MonteCarloPropagationResult
+from corrosion_simulator.uncertainty import MonteCarloPropagationResult
 from corrosion_simulator.physics import SECONDS_PER_MINUTE, FaradayCorrosionResult
 from corrosion_simulator.seed_data import SEED_MATERIAL_PROPERTIES
 

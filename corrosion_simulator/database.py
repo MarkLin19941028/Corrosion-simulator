@@ -253,6 +253,7 @@ REFERENCE_ELECTRODE_OFFSETS_V_SHE: Final[dict[str, float]] = {
     "ag/agcl (1m kcl)": 0.235,
     "sce": 0.241,
     "saturated calomel electrode": 0.241,
+    "hg/hg2cl2": 0.241,
     "mse": 0.640,
     "hg/hg2so4": 0.640,
     "mercurous sulfate": 0.640,
@@ -340,12 +341,14 @@ def convert_potential_to_she(
 
     if "ag/agcl" in ref_norm or "agcl" in ref_norm:
         return val_v + REFERENCE_ELECTRODE_OFFSETS_V_SHE["ag/agcl"]
-    if "sce" in ref_norm or "calomel" in ref_norm:
+    if "sce" in ref_norm or "calomel" in ref_norm or "hg2cl2" in ref_norm:
         return val_v + REFERENCE_ELECTRODE_OFFSETS_V_SHE["sce"]
     if "mse" in ref_norm or "hg2so4" in ref_norm:
         return val_v + REFERENCE_ELECTRODE_OFFSETS_V_SHE["mse"]
     if "hg/hgo" in ref_norm or "hgo" in ref_norm:
         return val_v + REFERENCE_ELECTRODE_OFFSETS_V_SHE["hg/hgo"]
+    if "cu/cuso4" in ref_norm or "cuso4" in ref_norm or ref_norm == "cse":
+        return val_v + REFERENCE_ELECTRODE_OFFSETS_V_SHE["cu/cuso4"]
     if "she" in ref_norm or "nhe" in ref_norm:
         return val_v
 

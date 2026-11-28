@@ -11,12 +11,13 @@ import plotly.graph_objects as go
 
 from corrosion_simulator.database import HarmonizedDatabase
 from corrosion_simulator.ml_predictor import HybridMLPredictor
+from corrosion_simulator.solution import CleaningRecipe, Solution
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     SimulationRequest,
 )
 from corrosion_simulator.reporting import (
-    CleaningRecipeSpec,
+    RecipeCandidate,
     RecipeComparisonPayload,
     compare_cleaning_recipes,
     export_report_csv,
@@ -37,40 +38,11 @@ class TestRecipeComparison(unittest.TestCase):
         cls.predictor.fit(cls.db)
         cls.controller = CorrosionPlatformController(cls.db, cls.predictor)
 
-    def _sample_recipes(self) -> list[CleaningRecipeSpec]:
+    def _sample_recipes(self) -> list[RecipeCandidate]:
         return [
-            CleaningRecipeSpec(
-                name="Aggressive High-H2O2 5min",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=5.0,
-                acid_type="Citric acid",
-                acid_concentration=1.0,
-                pH=3.0,
-                temperature_C=45.0,
-                immersion_time_s=600.0,
-            ),
-            CleaningRecipeSpec(
-                name="Mild Short Rinse 30s",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=0.5,
-                acid_type="Citric acid",
-                acid_concentration=0.5,
-                inhibitor_type="BTA",
-                inhibitor_concentration=1.0,
-                pH=5.0,
-                temperature_C=25.0,
-                immersion_time_s=30.0,
-            ),
-            CleaningRecipeSpec(
-                name="Baseline Process 180s",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                acid_type="Citric acid",
-                acid_concentration=1.0,
-                pH=3.5,
-                temperature_C=25.0,
-                immersion_time_s=180.0,
-            ),
+            RecipeCandidate(name="Aggressive High-H2O2 5min", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=5.0, acid_type="Citric acid", acid_concentration=1.0, pH=3.0), temperature_C=45.0, immersion_time_s=600.0)),
+            RecipeCandidate(name="Mild Short Rinse 30s", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=0.5, acid_type="Citric acid", acid_concentration=0.5, inhibitor_type="BTA", inhibitor_concentration=1.0, pH=5.0), temperature_C=25.0, immersion_time_s=30.0)),
+            RecipeCandidate(name="Baseline Process 180s", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, acid_type="Citric acid", acid_concentration=1.0, pH=3.5), temperature_C=25.0, immersion_time_s=180.0)),
         ]
 
     def test_compare_recipes_enforces_2_to_5_bounds(self) -> None:
@@ -79,7 +51,7 @@ class TestRecipeComparison(unittest.TestCase):
         with self.assertRaises(ValueError):
             compare_cleaning_recipes(self.controller, base_req, recipes[:1])
         too_many = [
-            CleaningRecipeSpec(name=f"R{i}", pH=3.0 + i * 0.5, temperature_C=25.0, immersion_time_s=60.0)
+            RecipeCandidate(name=f"R{i}", recipe=CleaningRecipe(solution=Solution(pH=3.0 + i * 0.5), temperature_C=25.0, immersion_time_s=60.0))
             for i in range(6)
         ]
         with self.assertRaises(ValueError):
@@ -102,7 +74,7 @@ class TestRecipeComparison(unittest.TestCase):
         # Entries must be strictly ordered by ascending risk_score (tie-broken by depth, CR0)
         risk_scores = [e.risk_score for e in result.entries]
         self.assertEqual(risk_scores, sorted(risk_scores))
-        self.assertEqual(result.recommended_recipe, result.entries[0].recipe.name)
+        self.assertEqual(result.recommended_recipe, result.entries[0].candidate.name)
         self.assertIn(result.recommended_recipe, result.recommended_rationale)
 
         # Table and Plotly bar (includes Time to Threshold) + radar figures
@@ -142,41 +114,9 @@ class TestRecipeComparison(unittest.TestCase):
             mc_draws=80,
         )
         cross_recipes = [
-            CleaningRecipeSpec(
-                name="Aqueous Citric Clean",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                acid_type="Citric acid",
-                acid_concentration=1.0,
-                pH=3.5,
-                temperature_C=25.0,
-                immersion_time_s=180.0,
-                solvent_regime="aqueous",
-                organic_solvent_type="None",
-                water_content_wt_pct=100.0,
-            ),
-            CleaningRecipeSpec(
-                name="Semi-Aqueous EG Clean",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=0.5,
-                pH=5.5,
-                temperature_C=35.0,
-                immersion_time_s=180.0,
-                solvent_regime="semi_aqueous",
-                organic_solvent_type="EG",
-                water_content_wt_pct=40.0,
-            ),
-            CleaningRecipeSpec(
-                name="Non-Aqueous DMSO Strip",
-                oxidizer_type="None",
-                oxidizer_concentration=0.0,
-                pH=7.0,
-                temperature_C=45.0,
-                immersion_time_s=180.0,
-                solvent_regime="non_aqueous",
-                organic_solvent_type="DMSO",
-                water_content_wt_pct=0.2,
-            ),
+            RecipeCandidate(name="Aqueous Citric Clean", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, acid_type="Citric acid", acid_concentration=1.0, pH=3.5, solvent_regime="aqueous", organic_solvent_type="None", water_content_wt_pct=100.0), temperature_C=25.0, immersion_time_s=180.0)),
+            RecipeCandidate(name="Semi-Aqueous EG Clean", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=0.5, pH=5.5, solvent_regime="semi_aqueous", organic_solvent_type="EG", water_content_wt_pct=40.0), temperature_C=35.0, immersion_time_s=180.0)),
+            RecipeCandidate(name="Non-Aqueous DMSO Strip", recipe=CleaningRecipe(solution=Solution(oxidizer_type="None", oxidizer_concentration=0.0, pH=7.0, solvent_regime="non_aqueous", organic_solvent_type="DMSO", water_content_wt_pct=0.2), temperature_C=45.0, immersion_time_s=180.0)),
         ]
         result = compare_cleaning_recipes(self.controller, base_req, cross_recipes)
         for col in ("Solvent Regime", "Solvent Subclass", "Co-Solvent", "Water (wt%)"):
@@ -204,28 +144,15 @@ class TestMultiFormatReportExport(unittest.TestCase):
         cls.predictor.fit(cls.db)
         cls.controller = CorrosionPlatformController(cls.db, cls.predictor)
 
-        cls.req = SimulationRequest(
-            primary_metal="Cu",
-            secondary_metal="Co",
-            cathode_to_anode_area_ratio=1.5,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            pH=3.0,
-            temperature_C=25.0,
-            immersion_time_s=300.0,
-            d_crit_nm=1.0,
-            kinetics_model="auto",
-            parameter_source="ml",
-            mc_draws=100,
-        )
+        cls.req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", cathode_to_anode_area_ratio=1.5, d_crit_nm=1.0, kinetics_model="auto", parameter_source="ml", mc_draws=100, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=3.0), temperature_C=25.0, immersion_time_s=300.0))
         cls.single_payload = cls.controller.run_single_metal_analysis(cls.req)
         cls.galvanic_payload = cls.controller.run_galvanic_analysis(cls.req)
         cls.comparison_payload = compare_cleaning_recipes(
             cls.controller,
             cls.req,
             [
-                CleaningRecipeSpec(name="Recipe A", oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=3.0, temperature_C=25.0, immersion_time_s=60.0),
-                CleaningRecipeSpec(name="Recipe B", oxidizer_type="H2O2", oxidizer_concentration=3.0, pH=2.5, temperature_C=40.0, immersion_time_s=300.0),
+                RecipeCandidate(name="Recipe A", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=3.0), temperature_C=25.0, immersion_time_s=60.0)),
+                RecipeCandidate(name="Recipe B", recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=3.0, pH=2.5), temperature_C=40.0, immersion_time_s=300.0)),
             ],
         )
 
@@ -337,45 +264,15 @@ class TestMultiFormatReportExport(unittest.TestCase):
         import re
         import zlib
 
-        semi_req = SimulationRequest(
-            primary_metal="Cu",
-            secondary_metal="Co",
-            cathode_to_anode_area_ratio=1.0,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            pH=4.5,
-            temperature_C=30.0,
-            solvent_regime="semi_aqueous",
-            organic_solvent_type="EG",
-            water_content_wt_pct=45.0,
-            immersion_time_s=180.0,
-            parameter_source="ml",
-            mc_draws=80,
-        )
+        semi_req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", cathode_to_anode_area_ratio=1.0, parameter_source="ml", mc_draws=80, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=4.5, solvent_regime="semi_aqueous", organic_solvent_type="EG", water_content_wt_pct=45.0), temperature_C=30.0, immersion_time_s=180.0))
         single_payload = self.controller.run_single_metal_analysis(semi_req)
         galvanic_payload = self.controller.run_galvanic_analysis(semi_req)
         comparison_payload = compare_cleaning_recipes(
             self.controller,
             semi_req,
             [
-                CleaningRecipeSpec(
-                    name="Semi-Aqueous EG",
-                    solvent_regime="semi_aqueous",
-                    organic_solvent_type="EG",
-                    water_content_wt_pct=45.0,
-                    pH=4.5,
-                    temperature_C=30.0,
-                    immersion_time_s=180.0,
-                ),
-                CleaningRecipeSpec(
-                    name="Non-Aqueous DMSO",
-                    solvent_regime="non_aqueous",
-                    organic_solvent_type="DMSO",
-                    water_content_wt_pct=0.5,
-                    pH=7.0,
-                    temperature_C=30.0,
-                    immersion_time_s=180.0,
-                ),
+                RecipeCandidate(name="Semi-Aqueous EG", recipe=CleaningRecipe(solution=Solution(solvent_regime="semi_aqueous", organic_solvent_type="EG", water_content_wt_pct=45.0, pH=4.5), temperature_C=30.0, immersion_time_s=180.0)),
+                RecipeCandidate(name="Non-Aqueous DMSO", recipe=CleaningRecipe(solution=Solution(solvent_regime="non_aqueous", organic_solvent_type="DMSO", water_content_wt_pct=0.5, pH=7.0), temperature_C=30.0, immersion_time_s=180.0)),
             ],
         )
 
@@ -495,21 +392,7 @@ class TestMultiFormatReportExport(unittest.TestCase):
                 model_family="random_forest",
                 auto_rebuild=False,
             )
-            req = SimulationRequest(
-                primary_metal="Cu",
-                secondary_metal="Co",
-                oxidizer_type="H2O2",
-                oxidizer_concentration=1.0,
-                pH=5.0,
-                temperature_C=30.0,
-                solvent_regime="semi_aqueous",
-                organic_solvent_type="EG",
-                water_content_wt_pct=50.0,
-                parameter_source="ml",
-                calibration_mode="delta_learning",
-                lab_project="pilot_eg",
-                mc_draws=80,
-            )
+            req = SimulationRequest(primary_metal="Cu", secondary_metal="Co", parameter_source="ml", calibration_mode="delta_learning", lab_project="pilot_eg", mc_draws=80, recipe=CleaningRecipe(solution=Solution(oxidizer_type="H2O2", oxidizer_concentration=1.0, pH=5.0, solvent_regime="semi_aqueous", organic_solvent_type="EG", water_content_wt_pct=50.0), temperature_C=30.0))
             single_p = ctrl.run_single_metal_analysis(req)
             galv_p = ctrl.run_galvanic_analysis(req)
             exports = generate_all_report_exports(single_p, galvanic_payload=galv_p)

@@ -26,12 +26,13 @@ from corrosion_simulator.physics import (
     calculate_faraday_corrosion_rate,
     has_faraday_properties,
 )
+from corrosion_simulator.solution import CleaningRecipe, Solution
 from corrosion_simulator.platform_controller import (
     CorrosionPlatformController,
     SimulationRequest,
 )
 from corrosion_simulator.reporting import (
-    CleaningRecipeSpec,
+    RecipeCandidate,
     compare_cleaning_recipes,
     generate_all_report_exports,
 )
@@ -128,14 +129,7 @@ class TestDataDrivenMaterialCatalog(unittest.TestCase):
 
         # Controller degrades gracefully for MysteryAlloyX (returns polarization curve, NaN rate, warning)
         controller = CorrosionPlatformController(db)
-        req = SimulationRequest(
-            primary_metal="MysteryAlloyX",
-            pH=4.0,
-            temperature_C=25.0,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            parameter_source="database",
-        )
+        req = SimulationRequest(primary_metal="MysteryAlloyX", parameter_source="database", recipe=CleaningRecipe(solution=Solution(pH=4.0, oxidizer_type="H2O2", oxidizer_concentration=1.0), temperature_C=25.0))
         payload = controller.run_single_metal_analysis(req)
         self.assertIsNone(payload.faraday_result)
         self.assertTrue(math.isnan(payload.initial_corrosion_rate_nm_min))
@@ -143,39 +137,15 @@ class TestDataDrivenMaterialCatalog(unittest.TestCase):
         self.assertTrue(any("Missing physical properties" in w for w in payload.warnings))
 
         # Galvanic analysis also degrades gracefully when Active Metal lacks Faraday properties
-        galv_req = SimulationRequest(
-            primary_metal="MysteryAlloyX",
-            secondary_metal="CoWP",
-            pH=4.0,
-            temperature_C=25.0,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            parameter_source="database",
-        )
+        galv_req = SimulationRequest(primary_metal="MysteryAlloyX", secondary_metal="CoWP", parameter_source="database", recipe=CleaningRecipe(solution=Solution(pH=4.0, oxidizer_type="H2O2", oxidizer_concentration=1.0), temperature_C=25.0))
         # Force MysteryAlloyX to be the active metal via manual override with lower Ecorr
-        galv_req_manual = SimulationRequest(
-            primary_metal="MysteryAlloyX",
-            secondary_metal="CoWP",
-            pH=4.0,
-            temperature_C=25.0,
-            oxidizer_type="H2O2",
-            oxidizer_concentration=1.0,
-            parameter_source="manual",
-        )
+        galv_req_manual = SimulationRequest(primary_metal="MysteryAlloyX", secondary_metal="CoWP", parameter_source="manual", recipe=CleaningRecipe(solution=Solution(pH=4.0, oxidizer_type="H2O2", oxidizer_concentration=1.0), temperature_C=25.0))
         # Use database lookup directly where CoWP (-0.15) is active and MysteryAlloyX (+0.12) is noble,
         # and also test when MysteryAlloyX is active (Ecorr = -0.30 vs CoWP -0.15)
         from corrosion_simulator.platform_controller import ManualElectrochemicalInput
 
         galv_degraded = controller.run_galvanic_analysis(
-            SimulationRequest(
-                primary_metal="MysteryAlloyX",
-                secondary_metal="CoWP",
-                pH=4.0,
-                temperature_C=25.0,
-                parameter_source="manual",
-                manual_primary=ManualElectrochemicalInput(-0.30, 5.0, 60.0, 120.0),
-                manual_secondary=ManualElectrochemicalInput(0.10, 2.0, 60.0, 120.0),
-            )
+            SimulationRequest(primary_metal="MysteryAlloyX", secondary_metal="CoWP", parameter_source="manual", manual_primary=ManualElectrochemicalInput(-0.30, 5.0, 60.0, 120.0), manual_secondary=ManualElectrochemicalInput(0.10, 2.0, 60.0, 120.0), recipe=CleaningRecipe(solution=Solution(pH=4.0), temperature_C=25.0))
         )
         self.assertEqual(galv_degraded.active_metal, "MysteryAlloyX")
         self.assertIsNone(galv_degraded.coupled_kinetics)
@@ -186,8 +156,8 @@ class TestDataDrivenMaterialCatalog(unittest.TestCase):
 
         # Recipe comparison and all 6 report export formats must succeed cleanly on degraded payloads
         recipes = [
-            CleaningRecipeSpec(name="Recipe A", pH=4.0, temperature_C=25.0, immersion_time_s=300.0),
-            CleaningRecipeSpec(name="Recipe B", pH=5.0, temperature_C=30.0, immersion_time_s=300.0),
+            RecipeCandidate(name="Recipe A", recipe=CleaningRecipe(solution=Solution(pH=4.0), temperature_C=25.0, immersion_time_s=300.0)),
+            RecipeCandidate(name="Recipe B", recipe=CleaningRecipe(solution=Solution(pH=5.0), temperature_C=30.0, immersion_time_s=300.0)),
         ]
         comparison = compare_cleaning_recipes(controller, req, recipes)
         self.assertEqual(len(comparison.entries), 2)
